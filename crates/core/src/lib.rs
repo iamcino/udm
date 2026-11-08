@@ -31,6 +31,7 @@
 //! | [`error`]      | one error type for the whole engine                        |
 //! | [`finalize`]   | durable rename transactions (finalize intent)              |
 //! | [`hash`]       | MD5/SHA-1/SHA-256/SHA-512/BLAKE3 verification              |
+//! | [`handoff`]    | browser-handoff coordinator (G5)                           |
 //! | [`net`]        | HTTP/3 (quinn+h3) and HTTP/1.1-2 (reqwest) transports      |
 //! | [`paths`]      | privilege-free filesystem locations                        |
 //! | [`store`]      | redb schema, records, Alt-Svc cache                        |
@@ -43,6 +44,7 @@ pub(crate) mod finalize;
 pub mod engine;
 pub mod error;
 pub mod hash;
+pub mod handoff;
 pub mod net;
 pub mod paths;
 pub mod store;

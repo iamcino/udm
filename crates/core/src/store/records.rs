@@ -347,6 +347,14 @@ pub struct TaskRecord {
     #[serde(default)]
     pub representation_bound: Option<RepresentationBound>,
 
+    /// Browser-handoff transaction that created this task (G5). Missing
+    /// on every row written before G5, which deserializes as none. The
+    /// marker is written in the same durable `put_task` that creates
+    /// the task, so the handoff coordinator can recover the commit/task
+    /// association after a crash (freeze section 5).
+    #[serde(default)]
+    pub handoff_tx: Option<String>,
+
     /// Transport that is currently/last delivering bytes.
     pub transport: Option<TransportKind>,
     /// Per-task transport override.
@@ -395,6 +403,7 @@ impl TaskRecord {
             attempts: 0,
             representation_restarts: 0,
             representation_bound: None,
+            handoff_tx: None,
             transport: None,
             transport_pref: TransportPref::Auto,
             note: String::new(),

@@ -144,6 +144,9 @@ pub struct AddRequest {
     /// Add to the list without starting.
     pub start_paused: bool,
     pub note: String,
+    /// Browser-handoff transaction creating this task (G5); written
+    /// into the durable record in the same store write as the task.
+    pub handoff_tx: Option<String>,
 }
 
 impl AddRequest {
@@ -157,6 +160,7 @@ impl AddRequest {
             transport_pref: None,
             start_paused: false,
             note: String::new(),
+            handoff_tx: None,
         }
     }
 
@@ -192,6 +196,11 @@ impl AddRequest {
 
     pub fn note(mut self, note: impl Into<String>) -> Self {
         self.note = note.into();
+        self
+    }
+
+    pub fn handoff_tx(mut self, tx: impl Into<String>) -> Self {
+        self.handoff_tx = Some(tx.into());
         self
     }
 }
@@ -1304,6 +1313,17 @@ impl Engine {
         self.state.cell(id).map(|c| c.snapshot())
     }
 
+    /// The task created for a browser-handoff transaction, if any
+    /// (G5). Reads the durable store, not an in-memory cache: this is
+    /// the handoff coordinator's crash-recovery evidence.
+    pub fn task_by_handoff(&self, tx: &str) -> Option<u64> {
+        let tasks = self.store.list_tasks().ok()?;
+        tasks
+            .iter()
+            .find(|t| t.record.handoff_tx.as_deref() == Some(tx))
+            .map(|t| t.record.id)
+    }
+
     // ------------------------------------------------------------ mutations
 
     /// Enqueue a download. Returns the new task id.
@@ -1349,6 +1369,7 @@ impl Engine {
         record.expected_hash = request.expected_hash.clone();
         record.transport_pref = request.transport_pref.unwrap_or(settings.transport_pref);
         record.note = request.note.clone();
+        record.handoff_tx = request.handoff_tx.clone();
         record.segments_planned = request.segments.unwrap_or(settings.segments_per_task);
         record.state = if request.start_paused {
             TaskState::Paused
