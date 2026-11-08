@@ -1,0 +1,124 @@
+// cino-ui: sidebar navigation and scrolling pages.
+
+import { Theme } from "theme.slint";
+import { Icon, IconData } from "icons.slint";
+import { ScrollBar } from "widgets.slint";
+
+// Full-height sidebar. Its empty areas drag a frameless window (`drag`).
+// Put SidebarItems inside; an empty `Rectangle { }` pushes what follows to
+// the bottom.
+export component Sidebar inherits Rectangle {
+    callback drag();
+    width: 220px;
+    background: Theme.sidebar-bg;
+    TouchArea {
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                root.drag();
+            }
+        }
+    }
+    VerticalLayout {
+        padding: 12px;
+        padding-top: 14px;
+        spacing: 4px;
+        @children
+    }
+}
+
+// The app's name and mark at the top of the sidebar; clicking it usually
+// opens the home page. Put the logo (e.g. AccentLogo) inside.
+export component SidebarBrand {
+    in property <string> text;
+    in property <bool> selected;
+    callback clicked();
+    height: 44px;
+    Rectangle {
+        border-radius: Theme.r-control;
+        background: root.selected ? Theme.sidebar-sel : ta.has-hover ? Theme.separator : transparent;
+    }
+    HorizontalLayout {
+        padding-left: 8px;
+        spacing: 10px;
+        VerticalLayout {
+            alignment: center;
+            @children
+        }
+        Text {
+            text: root.text;
+            font-size: Theme.fs-title;
+            font-weight: 700;
+            color: Theme.label;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+    }
+    ta := TouchArea { clicked => { root.clicked(); } }
+}
+
+// Sidebar entry. The icon sits in a fixed 18px box so every label starts at
+// the same x, whatever the glyph. Selected: accent icon, bold label.
+export component SidebarItem {
+    in property <string> text;
+    in property <IconData> icon;
+    in property <bool> selected;
+    callback clicked();
+    height: 36px;
+    accessible-role: button;
+    accessible-label: root.text;
+    Rectangle {
+        background: root.selected ? Theme.sidebar-sel : ta.has-hover ? Theme.separator : transparent;
+        border-radius: Theme.r-control;
+        animate background { duration: 100ms; }
+        HorizontalLayout {
+            padding-left: 12px;
+            padding-right: 12px;
+            spacing: 10px;
+            VerticalLayout {
+                alignment: center;
+                Icon {
+                    icon: root.icon;
+                    color: root.selected ? Theme.accent : Theme.label2;
+                }
+            }
+            Text {
+                text: root.text;
+                font-size: Theme.fs-body;
+                font-weight: root.selected ? 600 : 400;
+                vertical-alignment: center;
+                color: Theme.label;
+                horizontal-stretch: 1;
+            }
+        }
+        ta := TouchArea { clicked => { root.clicked(); } }
+    }
+}
+
+// One settings page that scrolls on its own, with the thin overlay scrollbar.
+// Show pages with `if root.page == N: Page { ... }` inside a plain
+// Rectangle; a Page fills its parent. Each page gets its own
+// Flickable because a layout inside an `if` would not follow the width, so
+// wrapped rows would be cut off at the bottom of the scroll range.
+export component Page {
+    width: 100%;
+    height: 100%;
+    content := Flickable {
+        width: parent.width;
+        height: parent.height;
+        content-width: self.width;
+        VerticalLayout {
+            padding: 24px;
+            spacing: 18px;
+            alignment: start;
+            @children
+        }
+    }
+    ScrollBar {
+        x: parent.width - self.width - 4px;
+        y: 6px;
+        height: parent.height - 12px;
+        viewport-y <=> content.content-y;
+        viewport-height: content.content-height;
+        visible-height: content.height;
+    }
+}

@@ -1,0 +1,196 @@
+import { AppearanceGroup, TextField } from "@cino-ui";
+import { I18n } from "../i18n.slint";
+// Settings form. Values live in window properties; "Save" pushes them to the
+// engine, which persists them into the redb file.
+
+import { Theme } from "../theme.slint";
+import { ActionButton, SectionTitle } from "../widgets.slint";
+import { LineEdit, CheckBox, SpinBox, ComboBox, ScrollView } from "std-widgets.slint";
+
+export component SettingsView inherits Rectangle {
+    in-out property <string> download-dir;
+    in-out property <int> max-tasks;
+    in-out property <int> segments;
+    in-out property <int> transport-index;
+    in-out property <int> conflict-index;
+    in-out property <bool> http3;
+    in-out property <bool> proxy;
+    in-out property <bool> verify;
+    in-out property <bool> auto-categorize;
+    in-out property <string> user-agent;
+    in-out property <int> log-index;
+    callback pick-dir;
+    callback saved;
+    callback reset;
+    in-out property <int> theme-index;
+    in-out property <int> accent-index;
+    in-out property <int> language-index;
+    callback appearance-changed;
+
+    width: 100%;
+    height: 100%;
+    vertical-stretch: 1;
+    background: transparent;
+
+    VerticalLayout {
+        width: 100%;
+        height: 100%;
+        vertical-stretch: 1;
+        padding: Theme.pad;
+        spacing: 14px;
+
+        ScrollView {
+            vertical-stretch: 1;
+            HorizontalLayout {
+                alignment: start;
+                VerticalLayout {
+                    width: min(root.width - 48px, 580px);
+                    spacing: 14px;
+                    padding-right: 6px;
+
+                    AppearanceGroup {
+                        accents: Theme.accents;
+                        dark-changed(on) => { root.theme-index = on ? 0 : 1; root.appearance-changed(); }
+                        accent-picked(c) => {
+                            root.accent-index = c == Theme.accents[0] ? 0 : c == Theme.accents[1] ? 1
+                                : c == Theme.accents[2] ? 2 : c == Theme.accents[3] ? 3 : 4;
+                            root.appearance-changed();
+                        }
+                        language-changed(english) => { root.language-index = english ? 0 : 1; root.appearance-changed(); }
+                    }
+                    Text { text: I18n.tr("Applied immediately; saved locally."); color: Theme.text-faint; }
+                    SectionTitle { label: I18n.tr("QUEUE"); }
+                    HorizontalLayout {
+                        spacing: 14px;
+                        VerticalLayout {
+                            width: 220px;
+                            spacing: 6px;
+                            Text { text: I18n.tr("Parallel tasks"); color: Theme.text-dim; font-size: 12px; }
+                            HorizontalLayout {
+                                height: 30px;
+                                SpinBox { value <=> root.max-tasks; minimum: 1; maximum: 32; }
+                            }
+                        }
+                        VerticalLayout {
+                            width: 220px;
+                            spacing: 6px;
+                            Text { text: I18n.tr("Connections per task"); color: Theme.text-dim; font-size: 12px; }
+                            HorizontalLayout {
+                                height: 30px;
+                                SpinBox { value <=> root.segments; minimum: 1; maximum: 64; }
+                            }
+                        }
+                    }
+
+                    SectionTitle { label: I18n.tr("DESTINATION"); }
+                    HorizontalLayout {
+                        spacing: 6px;
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            height: 30px;
+                            background: Theme.input-bg;
+                            border-radius: Theme.radius-sm;
+                            border-width: 1px;
+                            border-color: Theme.border;
+                            TextField {
+                                x: 0px;
+                                y: 0px;
+                                width: 100%;
+                                height: 100%;
+                                text <=> root.download-dir;
+                                placeholder: I18n.tr("default (system Downloads folder)");
+                            }
+                        }
+                        ActionButton { label: I18n.tr("Browse..."); clicked => { root.pick-dir(); } }
+                    }
+                    CheckBox {
+                        text: I18n.tr("Sort downloads into category subfolders");
+                        checked <=> root.auto-categorize;
+                    }
+
+                    SectionTitle { label: I18n.tr("TRANSPORT"); }
+                    VerticalLayout {
+                        spacing: 14px;
+                        VerticalLayout {
+                            width: 280px;
+                            spacing: 6px;
+                            Text { text: "HTTP/3 (QUIC)"; color: Theme.text-dim; font-size: 12px; }
+                            ComboBox {
+                                height: 30px;
+                                model: [I18n.tr("Auto - use Alt-Svc advertisements"), I18n.tr("Prefer HTTP/3"), I18n.tr("HTTP/3 only"), I18n.tr("Never HTTP/3")];
+                                current-index <=> root.transport-index;
+                            }
+                        }
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            spacing: 10px;
+                            CheckBox { text: I18n.tr("Enable QUIC / HTTP3"); checked <=> root.http3; }
+                            CheckBox { text: I18n.tr("Use the system proxy for HTTP/1.1-2"); checked <=> root.proxy; }
+                        }
+                    }
+
+                    SectionTitle { label: I18n.tr("INTEGRITY"); }
+                    CheckBox {
+                        text: I18n.tr("Verify checksums before renaming .part files");
+                        checked <=> root.verify;
+                    }
+                    HorizontalLayout {
+                        spacing: 14px;
+                        VerticalLayout {
+                            width: 280px;
+                            spacing: 6px;
+                            Text { text: I18n.tr("Existing destination file"); color: Theme.text-dim; font-size: 12px; }
+                            ComboBox {
+                                height: 30px;
+                                model: [I18n.tr("Rename to a unique name"), I18n.tr("Overwrite"), I18n.tr("Refuse to start")];
+                                current-index <=> root.conflict-index;
+                            }
+                        }
+                    }
+
+                    SectionTitle { label: I18n.tr("IDENTITY & LOGGING"); }
+                    VerticalLayout {
+                        spacing: 6px;
+                        Text { text: I18n.tr("User-Agent header"); color: Theme.text-dim; font-size: 12px; }
+                        Rectangle {
+                            height: 30px;
+                            background: Theme.input-bg;
+                            border-radius: Theme.radius-sm;
+                            border-width: 1px;
+                            border-color: Theme.border;
+                            TextField { x: 0px; y: 0px; width: 100%; height: 100%; text <=> root.user-agent; }
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 14px;
+                        VerticalLayout {
+                            width: 280px;
+                            spacing: 6px;
+                            Text { text: I18n.tr("Local log level"); color: Theme.text-dim; font-size: 12px; }
+                            ComboBox {
+                                height: 30px;
+                                model: ["off", "error", "warn", "info", "debug", "trace"];
+                                current-index <=> root.log-index;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 10px;
+            Text {
+                horizontal-stretch: 1;
+                text: I18n.tr("Settings are stored locally in the redb database. Nothing is ever uploaded.");
+                min-width: 0px;
+                overflow: elide;
+                color: Theme.text-faint;
+                font-size: 11px;
+                vertical-alignment: center;
+            }
+            ActionButton { label: I18n.tr("Restore defaults"); clicked => { root.reset(); } }
+            ActionButton { label: I18n.tr("Save"); primary: true; clicked => { root.saved(); } }
+        }
+    }
+}

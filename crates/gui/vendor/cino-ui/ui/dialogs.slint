@@ -1,0 +1,369 @@
+// cino-ui: themed popups. Never a stock MessageBox or toast: every popup
+// follows Theme (dark/light + accent).
+
+import { Theme } from "theme.slint";
+import { Lang } from "lang.slint";
+import { PillButton, TextField, ScrollBar } from "widgets.slint";
+
+// Modal dialog over the whole window. Place it near the end of the Window so
+// it is on top, and show it with `if root.dialog-open: Dialog { ... }`.
+// Buttons go left to right; the last one is the primary (accent) one, the
+// Windows 11 order. Extra content (a progress line, a checkbox) goes inside.
+export component Dialog inherits Rectangle {
+    in property <string> heading;
+    in property <string> body;
+    in property <string> link;               // optional, e.g. "See what's new"
+    in property <[string]> buttons: ["OK"];
+    in property <bool> busy: false;          // disables the buttons (e.g. downloading)
+    in property <length> card-width: 380px;
+    callback answered(int);                  // index into buttons
+    callback link-clicked();
+
+    width: 100%;
+    height: 100%;
+    background: Theme.scrim;
+    TouchArea { }                            // swallows clicks behind the card
+
+    Rectangle {
+        width: min(root.card-width, root.width - 48px);
+        height: content.preferred-height;
+        background: Theme.group;
+        border-radius: Theme.r-group;
+        border-width: 1px;
+        border-color: Theme.separator;
+        drop-shadow-blur: 24px;
+        drop-shadow-color: Theme.shadow;
+        drop-shadow-offset-y: 8px;
+        content := VerticalLayout {
+            padding: 20px;
+            spacing: 10px;
+            Text { text: root.heading; font-size: Theme.fs-title; font-weight: 700; color: Theme.label; wrap: word-wrap; }
+            if root.body != "": Text { text: root.body; font-size: Theme.fs-body; color: Theme.label2; wrap: word-wrap; }
+            @children
+            if root.link != "": Text {
+                text: root.link;
+                font-size: Theme.fs-body;
+                color: Theme.accent;
+                TouchArea { mouse-cursor: pointer; clicked => { root.link-clicked(); } }
+            }
+            HorizontalLayout {
+                padding-top: 6px;
+                spacing: 8px;
+                alignment: end;
+                for label[i] in root.buttons: PillButton {
+                    text: label;
+                    primary: i == root.buttons.length - 1;
+                    enabled: !root.busy;
+                    clicked => { root.answered(i); }
+                }
+            }
+        }
+    }
+}
+
+component ListItem {
+    in property <string> text;
+    in property <bool> highlighted;
+    callback remove();
+
+    height: 36px;
+    accessible-role: list-item;
+    accessible-label: root.text;
+
+    Rectangle {
+        border-radius: Theme.r-control;
+        background: root.highlighted ? Theme.accent.with-alpha(0.18)
+            : fs.has-focus ? Theme.sidebar-sel
+            : ta.has-hover ? Theme.sidebar-sel.with-alpha(0.5) : transparent;
+        border-width: fs.has-focus ? 1px : 0px;
+        border-color: Theme.accent;
+    }
+    fs := FocusScope {
+        key-pressed(e) => {
+            if (e.text == Key.Delete || e.text == Key.Backspace) {
+                root.remove();
+                return accept;
+            }
+            reject
+        }
+    }
+    ta := TouchArea {
+        clicked => { fs.focus(); }
+    }
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 4px;
+        spacing: 8px;
+        Text {
+            text: root.text;
+            color: Theme.label;
+            font-size: Theme.fs-body;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 28px;
+                height: 28px;
+                border-radius: Theme.r-control;
+                background: x-ta.has-hover ? Theme.group-alt : transparent;
+                Text {
+                    text: "✕";
+                    color: Theme.label2;
+                    font-size: Theme.fs-sub;
+                }
+                x-ta := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.remove(); }
+                }
+            }
+        }
+    }
+}
+
+// A sheet over the whole window for editing a list of strings (domains,
+// paths, apps...). Enter adds, Delete removes the selected row, Esc closes.
+// Rust validates in `add`: set `error` ("" = accepted) and `highlight` (the
+// new item, or the existing one on a duplicate). Extra rows (e.g. "import
+// suggestions" buttons) go inside as children, under the input.
+export component ListSheet {
+    in property <string> title;
+    in property <string> description;
+    in property <[string]> items;
+    in property <string> placeholder;
+    in property <string> count-text: Lang.t(root.items.length + " mục", root.items.length + (root.items.length == 1 ? " item" : " items"));
+    in property <string> empty-text: Lang.t("Chưa có mục nào", "Nothing here yet");
+    in property <string> hint: Lang.t("Enter để thêm · Delete xoá dòng đang chọn · Esc để đóng", "Enter adds · Delete removes the selected row · Esc closes");
+    in property <string> add-text: Lang.t("Thêm", "Add");
+    in property <string> done-text: Lang.t("Xong", "Done");
+    in property <string> error;
+    in property <string> highlight;
+
+    callback add(string);
+    callback remove(string);
+    callback close();
+
+    width: 100%;
+    height: 100%;
+    init => { input.focus-input(); }
+
+    Rectangle { background: Theme.scrim; }
+    TouchArea { }
+
+    FocusScope {
+        width: root.width;
+        height: root.height;
+        // Captured before the text field so Esc closes even while typing.
+        capture-key-pressed(e) => {
+            if (e.text == Key.Escape) {
+                root.close();
+                return accept;
+            }
+            reject
+        }
+
+        Rectangle {
+            width: min(480px, root.width - 48px);
+            height: min(560px, root.height - 48px);
+            background: Theme.group;
+            border-radius: Theme.r-group;
+            border-width: 1px;
+            border-color: Theme.separator;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: Theme.shadow;
+
+            VerticalLayout {
+                padding: 20px;
+                spacing: 12px;
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: root.title;
+                        font-size: Theme.fs-title;
+                        font-weight: 700;
+                        color: Theme.label;
+                        horizontal-stretch: 1;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: root.count-text;
+                        font-size: Theme.fs-sub;
+                        color: Theme.label2;
+                        vertical-alignment: center;
+                    }
+                }
+                if root.description != "": Text {
+                    text: root.description;
+                    font-size: Theme.fs-sub;
+                    color: Theme.label2;
+                    wrap: word-wrap;
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    input := TextField {
+                        placeholder: root.placeholder;
+                        accepted(t) => {
+                            root.add(t);
+                            if (root.error == "") {
+                                self.text = "";
+                            }
+                        }
+                    }
+                    PillButton {
+                        text: root.add-text;
+                        primary: true;
+                        clicked => {
+                            root.add(input.text);
+                            if (root.error == "") {
+                                input.text = "";
+                            }
+                            input.focus-input();
+                        }
+                    }
+                }
+                // Collapsed while there is nothing to say.
+                Text {
+                    text: root.error;
+                    height: root.error == "" ? 0px : self.preferred-height;
+                    visible: root.error != "";
+                    font-size: Theme.fs-sub;
+                    color: Theme.danger;
+                    wrap: word-wrap;
+                }
+
+                @children
+
+                Rectangle {
+                    vertical-stretch: 1;
+                    min-height: 120px;
+                    background: Theme.group-alt.with-alpha(0.5);
+                    border-radius: Theme.r-control;
+                    border-width: 1px;
+                    border-color: Theme.separator;
+                    clip: true;
+
+                    if root.items.length == 0: Text {
+                        text: root.empty-text;
+                        font-size: Theme.fs-body;
+                        color: Theme.label2;
+                    }
+                    list := Flickable {
+                        width: parent.width;
+                        height: parent.height;
+                        content-width: self.width;
+                        VerticalLayout {
+                            padding: 4px;
+                            alignment: start;
+                            for item in root.items: ListItem {
+                                text: item;
+                                highlighted: item == root.highlight;
+                                remove => { root.remove(item); }
+                            }
+                        }
+                    }
+                    ScrollBar {
+                        x: parent.width - self.width - 2px;
+                        y: 4px;
+                        height: parent.height - 8px;
+                        viewport-y <=> list.content-y;
+                        viewport-height: list.content-height;
+                        visible-height: list.height;
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: root.hint;
+                        font-size: Theme.fs-sub;
+                        color: Theme.label2;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                        overflow: elide;
+                    }
+                    PillButton {
+                        text: root.done-text;
+                        primary: true;
+                        clicked => { root.close(); }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Desktop flyout pill (EasyKey's status flyout): a 64 px pill with an accent
+// badge, a heading and a detail line. A separate top-level window: Rust
+// places it at the bottom centre of the active monitor, makes it
+// click-through and no-activate, sets `shown: true`, holds ~1.2 s, sets
+// `shown: false` and hides it after the 190 ms fade.
+// EXPERIMENTAL: the Rust glue is not in the library yet (see docs).
+// Slint globals are per window: copy Theme.dark / Theme.accent into this
+// window's Theme before showing it.
+export component Flyout inherits Window {
+    in property <string> badge: "V";
+    in property <bool> badge-on: true;       // accent badge, else faint grey
+    in property <string> heading;
+    in property <string> detail;
+    in-out property <bool> shown: false;     // drives the fade
+
+    no-frame: true;
+    always-on-top: true;
+    background: transparent;
+    default-font-family: Theme.font;
+    // 16 px shadow margin around the 64 px pill.
+    width: pill.width + 32px;
+    height: 64px + 32px;
+
+    pill := Rectangle {
+        x: 16px;
+        y: 12px;                              // the shadow sits 4 px lower
+        height: 64px;
+        width: 12px + 40px + 14px + max(t.preferred-width, d.preferred-width) + 22px;
+        border-radius: self.height / 2;
+        background: Theme.dark ? #2c2c2cf5 : #f9f9f9f7;
+        border-width: 1px;
+        border-color: Theme.dark ? #ffffff1a : #0000001a;
+        drop-shadow-blur: 16px;
+        drop-shadow-offset-y: 4px;
+        drop-shadow-color: Theme.dark ? #00000070 : #00000040;
+        opacity: root.shown ? 1 : 0;
+        animate opacity { duration: root.shown ? 0ms : 190ms; easing: ease-out; }
+
+        Rectangle {                           // badge
+            x: 12px;
+            y: (parent.height - self.height) / 2;
+            width: 40px;
+            height: 40px;
+            border-radius: 20px;
+            background: root.badge-on ? Theme.accent : (Theme.dark ? #ffffff14 : #0000000d);
+            Text {
+                text: root.badge;
+                font-size: root.badge.character-count > 1 ? 14.5px : 17px;
+                font-weight: 700;
+                color: root.badge-on ? Theme.on-accent : Theme.label;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+        t := Text {
+            x: 12px + 40px + 14px;
+            y: 32px - self.height + 1px;
+            text: root.heading;
+            font-size: 16px;
+            font-weight: 600;
+            color: Theme.label;
+        }
+        d := Text {
+            x: 12px + 40px + 14px;
+            y: 32px + 2px;
+            text: root.detail;
+            font-size: 12px;
+            color: Theme.label2;
+        }
+    }
+}

@@ -1,0 +1,20 @@
+// cino-ui: Cino's shared Slint component library.
+//
+//     import { Theme, Lang, Switch, Sidebar, Page } from "@cino-ui";
+//
+// The app's main .slint must re-export the globals so Rust can reach them:
+//     export { Theme, Lang } from "@cino-ui";
+// and its Window should set `default-font-family: Theme.font;`.
+
+import "fonts/BeVietnamPro-Regular.ttf";
+import "fonts/BeVietnamPro-SemiBold.ttf";
+
+export { Theme } from "theme.slint";
+export { Lang } from "lang.slint";
+export { Icons, Icon, IconData } from "icons.slint";
+export { Switch, GroupBox, RowSeparator, Row, ToggleRow, Segmented, PillButton, RadioRow, Swatch, TextField, ValueRow, PowerButton, ScrollBar, Badge, LinkText } from "widgets.slint";
+export { Sidebar, SidebarBrand, SidebarItem, Page } from "navigation.slint";
+export { CaptionButton, TitleBar, WindowShell, ResizeEdge, ResizeFrame } from "chrome.slint";
+export { Dialog, ListSheet, Flyout } from "dialogs.slint";
+export { AccentPicker, AppearanceGroup } from "appearance.slint";
+export { AccentLogo } from "logo.slint";

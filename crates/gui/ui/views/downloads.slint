@@ -1,0 +1,689 @@
+import { I18n } from "../i18n.slint";
+// Downloads table, Apple-HIG style: quiet uppercase header, divider-less
+// rounded rows, depth from hover wash only, actions revealed on hover.
+// Double-clicking a finished row opens the file; right-clicking brings up context menu.
+
+import { Theme } from "../theme.slint";
+import { TaskRow } from "../model.slint";
+import { ActionButton, ProgressBar, Pill, ContextMenuItem } from "../widgets.slint";
+import { ListView, ScrollView } from "std-widgets.slint";
+
+// Header dividers own the column width shared by every virtualized row.
+component ColumnHeader inherits Rectangle {
+    in property <string> label;
+    in-out property <length> column-width;
+    in property <length> minimum: 64px;
+    in property <TextHorizontalAlignment> text-align: left;
+    callback fit() -> length;
+    width: root.column-width;
+    height: 34px;
+    background: handle.has-hover || handle.pressed ? Theme.panel-hi : Theme.panel;
+    clip: true;
+    Text {
+        x: 8px; width: parent.width - 16px; height: 100%;
+        text: root.label; color: Theme.text; font-size: 11px;
+        font-weight: 600; vertical-alignment: center; overflow: elide;
+        horizontal-alignment: root.text-align;
+    }
+    Rectangle {
+        x: parent.width - 1px; width: 1px; height: 100%;
+        background: handle.has-hover || handle.pressed ? Theme.accent : Theme.border;
+    }
+    handle := TouchArea {
+        x: parent.width - 7px; width: 7px; height: 100%;
+        mouse-cursor: ew-resize;
+        moved => {
+            if self.pressed {
+                root.column-width = max(root.minimum, root.column-width + self.mouse-x - self.pressed-x);
+            }
+        }
+        double-clicked => { root.column-width = max(root.minimum, root.fit()); }
+    }
+}
+
+component RowCard inherits Rectangle {
+    in property <TaskRow> data;
+    callback pause(float);
+    callback resume(float);
+    callback cancel(float);
+    callback retry(float);
+    callback remove(float);
+    callback delete-file(float);
+    callback copy-url(float);
+    callback open-file(float);
+    callback open-folder(float);
+    callback toggle-selection(string);
+    callback row-clicked(string, bool, bool);
+    callback request-focus;
+
+    // a row stays "hot" while the pointer is on it OR on one of its buttons
+    out property <bool> row-hot: hover.has-hover || pause-b.hovered || resume-b.hovered
+        || retry-b.hovered || open-b.hovered || folder-b.hovered || cancel-b.hovered
+        || remove-b.hovered || check-touch.has-hover;
+
+    in property <length> row-width;
+    in property <length> name-width;
+    in property <length> size-width;
+    in property <length> status-width;
+    in property <length> speed-width;
+    in property <length> added-width;
+    in property <length> actions-width;
+
+    property <length> name-x: 64px;
+    property <length> size-x: root.name-x + root.name-width;
+    property <length> status-x: root.size-x + root.size-width;
+    property <length> speed-x: root.status-x + root.status-width;
+    property <length> added-x: root.speed-x + root.speed-width;
+    property <length> actions-x: root.added-x + root.added-width;
+
+    width: root.row-width;
+    height: 56px;
+    background: root.data.selected ? Theme.accent-soft : root.row-hot ? Theme.row-hover : transparent;
+    border-radius: Theme.radius-sm;
+    clip: true;
+
+    property <length> menu-x;
+    property <length> menu-y;
+
+    menu := PopupWindow {
+        x: root.menu-x;
+        y: root.menu-y;
+        width: 170px;
+        Rectangle {
+            background: Theme.panel;
+            border-width: 1px;
+            border-color: Theme.border;
+            border-radius: Theme.radius-sm;
+            drop-shadow-blur: 10px;
+            drop-shadow-color: #00000088;
+            clip: true;
+            VerticalLayout {
+                padding: 4px;
+                spacing: 2px;
+                if root.data.can-open-file: ContextMenuItem {
+                    label: I18n.tr("Open File");
+                    clicked => {
+                        root.open-file(root.data.id);
+                    }
+                }
+                if root.data.can-open-folder: ContextMenuItem {
+                    label: I18n.tr("Open Folder");
+                    clicked => {
+                        root.open-folder(root.data.id);
+                    }
+                }
+                if root.data.can-pause: ContextMenuItem {
+                    label: I18n.tr("Pause");
+                    clicked => {
+                        root.pause(root.data.id);
+                    }
+                }
+                if root.data.can-resume: ContextMenuItem {
+                    label: I18n.tr("Resume");
+                    clicked => {
+                        root.resume(root.data.id);
+                    }
+                }
+                if root.data.can-retry: ContextMenuItem {
+                    label: I18n.tr("Retry");
+                    clicked => {
+                        root.retry(root.data.id);
+                    }
+                }
+                ContextMenuItem {
+                    label: I18n.tr("Copy URL");
+                    clicked => {
+                        root.copy-url(root.data.id);
+                    }
+                }
+                Rectangle { height: 1px; background: Theme.border-soft; }
+                ContextMenuItem {
+                    label: I18n.tr("Remove from List");
+                    is-danger: true;
+                    clicked => {
+                        root.remove(root.data.id);
+                    }
+                }
+                if (root.data.can-open-file) : ContextMenuItem {
+                    label: I18n.tr("Delete File");
+                    is-danger: true;
+                    clicked => {
+                        root.delete-file(root.data.id);
+                    }
+                }
+            }
+        }
+    }
+
+    hover := TouchArea {
+        pointer-event(event) => {
+            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                root.request-focus();
+                root.row-clicked(root.data.key, event.modifiers.control, event.modifiers.shift);
+            }
+            if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
+                root.menu-x = min(hover.mouse-x, root.width - 180px);
+                root.menu-y = min(hover.mouse-y, root.height - 10px);
+                menu.show();
+            }
+        }
+        double-clicked => {
+            if (root.data.can-open-file) { root.open-file(root.data.id); }
+        }
+    }
+
+    // selection checkbox - hand-rolled, same quiet style as the rest
+    Rectangle {
+        x: 8px;
+        y: 19px;
+        width: 18px;
+        height: 18px;
+        border-radius: 4px;
+        border-width: 1px;
+        border-color: root.data.selected ? Theme.accent : Theme.border;
+        background: root.data.selected ? Theme.accent : transparent;
+        Text {
+            width: 100%;
+            height: 100%;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            text: root.data.selected ? "✓" : "";
+            color: white;
+            font-size: 11px;
+            font-weight: 700;
+        }
+        check-touch := TouchArea {
+            mouse-cursor: pointer;
+            clicked => { root.toggle-selection(root.data.key); }
+        }
+    }
+
+    // category tile - crisp uppercase extension badge
+    Rectangle {
+        x: 30px;
+        y: 12px;
+        width: 30px;
+        height: 32px;
+        border-radius: 6px;
+        background: Theme.chip;
+        Text {
+            width: 100%;
+            height: 100%;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            text: root.data.glyph;
+            font-size: 10px;
+            font-weight: 700;
+            color: Theme.accent-hi;
+        }
+    }
+
+    // name + meta line (strictly contained & clipped)
+    Rectangle {
+        x: root.name-x + 8px;
+        y: 0px;
+        width: max(0px, root.name-width - 16px);
+        height: 100%;
+        clip: true;
+        VerticalLayout {
+            width: 100%;
+            height: 100%;
+            spacing: 3px;
+            alignment: center;
+            Text {
+                width: 100%;
+                text: root.data.name;
+                color: Theme.text;
+                font-size: 13px;
+                font-weight: 500;
+                overflow: elide;
+            }
+            HorizontalLayout {
+                width: 100%;
+                spacing: 8px;
+                if root.data.transport != "?": Pill {
+                    text: root.data.transport-label;
+                    fg: root.data.transport == "H3" ? Theme.ok : Theme.text-dim;
+                }
+                if root.data.state == "downloading"
+                    || root.data.state == "probing"
+                    || root.data.state == "verifying": Text {
+                    text: root.data.segments-text;
+                    color: Theme.text-faint;
+                    font-size: 10px;
+                    vertical-alignment: center;
+                }
+                if root.data.error-text == "": Text {
+                    horizontal-stretch: 1;
+                    text: root.data.hash-text;
+                    color: Theme.text-faint;
+                    font-size: 10px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                if root.data.error-text != "": Text {
+                    horizontal-stretch: 1;
+                    text: root.data.error-text;
+                    color: Theme.err;
+                    font-size: 10px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+        }
+    }
+
+    // size (strictly contained & clipped, right aligned)
+    Rectangle {
+        x: root.size-x + 8px;
+        y: 0px;
+        width: max(0px, root.size-width - 16px);
+        height: 100%;
+        clip: true;
+        VerticalLayout {
+            width: 100%;
+            height: 100%;
+            alignment: center;
+            Text {
+                width: 100%;
+                horizontal-alignment: right;
+                text: root.data.total-text;
+                color: Theme.text;
+                font-size: 12px;
+                overflow: elide;
+            }
+            if root.data.state != "completed": Text {
+                width: 100%;
+                horizontal-alignment: right;
+                text: root.data.received-text;
+                color: Theme.text-faint;
+                font-size: 10px;
+                overflow: elide;
+            }
+        }
+    }
+
+    // status + linear progress (strictly contained & clipped)
+    Rectangle {
+        x: root.status-x + 8px;
+        y: 0px;
+        width: max(0px, root.status-width - 16px);
+        height: 100%;
+        clip: true;
+        VerticalLayout {
+            width: 100%;
+            height: 100%;
+            alignment: center;
+            spacing: 5px;
+            HorizontalLayout {
+                width: 100%;
+                spacing: 6px;
+                Text {
+                    text: I18n.tr(root.data.state-label);
+                    color: root.data.state == "failed" ? Theme.err
+                        : root.data.state == "completed" ? Theme.ok
+                        : root.data.state == "downloading" ? Theme.accent-hi
+                        : root.data.state == "paused" ? Theme.warn
+                        : Theme.text-dim;
+                    font-size: 11px;
+                    font-weight: 500;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                HorizontalLayout { horizontal-stretch: 1; }
+                if root.data.percent >= 0: Text {
+                    text: round(min(max(root.data.percent, 0), 1) * 100) + "%";
+                    color: Theme.text-faint;
+                    font-size: 10px;
+                    vertical-alignment: center;
+                }
+            }
+            ProgressBar {
+                width: 100%;
+                fraction: root.data.percent;
+                failed: root.data.state == "failed";
+                done: root.data.state == "completed";
+                tint: root.data.state == "paused" ? Theme.warn : Theme.accent;
+            }
+        }
+    }
+
+    // speed / eta (strictly contained & clipped, right aligned)
+    Rectangle {
+        x: root.speed-x + 8px;
+        y: 0px;
+        width: max(0px, root.speed-width - 16px);
+        height: 100%;
+        clip: true;
+        VerticalLayout {
+            width: 100%;
+            height: 100%;
+            alignment: center;
+            Text {
+                width: 100%;
+                horizontal-alignment: right;
+                text: root.data.speed-text;
+                color: root.data.state == "downloading" ? Theme.accent-hi : Theme.text-dim;
+                font-size: 11px;
+                overflow: elide;
+            }
+            if root.data.eta-text != "": Text {
+                width: 100%;
+                horizontal-alignment: right;
+                text: root.data.eta-text;
+                color: Theme.text-faint;
+                font-size: 10px;
+                overflow: elide;
+            }
+        }
+    }
+
+    // added (strictly contained & clipped)
+    Rectangle {
+        x: root.added-x + 8px;
+        y: 0px;
+        width: max(0px, root.added-width - 16px);
+        height: 100%;
+        clip: true;
+        VerticalLayout {
+            width: 100%;
+            height: 100%;
+            alignment: center;
+            Text {
+                width: 100%;
+                text: root.data.created-text;
+                color: Theme.text-faint;
+                font-size: 11px;
+                overflow: elide;
+            }
+        }
+    }
+
+    // actions - always laid out, quiet until the row is hovered (strictly contained & clipped)
+    Rectangle {
+        x: root.actions-x + 8px;
+        y: 0px;
+        width: max(0px, root.actions-width - 16px);
+        height: 100%;
+        clip: true;
+        HorizontalLayout {
+            width: 100%;
+            height: 24px;
+            y: (parent.height - self.height) / 2;
+            alignment: end;
+            spacing: 4px;
+            opacity: root.row-hot ? 1.0 : 0.70;
+            animate opacity { duration: 120ms; }
+            open-b := ActionButton {
+                compact: true;
+                label: I18n.tr("Open");
+                shown: root.data.can-open-file;
+                tint: Theme.accent-hi;
+                clicked => { root.open-file(root.data.id); }
+            }
+            folder-b := ActionButton {
+                compact: true;
+                label: I18n.tr("Folder");
+                shown: root.data.can-open-folder;
+                tint: Theme.text;
+                clicked => { root.open-folder(root.data.id); }
+            }
+            pause-b := ActionButton {
+                compact: true;
+                label: I18n.tr("Pause");
+                shown: root.data.can-pause;
+                tint: Theme.warn;
+                clicked => { root.pause(root.data.id); }
+            }
+            resume-b := ActionButton {
+                compact: true;
+                label: I18n.tr("Resume");
+                shown: root.data.can-resume;
+                tint: Theme.ok;
+                clicked => { root.resume(root.data.id); }
+            }
+            retry-b := ActionButton {
+                compact: true;
+                label: I18n.tr("Retry");
+                shown: root.data.can-retry;
+                tint: Theme.accent-hi;
+                clicked => { root.retry(root.data.id); }
+            }
+            cancel-b := ActionButton {
+                compact: true;
+                label: I18n.tr("Cancel");
+                shown: root.data.can-cancel;
+                tint: Theme.err;
+                clicked => { root.cancel(root.data.id); }
+            }
+            remove-b := ActionButton {
+                compact: true;
+                label: "×";
+                shown: root.data.can-remove;
+                tint: Theme.err;
+                clicked => { root.remove(root.data.id); }
+            }
+        }
+    }
+}
+
+export component DownloadsView inherits Rectangle {
+    in property <[TaskRow]> tasks;
+    in property <int> selected-count: 0;
+    callback fit-column(int) -> length;
+    callback toggle-selection(string);
+    callback row-clicked(string, bool, bool);
+    callback select-all;
+    callback clear-selection;
+    callback pause(float);
+    callback resume(float);
+    callback cancel(float);
+    callback retry(float);
+    callback remove(float);
+    callback delete-file(float);
+    callback copy-url(float);
+    callback open-file(float);
+    callback open-folder(float);
+
+    // Column widths: GUI session state. Tuned for zero horizontal overflow at standard 1040x640 window.
+    property <length> size-width: I18n.language == 1 ? 95px : 75px;
+    property <length> status-width: I18n.language == 1 ? 140px : 120px;
+    property <length> speed-width: 75px;
+    property <length> added-width: 125px;
+    // Row actions column: sized from hidden 12px font-metric probes of the
+    // action labels in the current language (same pattern as the G1 toolbar
+    // budget in app.slint). A row shows at most two labelled buttons plus
+    // the x button; the widest pairs are Open+Folder (EN) and the
+    // Resume+Folder pair in VI, so the budget takes the widest labelled
+    // pair + the x button (12px label + 12px compact padding), 2 x 4px
+    // spacing and the row's 16px inner inset. Floored at the previous fixed
+    // widths so short labels never shrink the column. (Fixed widths elided
+    // the labels: "O.../Fol..." in EN, found by pixel QA 2026-11-07.)
+    open-m := Text { visible: false; font-size: 12px; font-weight: 600; text: I18n.language == 1 ? "Mở" : I18n.tr("Open"); }
+    folder-m := Text { visible: false; font-size: 12px; font-weight: 600; text: I18n.language == 1 ? "Thư mục" : I18n.tr("Folder"); }
+    resume-m := Text { visible: false; font-size: 12px; font-weight: 600; text: I18n.language == 1 ? "Tiếp tục" : I18n.tr("Resume"); }
+    property <length> actions-width: max(I18n.language == 1 ? 190px : 165px,
+        max(open-m.preferred-width, resume-m.preferred-width) + folder-m.preferred-width + 62px);
+    property <length> name-width: max(140px, root.width - 2 * Theme.pad - 64px - root.size-width - root.status-width - root.speed-width - root.added-width - root.actions-width);
+
+    // Shared column coordinate offsets: mathematically guarantees header and rows never drift.
+    property <length> name-x: 64px;
+    property <length> size-x: root.name-x + root.name-width;
+    property <length> status-x: root.size-x + root.size-width;
+    property <length> speed-x: root.status-x + root.status-width;
+    property <length> added-x: root.speed-x + root.speed-width;
+    property <length> actions-x: root.added-x + root.added-width;
+    property <length> table-width: root.actions-x + root.actions-width;
+
+    out property <bool> needs-scroll-clamp: scroll.viewport-x > 0px
+        || scroll.viewport-x < scroll.visible-width - scroll.viewport-width;
+    public function clamp-scroll() {
+        scroll.viewport-x = max(scroll.visible-width - scroll.viewport-width, min(scroll.viewport-x, 0px));
+    }
+    width: 100%; height: 100%; vertical-stretch: 1;
+    background: transparent;
+
+    list-scope := FocusScope {
+        width: 100%;
+        height: 100%;
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.clear-selection();
+                accept
+            } else if (event.modifiers.control && (event.text == "a" || event.text == "A" || event.text == "\u{1}")) {
+                root.select-all();
+                accept
+            } else {
+                reject
+            }
+        }
+    }
+
+    scroll := ScrollView {
+        x: Theme.pad; y: 10px;
+        width: parent.width - 2 * Theme.pad;
+        height: parent.height - 16px;
+        viewport-width: max(self.visible-width, root.table-width);
+        viewport-height: self.visible-height;
+
+        Rectangle {
+            width: scroll.viewport-width;
+            height: scroll.visible-height;
+
+            // Header bar container: covers entire scroll viewport width so background never ends abruptly
+            Rectangle {
+                x: 0px; y: 0px;
+                width: max(scroll.viewport-width, root.table-width);
+                height: 34px;
+                background: Theme.panel;
+                clip: true;
+
+                // Checkbox column header (0 to 64px)
+                Rectangle {
+                    x: 0px; y: 0px;
+                    width: 64px; height: 100%;
+                    Rectangle {
+                        x: 8px; y: 7px; width: 18px; height: 18px;
+                        border-radius: 4px; border-width: 1px;
+                        border-color: root.selected-count > 0 ? Theme.accent : Theme.border;
+                        background: root.selected-count > 0 ? Theme.accent : transparent;
+                        Text {
+                            width: 100%; height: 100%;
+                            horizontal-alignment: center; vertical-alignment: center;
+                            text: root.tasks.length > 0 && root.selected-count == root.tasks.length ? "✓"
+                                : root.selected-count > 0 ? "–" : "";
+                            color: white; font-size: 11px; font-weight: 700;
+                        }
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                if (root.tasks.length > 0 && root.selected-count == root.tasks.length) {
+                                    root.clear-selection();
+                                } else {
+                                    root.select-all();
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // NAME column header
+                ColumnHeader {
+                    x: root.name-x; y: 0px;
+                    label: I18n.tr("NAME");
+                    minimum: 120px;
+                    column-width <=> root.name-width;
+                    fit => { root.fit-column(0) }
+                }
+
+                // SIZE column header
+                ColumnHeader {
+                    x: root.size-x; y: 0px;
+                    label: I18n.tr("SIZE");
+                    minimum: I18n.language == 1 ? 85px : 65px;
+                    text-align: right;
+                    column-width <=> root.size-width;
+                    fit => { root.fit-column(1) }
+                }
+
+                // STATUS column header
+                ColumnHeader {
+                    x: root.status-x; y: 0px;
+                    label: I18n.tr("STATUS");
+                    minimum: 100px;
+                    column-width <=> root.status-width;
+                    fit => { root.fit-column(2) }
+                }
+
+                // SPEED column header
+                ColumnHeader {
+                    x: root.speed-x; y: 0px;
+                    label: I18n.tr("SPEED");
+                    minimum: 65px;
+                    text-align: right;
+                    column-width <=> root.speed-width;
+                    fit => { root.fit-column(3) }
+                }
+
+                // ADDED column header
+                ColumnHeader {
+                    x: root.added-x; y: 0px;
+                    label: I18n.tr("ADDED");
+                    minimum: 110px;
+                    column-width <=> root.added-width;
+                    fit => { root.fit-column(4) }
+                }
+
+                // ACTIONS column header
+                Rectangle {
+                    x: root.actions-x; y: 0px;
+                    width: root.actions-width; height: 100%;
+                    Text {
+                        x: 8px; width: parent.width - 16px; height: 100%;
+                        text: I18n.tr("ACTIONS");
+                        color: Theme.text;
+                        font-size: 11px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                        horizontal-alignment: right;
+                    }
+                }
+            }
+
+            // Virtualized row list
+            list := ListView {
+                x: 0px; y: 36px;
+                width: parent.width;
+                height: max(parent.height - 36px, 0px);
+                for row in root.tasks: RowCard {
+                    data: row;
+                    row-width: max(list.width, root.table-width);
+                    name-width: root.name-width;
+                    size-width: root.size-width;
+                    status-width: root.status-width;
+                    speed-width: root.speed-width;
+                    added-width: root.added-width;
+                    actions-width: root.actions-width;
+                    pause(id) => { root.pause(id); }
+                    resume(id) => { root.resume(id); }
+                    cancel(id) => { root.cancel(id); }
+                    retry(id) => { root.retry(id); }
+                    remove(id) => { root.remove(id); }
+                    delete-file(id) => { root.delete-file(id); }
+                    copy-url(id) => { root.copy-url(id); }
+                    open-file(id) => { root.open-file(id); }
+                    open-folder(id) => { root.open-folder(id); }
+                    toggle-selection(key) => { root.toggle-selection(key); }
+                    row-clicked(key, ctrl, shift) => { root.row-clicked(key, ctrl, shift); }
+                    request-focus => { list-scope.focus(); }
+                }
+            }
+
+            if root.tasks.length == 0: Text {
+                x: 16px; y: 60px;
+                text: I18n.tr("No downloads here. Paste a URL above or open Add Download.");
+                color: Theme.text-dim; font-size: 13px;
+            }
+        }
+    }
+}

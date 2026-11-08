@@ -1,0 +1,20 @@
+# Cross-compilation helpers.
+#
+# Nothing here is required when building on Windows with the MSVC toolchain
+# (`cargo build --release --target x86_64-pc-windows-msvc`).
+#
+# These settings only apply when cross-compiling *from* Linux/macOS *to* the
+# GNU Windows target with the MinGW-w64 toolchain.
+
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"
+# Statically link the MinGW runtime so the produced udm.exe does not need
+# libgcc_s_seh-1.dll / libstdc++-6.dll / libwinpthread-1.dll next to it.
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[build]
+# `cargo build` with no --target builds for the host; Windows users should pass
+# --target explicitly (see README.md, "Building" section).
+
+[net]
+git-fetch-with-cli = true

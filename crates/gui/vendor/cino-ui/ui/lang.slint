@@ -1,0 +1,11 @@
+// cino-ui: two-language labels. Every label carries its Vietnamese and English
+// text side by side; `Lang.t` picks one, so switching re-renders at once.
+//     text: Lang.t("Giao diện", "Appearance");
+
+export global Lang {
+    in-out property <bool> english: false;
+
+    public pure function t(vi: string, en: string) -> string {
+        return self.english ? en : vi;
+    }
+}

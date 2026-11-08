@@ -1,0 +1,57 @@
+[package]
+name = "udm-gui"
+version = "0.1.0"
+edition = "2021"
+description = "udm desktop front-end (Slint)"
+publish = false
+
+[[bin]]
+name = "udm"
+path = "src/main.rs"
+
+[dependencies]
+udm-core = { path = "../core" }
+slint = { version = "=1.18.1", default-features = false, features = [
+    "std",
+    "compat-1-18",
+    "backend-winit",
+    "renderer-software",
+] }
+rfd = { version = "0.16.1", default-features = false, features = [
+    "xdg-portal",
+    "common-controls-v6",
+    "tokio",
+] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "ansi"] }
+
+# URL parsing for display-name fallbacks (already in the lock file as a
+# transitive dependency of udm-core).
+url = { workspace = true }
+
+# Free-space readout for the sidebar storage widget (already in the lock file
+# as transitive dependencies; used only for one FFI call each).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = ["Win32_Storage_FileSystem", "Win32_Foundation"] }
+# System tray (Phase 2, src/tray.rs). tray-icon pulls muda for the menu.
+# image is used only to decode the embedded tray PNG into RGBA.
+tray-icon = "0.21"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[build-dependencies]
+# default-features = false keeps the *compiler* lean on small CI boxes:
+# slint-build's default "renderer-software" pulls resvg/swash/skrifa/rayon into
+# i-slint-compiler (we only need EmbedFiles, and the runtime renderer is a
+# separate feature on the `slint` crate itself).
+slint-build = { version = "=1.18.1", optional = true }
+embed-resource = "3.0.12"
+
+[features]
+default = ["slint-compile"]
+# Compile ui/app.slint at build time (needs ~2 GB RAM for i-slint-compiler).
+# Without it, the checked-in src/slint_generated.rs is used instead - regenerate
+# with packaging/regenerate-slint.sh after editing any .slint file.
+slint-compile = ["dep:slint-build"]

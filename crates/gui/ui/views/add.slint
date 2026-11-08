@@ -1,0 +1,170 @@
+import { TextField } from "@cino-ui";
+import { I18n } from "../i18n.slint";
+// "Add" form: paste URLs, pick a destination, tune the task.
+
+import { Theme } from "../theme.slint";
+import { ActionButton, SectionTitle } from "../widgets.slint";
+import { LineEdit, TextEdit, CheckBox, SpinBox, ComboBox } from "std-widgets.slint";
+
+export component AddView inherits Rectangle {
+    in-out property <string> urls;
+    in-out property <string> dir;
+    in-out property <string> hash;
+    in-out property <int> segments;
+    in-out property <int> transport-index;
+    in-out property <bool> paused;
+    in property <string> preview;
+    callback pick-dir;
+    callback submitted;
+    callback dir-edited;
+    callback urls-edited;
+
+    // TextField/TextEdit have no `edited` callback in this Slint version:
+    // a changed-handler on the bound property is the change signal. Program
+    // writes (prefill, Browse, clearing after submit) re-fire it, but the
+    // Rust side treats only a non-empty value as explicit intent, and
+    // Browse sets the intent flag itself, so this stays correct.
+    changed dir => { root.dir-edited(); }
+    changed urls => { root.urls-edited(); }
+
+    width: 100%;
+    height: 100%;
+    vertical-stretch: 1;
+    background: transparent;
+
+    VerticalLayout {
+        width: 100%;
+        height: 100%;
+        vertical-stretch: 1;
+        padding: Theme.pad;
+        spacing: 12px;
+
+        SectionTitle { label: I18n.tr("URLS - ONE PER LINE"); }
+
+        Rectangle {
+            vertical-stretch: 1;
+            min-height: 120px;
+            background: Theme.input-bg;
+            border-radius: Theme.radius-sm;
+            border-width: 1px;
+            border-color: Theme.border;
+            TextEdit {
+                width: 100%;
+                height: 100%;
+                text <=> root.urls;
+            }
+            if root.urls == "": Text {
+                x: 8px;
+                y: 6px;
+                text: "https://example.com/ubuntu-24.04-desktop-amd64.iso";
+                color: Theme.text-dim;
+                font-size: 12px;
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 10px;
+            VerticalLayout {
+                horizontal-stretch: 1;
+                spacing: 6px;
+                SectionTitle { label: I18n.tr("SAVE TO"); }
+                HorizontalLayout {
+                    spacing: 6px;
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 30px;
+                        background: Theme.input-bg;
+                        border-radius: Theme.radius-sm;
+                        border-width: 1px;
+                        border-color: Theme.border;
+                        TextField {
+                            x: 0px;
+                            y: 0px;
+                            width: 100%;
+                            height: 100%;
+                            text <=> root.dir;
+                            placeholder: I18n.tr("default (system Downloads folder)");
+                        }
+                    }
+                    ActionButton {
+                        label: I18n.tr("Browse...");
+                        clicked => { root.pick-dir(); }
+                    }
+                }
+            }
+            VerticalLayout {
+                width: 220px;
+                spacing: 6px;
+                SectionTitle { label: I18n.tr("CONNECTIONS"); }
+                HorizontalLayout {
+                    height: 30px;
+                    SpinBox {
+                        value <=> root.segments;
+                        minimum: 1;
+                        maximum: 64;
+                    }
+                }
+            }
+        }
+
+        if root.preview != "": Text {
+            text: root.preview;
+            color: Theme.text-faint;
+            font-size: 11px;
+        }
+
+        HorizontalLayout {
+            spacing: 10px;
+            VerticalLayout {
+                horizontal-stretch: 1;
+                spacing: 6px;
+                SectionTitle { label: I18n.tr("EXPECTED CHECKSUM (OPTIONAL)"); }
+                Rectangle {
+                    height: 30px;
+                    background: Theme.input-bg;
+                    border-radius: Theme.radius-sm;
+                    border-width: 1px;
+                    border-color: Theme.border;
+                    TextField {
+                        x: 0px;
+                        y: 0px;
+                        width: 100%;
+                        height: 100%;
+                        text <=> root.hash;
+                        placeholder: I18n.tr("sha256:9f86d081... or bare hex (md5/sha1/sha256/sha512/blake3)");
+                    }
+                }
+            }
+            VerticalLayout {
+                width: 260px;
+                spacing: 6px;
+                SectionTitle { label: I18n.tr("TRANSPORT"); }
+                ComboBox {
+                    height: 30px;
+                    model: [I18n.tr("Auto - HTTP/3 when offered"), I18n.tr("Prefer HTTP/3"), I18n.tr("HTTP/3 only"), I18n.tr("Never HTTP/3")];
+                    current-index <=> root.transport-index;
+                }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 16px;
+            CheckBox {
+                text: I18n.tr("Add paused (do not start now)");
+                checked <=> root.paused;
+            }
+            HorizontalLayout { horizontal-stretch: 1; }
+            hint := Text {
+                text: I18n.tr("Ctrl+V works in the URL box; the file is verified before it is renamed.");
+                color: Theme.text-faint;
+                font-size: 11px;
+                vertical-alignment: center;
+            }
+            ActionButton {
+                label: I18n.tr("Add to queue");
+                primary: true;
+                clicked => { root.submitted(); }
+            }
+        }
+    }
+}

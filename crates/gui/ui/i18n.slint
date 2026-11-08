@@ -1,0 +1,7 @@
+// Pure translation bridge: the Rust catalog depends only on these two inputs.
+import { Lang } from "@cino-ui";
+export global I18n {
+    in-out property <int> language: 0;
+    pure callback translate(string, int) -> string;
+    public pure function tr(key: string) -> string { return translate(key, Lang.english ? 0 : 1); }
+}

@@ -1,0 +1,31 @@
+/target
+**/*.rs.bk
+Cargo.lock.bak
+*.pdb
+*.ilk
+*.exp
+*.lib
+!packaging/windows/*.lib
+/dist
+/*.part
+*.quget.part
+.quget-portable
+
+# Runtime data and local secrets. Agent Markdown is temporarily tracked while private.
+*.udm.part
+*.redb
+*.redb.*
+/logs/
+/data/
+/downloads/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+/udm-artifacts/
+
+# Only Markdown handoffs belong in this temporary private collaboration folder.
+/review-artifacts/*
+!/review-artifacts/*.md
+

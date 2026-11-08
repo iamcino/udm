@@ -1,0 +1,17 @@
+[package]
+name = "udm-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Headless harness / power-user CLI for the udm download engine"
+
+[[bin]]
+name = "udm-cli"
+path = "src/main.rs"
+
+[dependencies]
+udm-core = { workspace = true }
+clap = { workspace = true }
+humantime = { workspace = true }
+tokio = { workspace = true }
+tracing-subscriber = { workspace = true }

@@ -1,0 +1,56 @@
+# `cargo deny check bans` enforces the "no telemetry" rule at the dependency
+# level. Run it in CI: `cargo deny --manifest-path Cargo.toml check bans licenses sources`
+#
+# Everything below is denied because it either phones home, collects
+# diagnostics, or pulls in a second TLS/crypto stack we deliberately avoid.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+
+[licenses]
+version = 2
+allow = ["MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0", "MPL-2.0", "Zlib", "OpenSSL"]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+deny = [
+    # --- telemetry / analytics / crash reporting -----------------------------
+    { name = "sentry", reason = "crash reporting is a telemetry channel" },
+    { name = "sentry-anyhow", reason = "crash reporting is a telemetry channel" },
+    { name = "telemetry", reason = "telemetry" },
+    { name = "opentelemetry", reason = "metrics export" },
+    { name = "opentelemetry-otlp", reason = "metrics export" },
+    { name = "opentelemetry_sdk", reason = "metrics export" },
+    { name = "tracing-opentelemetry", reason = "metrics export" },
+    { name = "mixpanel", reason = "analytics" },
+    { name = "posthog", reason = "analytics" },
+    { name = "amplitude", reason = "analytics" },
+    { name = "segment", reason = "analytics" },
+    { name = "bugsnag", reason = "crash reporting" },
+    { name = "rollbar", reason = "crash reporting" },
+    { name = "machine-uid", reason = "machine fingerprinting" },
+    { name = "sysinfo", reason = "not needed; commonly used for fingerprinting" },
+
+    # --- second crypto stack (bloat + cross-compile pain) --------------------
+    { name = "aws-lc-rs", reason = "we standardise on `ring`; aws-lc-rs needs CMake+NASM" },
+    { name = "aws-lc-sys", reason = "we standardise on `ring`" },
+    { name = "native-tls", reason = "we use rustls with the OS trust store" },
+    { name = "schannel", reason = "we use rustls with the OS trust store" },
+    { name = "openssl", reason = "we use rustls" },
+    { name = "openssl-sys", reason = "we use rustls" },
+
+    # --- auto-update / network installers ------------------------------------
+    { name = "self_update", reason = "udm never updates itself silently" },
+    { name = "tuf", reason = "no bundled update service" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

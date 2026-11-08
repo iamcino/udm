@@ -1,0 +1,119 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  # ------------------------------------------------------------------ tests
+  test:
+    name: Tests + compile checks (Linux)
+    # Skipped while the repo is private (no Actions minutes); runs again
+    # automatically once the repo is public. Local/VM gates remain required.
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # --no-default-features: use the checked-in crates/gui/src/slint_generated.rs
+      # instead of compiling the .slint sources (faster; identical runtime code).
+      - name: Tests (incl. the no-telemetry guard)
+        run: cargo test --workspace --no-default-features
+      - name: Compile checks, all targets
+        run: cargo check --workspace --all-targets --no-default-features
+
+  # ------------------------------------------------- Slint source compile
+  slint-compile:
+    name: Slint source compile check (Linux)
+    # Skipped while the repo is private (no Actions minutes); runs again
+    # automatically once the repo is public. Local/VM gates remain required.
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The test job above uses the checked-in slint_generated.rs
+      # (--no-default-features). This job compiles the real .slint sources,
+      # so a broken .slint edit fails in CI instead of at the next manual
+      # Windows regeneration (keeps the Windows QA pass short).
+      - name: Compile .slint sources
+        run: cargo check -p udm-gui --features slint-compile
+
+  # ------------------------------------------------- native Windows build
+  windows-msvc:
+    name: Windows build + installer (MSVC)
+    # Skipped while the repo is private (no Actions minutes); runs again
+    # automatically once the repo is public. Local/VM gates remain required.
+    if: ${{ !github.event.repository.private }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install NSIS (for the per-user installer)
+        shell: pwsh
+        run: |
+          choco install nsis --no-progress -y
+          Add-Content $env:GITHUB_PATH 'C:\Program Files (x86)\NSIS'
+      - name: Build + package
+        shell: pwsh
+        run: ./packaging/windows/build.ps1 -NoSlintCompile
+      - uses: actions/upload-artifact@v4
+        with:
+          name: udm-windows-x64-msvc
+          path: dist/
+
+  # --------------------------------------------- cross-build from Linux
+  windows-gnu:
+    name: Windows cross-build (GNU, from Linux)
+    # Skipped while the repo is private (no Actions minutes); runs again
+    # automatically once the repo is public. Local/VM gates remain required.
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+      - uses: Swatinem/rust-cache@v2
+      - name: Install MinGW-w64 + zip
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-mingw-w64-x86-64 zip
+      - name: Cross-build
+        run: ./packaging/cross/build-windows.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: udm-windows-x64-gnu
+          path: dist/
+
+  # -------------------------------------------- publish on tag push (v*)
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, slint-compile, windows-msvc, windows-gnu]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/udm-windows-x64-msvc/udm-*-setup.exe
+            artifacts/udm-windows-x64-msvc/udm-*-portable.zip
+            artifacts/udm-windows-x64-gnu/udm-*-portable.zip
+          generate_release_notes: true

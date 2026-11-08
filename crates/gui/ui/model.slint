@@ -1,0 +1,80 @@
+// Shared data shapes exchanged with the Rust side.
+
+export struct TaskRow {
+    id: float,
+    key: string,          // u64 task id as a decimal string; the stable selection key
+    selected: bool,       // GUI session only, never persisted to engine/redb
+    name: string,
+    url: string,
+    state: string,        // "queued" | "probing" | ... (see TaskState::as_str)
+    state-label: string,
+    received-text: string,
+    total-text: string,
+    percent: float,       // 0.0 .. 1.0, -1 when unknown
+    speed-text: string,
+    eta-text: string,
+    transport: string,    // "H3" | "H2" | "H1" | "?"
+    transport-label: string,
+    segments-text: string,
+    error-text: string,
+    path-text: string,
+    created-text: string,
+    can-pause: bool,
+    can-resume: bool,
+    can-cancel: bool,
+    can-retry: bool,
+    can-open-file: bool,
+    can-open-folder: bool,
+    can-remove: bool,
+    hash-text: string,
+    glyph: string,        // category emoji, derived from the file extension
+}
+
+export struct TaskDetail {
+    id: float,
+    key: string,          // u64 task id as a decimal string; the focused task key
+    name: string,
+    state: string,
+    state-label: string,
+    percent: float,       // 0.0 .. 1.0, -1 when unknown
+    progress-text: string,
+    size-text: string,
+    speed-text: string,
+    eta-text: string,
+    transport-label: string,
+    segments-text: string,
+    url: string,
+    dest-dir: string,
+    final-path: string,
+    created-text: string,
+    started-text: string,
+    finished-text: string,
+    attempts-text: string,
+    error-text: string,
+    expected-hash-text: string,   // digest preview only, never a full checksum
+    computed-hash-text: string,   // digest preview only, never a full checksum
+    checksum-status: string,
+    checksum-verified: bool,
+    can-open-file: bool,
+    can-open-folder: bool,
+}
+
+export struct StatusInfo {
+    active-count: int,
+    queued-count: int,
+    paused-count: int,
+    completed-count: int,
+    failed-count: int,
+    speed-text: string,
+    db-text: string,
+    mode-text: string,     // "portable" / "per-user"
+    data-dir-text: string,
+    disk-text: string,     // "142.3 GB free of 512 GB"
+    disk-fraction: float,  // 0..1 of the target volume already used
+}
+
+export struct EndpointRow {
+    origin: string,
+    learned-text: string,
+    failures-text: string,
+}

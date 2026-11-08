@@ -1,0 +1,120 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/gui", "crates/cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.92"
+license = "MIT OR Apache-2.0"
+authors = ["udm contributors"]
+description = "No-telemetry, no-admin download manager for Windows 11 with HTTP/3 (QUIC) support"
+repository = "https://localhost/udm"
+
+[workspace.dependencies]
+# --- async runtime -----------------------------------------------------------
+tokio = { version = "1.54", features = ["rt", "rt-multi-thread", "macros", "time", "sync", "fs", "io-util", "signal"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+# --- http / quic -------------------------------------------------------------
+bytes = "1.12"
+http = "1.5"
+url = "2.5"
+percent-encoding = "2.3"
+reqwest = { version = "0.13", default-features = false, features = [
+    "http2",
+    "stream",
+    "charset",
+    "system-proxy",
+    # Bring-your-own crypto provider: we install `ring` process-wide so that
+    # there is exactly one TLS backend in the binary (no aws-lc-rs, no NASM,
+    # no CMake, cross-compiles cleanly to x86_64-pc-windows-gnu).
+    "rustls-no-provider",
+] }
+quinn = { version = "0.11", default-features = false, features = [
+    "runtime-tokio",
+    "rustls-ring",
+    "log",
+] }
+h3 = "0.0.8"
+h3-quinn = "0.0.10"
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+    "tls12",
+] }
+rustls-native-certs = "0.8"
+
+# --- storage -----------------------------------------------------------------
+redb = "4.4"
+
+# --- hashing -----------------------------------------------------------------
+sha2 = "0.11"
+sha1 = "0.10"
+md-5 = "0.11"
+blake3 = "1.8"
+hex = "0.4"
+
+# --- misc --------------------------------------------------------------------
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+parking_lot = "0.13"
+flume = "0.12"
+dunce = "1.0"
+humantime = "2.4"
+clap = { version = "4.5", features = ["derive"] }
+tempfile = "3.27"
+
+# --- ui ----------------------------------------------------------------------
+# slint / slint-build / rfd / embed-resource are declared by crates/gui itself
+# (version-pinned there); they are not shared with the other members.
+
+udm-core = { path = "crates/core", version = "0.1.0" }
+
+# The CI/sandbox boxes are memory-starved; debug info is what makes rustc
+# balloon. Release builds are unaffected.
+[profile.dev]
+debug = false
+
+# Build-dependencies (proc macros, slint-macros -> i-slint-compiler) are codegen'd
+# for real. Keep rustc's default 256 codegen units here: splitting the crate into
+# many small LLVM modules keeps the peak RSS low enough for ~1 GB CI boxes
+# (codegen-units = 1 makes i-slint-compiler OOM there - verified).
+[profile.dev.build-override]
+debug = false
+opt-level = 0
+debug-assertions = false
+overflow-checks = false
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = false
+strip = true
+# Keep unwinding: a panic inside one download task must not take the GUI down.
+panic = "unwind"
+
+# Build-dependencies (proc macros, slint-macros -> i-slint-compiler, the GUI's
+# build script) do not need optimizing; opt-level=3 + LTO on i-slint-compiler
+# OOM-kills ~1 GB machines. Keep them small and fast to compile. (LTO is off
+# for build-overrides by default.)
+[profile.release.build-override]
+opt-level = 0
+codegen-units = 256
+debug = false
+
+[profile.release-debug]
+inherits = "release"
+debug = true
+strip = false
+
+# The generated-Slint GUI crate is ~55k lines; splitting its codegen into many
+# small LLVM modules keeps peak rustc RSS under ~750 MB so 1 GB CI boxes can
+# link the debug binary without getting OOM-killed.
+[profile.dev.package.udm-gui]
+codegen-units = 1024

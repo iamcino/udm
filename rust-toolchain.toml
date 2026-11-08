@@ -1,0 +1,8 @@
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+# Add the target you build for, e.g. on Windows:
+#   rustup target add x86_64-pc-windows-msvc
+# Cross-compiling from Linux:
+#   rustup target add x86_64-pc-windows-gnu
+targets = []

@@ -1,0 +1,93 @@
+// cino-ui: vector icons on a 24-unit grid.
+//
+// Icons are Slint `Path`s coloured from Theme, never colourised SVG `Image`s:
+// the GPU renderer now and then drew those with pieces missing. An icon has a
+// stroked part and an optional filled part.
+//
+// Adding an icon: draw it on a 24x24 grid (stroke 1.4, round caps), put the
+// path data in `Icons` below, and add it to the gallery.
+
+export struct IconData {
+    stroke: string,
+    fill: string,
+}
+
+export global Icons {
+    // Sliders with knobs (General / Settings)
+    out property <IconData> sliders: {
+        stroke: "M 4 7 h 16 M 4 12 h 16 M 4 17 h 16",
+        fill: "M 12.8 7 a 2.2 2.2 0 1 0 4.4 0 a 2.2 2.2 0 1 0 -4.4 0 M 6.8 12 a 2.2 2.2 0 1 0 4.4 0 a 2.2 2.2 0 1 0 -4.4 0 M 10.8 17 a 2.2 2.2 0 1 0 4.4 0 a 2.2 2.2 0 1 0 -4.4 0",
+    };
+    // Shield with a tick (Protection / Engine)
+    out property <IconData> shield: {
+        stroke: "M 12 3 l 7 2.8 v 5.4 c 0 4.4 -2.9 8.2 -7 9.8 c -4.1 -1.6 -7 -5.4 -7 -9.8 V 5.8 z M 9 12 l 2.2 2.2 L 15.5 10",
+    };
+    // Lightning bolt (Speed / TCP)
+    out property <IconData> bolt: {
+        stroke: "M 13.5 2.5 L 5 13.5 h 6.5 l -1 8 l 8.5 -11 h -6.5 z",
+    };
+    // Globe (Network / DNS)
+    out property <IconData> globe: {
+        stroke: "M 3 12 a 9 9 0 1 0 18 0 a 9 9 0 1 0 -18 0 M 8.2 12 a 3.8 9 0 1 0 7.6 0 a 3.8 9 0 1 0 -7.6 0 M 3.5 9 h 17 M 3.5 15 h 17",
+    };
+    // Half-filled circle (Appearance)
+    out property <IconData> appearance: {
+        stroke: "M 3 12 a 9 9 0 1 0 18 0 a 9 9 0 1 0 -18 0",
+        fill: "M 12 3 a 9 9 0 0 1 0 18 z",
+    };
+    // Power symbol
+    out property <IconData> power: {
+        stroke: "M 12 3 L 12 11 M 6.3 6.6 A 8 8 0 1 0 17.7 6.6",
+    };
+    // House (Home)
+    out property <IconData> home: {
+        stroke: "M 4 11 L 12 4 L 20 11 M 6 9.5 V 20 h 4.5 v -5.5 h 3 V 20 H 18 V 9.5",
+    };
+    // Circular arrow (Refresh)
+    out property <IconData> refresh: {
+        stroke: "M 19.5 12 a 7.5 7.5 0 1 1 -2.2 -5.3 M 19.5 4 v 3.5 h -3.5",
+    };
+    // Info circle
+    out property <IconData> info: {
+        stroke: "M 3 12 a 9 9 0 1 0 18 0 a 9 9 0 1 0 -18 0 M 12 11 v 5.5",
+        fill: "M 11 7.8 a 1 1 0 1 0 2 0 a 1 1 0 1 0 -2 0",
+    };
+    // Tick, cross, chevron, plus, minus
+    out property <IconData> check: { stroke: "M 5 12.5 l 4.5 4.5 L 19 7.5" };
+    out property <IconData> close: { stroke: "M 6 6 L 18 18 M 18 6 L 6 18" };
+    out property <IconData> chevron-right: { stroke: "M 9.5 5.5 L 16 12 L 9.5 18.5" };
+    out property <IconData> plus: { stroke: "M 12 5 v 14 M 5 12 h 14" };
+    out property <IconData> minus: { stroke: "M 5 12 h 14" };
+}
+
+// Draws one icon in `color` (pass Theme.accent when selected, Theme.label2
+// otherwise).
+export component Icon {
+    in property <IconData> icon;
+    in property <color> color;
+    in property <length> stroke-width: 1.4px;
+    width: 18px;
+    height: 18px;
+    Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        stroke: root.color;
+        stroke-width: root.stroke-width;
+        stroke-line-cap: round;
+        stroke-line-join: round;
+        commands: root.icon.stroke;
+    }
+    if root.icon.fill != "": Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        fill: root.color;
+        stroke: root.color;
+        stroke-width: root.stroke-width;
+        stroke-line-join: round;
+        commands: root.icon.fill;
+    }
+}

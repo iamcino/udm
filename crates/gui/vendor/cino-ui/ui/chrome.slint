@@ -1,0 +1,111 @@
+// cino-ui: frameless window chrome. Windows-style caption buttons on the
+// right, a draggable title bar, a rounded shell and resize edges.
+//
+// Rust side: cino_ui::window::{drag, resize, minimize} (feature "winit") and,
+// on Windows, cino_ui::windows::apply_chrome for rounded corners + Mica.
+
+import { Theme } from "theme.slint";
+
+// Minimize / close button. `danger` makes it go red on hover (close).
+export component CaptionButton {
+    in property <bool> danger;
+    in property <string> commands;
+    callback clicked();
+    width: 46px;
+
+    Rectangle {
+        background: ta.pressed
+            ? (root.danger ? Theme.close-pressed : Theme.sidebar-sel.darker(20%))
+            : ta.has-hover ? (root.danger ? Theme.close-hover : Theme.sidebar-sel) : transparent;
+        animate background { duration: 80ms; }
+    }
+    Path {
+        width: 10px;
+        height: 10px;
+        viewbox-width: 10;
+        viewbox-height: 10;
+        commands: root.commands;
+        stroke: root.danger && ta.has-hover ? #ffffff : Theme.label;
+        stroke-width: 1px;
+    }
+    ta := TouchArea { clicked => { root.clicked(); } }
+}
+
+// Title bar over the content pane: the title centred, the empty area drags
+// the window, minimize / close on the right. Set `show-minimize: false` for
+// dialogs.
+export component TitleBar {
+    in property <string> title;
+    in property <bool> show-minimize: true;
+    callback close();
+    callback minimize();
+    callback drag();
+    height: 44px;
+
+    TouchArea {
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                root.drag();
+            }
+        }
+    }
+    Text {
+        text: root.title;
+        font-size: Theme.fs-body;
+        font-weight: 600;
+        color: Theme.label2;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    HorizontalLayout {
+        x: parent.width - self.width;
+        width: self.preferred-width;
+        if root.show-minimize: CaptionButton {
+            commands: "M 0 5 L 10 5";
+            clicked => { root.minimize(); }
+        }
+        CaptionButton {
+            danger: true;
+            commands: "M 0 0 L 10 10 M 10 0 L 0 10";
+            clicked => { root.close(); }
+        }
+    }
+}
+
+// The rounded, bordered window body. Use as the first child of a frameless,
+// transparent Window and put everything inside.
+export component WindowShell inherits Rectangle {
+    border-radius: Theme.r-window;
+    background: Theme.window-bg;
+    border-width: 1px;
+    border-color: Theme.separator;
+    clip: true;
+}
+
+// A strip along an edge of the frameless window that starts a resize.
+// Edge codes: 0 top, 1 bottom, 2 left, 3 right, 4 top-left, 5 top-right,
+// 6 bottom-left, 7 bottom-right (cino_ui::window::resize uses the same).
+export component ResizeEdge inherits TouchArea {
+    in property <int> edge;
+    callback resize(int);
+    pointer-event(e) => {
+        if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+            root.resize(root.edge);
+        }
+    }
+}
+
+// All eight resize edges at once. Place it LAST in the Window (after the
+// shell and any dialogs) so it is on top. It only covers a 5 px border, so
+// the content under it stays clickable.
+export component ResizeFrame {
+    callback resize(int);
+    ResizeEdge { edge: 0; x: 8px; y: 0; width: root.width - 16px; height: 5px; mouse-cursor: ns-resize; resize(e) => { root.resize(e); } }
+    ResizeEdge { edge: 1; x: 8px; y: root.height - 5px; width: root.width - 16px; height: 5px; mouse-cursor: ns-resize; resize(e) => { root.resize(e); } }
+    ResizeEdge { edge: 2; x: 0; y: 8px; width: 5px; height: root.height - 16px; mouse-cursor: ew-resize; resize(e) => { root.resize(e); } }
+    ResizeEdge { edge: 3; x: root.width - 5px; y: 8px; width: 5px; height: root.height - 16px; mouse-cursor: ew-resize; resize(e) => { root.resize(e); } }
+    ResizeEdge { edge: 4; x: 0; y: 0; width: 8px; height: 8px; mouse-cursor: nwse-resize; resize(e) => { root.resize(e); } }
+    ResizeEdge { edge: 5; x: root.width - 8px; y: 0; width: 8px; height: 8px; mouse-cursor: nesw-resize; resize(e) => { root.resize(e); } }
+    ResizeEdge { edge: 6; x: 0; y: root.height - 8px; width: 8px; height: 8px; mouse-cursor: nesw-resize; resize(e) => { root.resize(e); } }
+    ResizeEdge { edge: 7; x: root.width - 8px; y: root.height - 8px; width: 8px; height: 8px; mouse-cursor: nwse-resize; resize(e) => { root.resize(e); } }
+}

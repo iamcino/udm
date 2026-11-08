@@ -1,0 +1,35 @@
+// cino-ui: an app logo drawn live from its SVG path, so it follows the accent
+// (Yeager's BrandMark, made generic).
+//
+// Copy the `d` of your logo's main path into `commands` and its viewBox into
+// `viewbox-*`. The fill is a 45deg ombre from the accent to `tip`, on a dark
+// rounded tile. Keep the path in step with the SVG and the tray art.
+
+export component AccentLogo inherits Rectangle {
+    in property <string> commands;
+    in property <float> viewbox-x: 0;
+    in property <float> viewbox-y: 0;
+    in property <float> viewbox-width: 512;
+    in property <float> viewbox-height: 512;
+    in property <color> accent;
+    in property <color> tip: #f3f1ea;
+    in property <bool> tile: true;
+    // Where the ombre starts and ends along the diagonal, in percent.
+    in property <float> from: 18.75;
+    in property <float> to: 81.25;
+
+    border-radius: root.tile ? self.width * 0.22 : 0px;
+    background: root.tile ? @linear-gradient(180deg, #1b1e24 0%, #121418 100%) : transparent;
+    border-width: root.tile ? max(1px, self.width / 160) : 0px;
+    border-color: #2e323a;
+    Path {
+        width: 100%;
+        height: 100%;
+        viewbox-x: root.viewbox-x;
+        viewbox-y: root.viewbox-y;
+        viewbox-width: root.viewbox-width;
+        viewbox-height: root.viewbox-height;
+        fill: @linear-gradient(45deg, root.accent root.from * 1%, root.tip root.to * 1%);
+        commands: root.commands;
+    }
+}

@@ -1,0 +1,64 @@
+// cino-ui: the Appearance settings (dark mode + accent).
+//
+// Data flow: the switch flips Theme.dark itself (two-way binding), then `dark-changed` lets Rust
+// save. Swatches only call `accent-picked`; Rust saves and sets Theme.accent
+// back, so Rust stays the single source of truth for the accent.
+
+import { Theme } from "theme.slint";
+import { Lang } from "lang.slint";
+import { Swatch, GroupBox, ToggleRow, Row, RowSeparator, Segmented } from "widgets.slint";
+
+// A row of accent swatches; the ring marks the current Theme.accent.
+export component AccentPicker {
+    in property <[color]> accents: Theme.accents;
+    callback picked(color);
+    HorizontalLayout {
+        spacing: 10px;
+        alignment: end;
+        for c in root.accents: VerticalLayout {
+            alignment: center;
+            Swatch {
+                swatch-color: c;
+                selected: Theme.accent == c;
+                clicked => { root.picked(c); }
+            }
+        }
+    }
+}
+
+// The whole Appearance group: dark mode, accent and (optional) language.
+export component AppearanceGroup inherits GroupBox {
+    // Host palette override, keeping the shared Theme's two-input contract.
+    in property <[color]> accents: Theme.accents;
+    in property <bool> show-language: true;
+    callback dark-changed(bool);
+    callback accent-picked(color);
+    callback language-changed(bool);   // true = English
+
+    title: Lang.t("Giao diện", "Appearance");
+    ToggleRow {
+        title: Lang.t("Chế độ tối", "Dark mode");
+        checked <=> Theme.dark;
+        toggled(on) => { root.dark-changed(on); }
+    }
+    RowSeparator { }
+    Row {
+        title: Lang.t("Màu nhấn", "Accent colour");
+        AccentPicker {
+            accents: root.accents;
+            picked(c) => { root.accent-picked(c); }
+        }
+    }
+    if root.show-language: RowSeparator { }
+    if root.show-language: Row {
+        title: Lang.t("Ngôn ngữ", "Language");
+        Segmented {
+            options: ["Tiếng Việt", "English"];
+            current: Lang.english ? 1 : 0;
+            selected(i) => {
+                Lang.english = i == 1;
+                root.language-changed(i == 1);
+            }
+        }
+    }
+}

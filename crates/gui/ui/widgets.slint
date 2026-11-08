@@ -1,0 +1,166 @@
+// Small reusable pieces. Everything is hand-rolled (no std-widgets) except the
+// form controls, so the visual language stays identical everywhere.
+//
+// Style rules (Apple HIG, adapted):
+//   * depth comes from background lightness, not borders
+//   * hairlines (#ffffff14) only to separate large regions
+//   * one accent colour; buttons are quiet until hovered
+//   * controls are compact: 28-30px tall, 7px radius
+
+import { Theme } from "theme.slint";
+
+// Muted pill, e.g. the transport badge "HTTP/3 (QUIC)".
+export component Pill inherits Rectangle {
+    in property <string> text;
+    in property <color> fg: Theme.text-dim;
+    in property <color> bg: Theme.chip;
+    height: 18px;
+    width: pill-text.preferred-width + 14px;
+    background: root.bg;
+    border-radius: 9px;
+    clip: true;
+    pill-text := Text {
+        width: 100%;
+        height: 100%;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        text: root.text;
+        color: root.fg;
+        font-size: 10px;
+        font-weight: 600;
+    }
+}
+
+// Off-screen ruler: measures a string's rendered width without showing it.
+// Used to give toolbar buttons a fair, language-aware share of the row:
+// a button may never claim more than its own label needs.
+export component MeasuredText inherits Text {
+    visible: false;
+    font-size: 12px;
+}
+
+// Flat button; `primary` gives it the accent fill.
+export component ActionButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> is-enabled: true;
+    in property <bool> primary: false;
+    in property <color> tint: Theme.text-dim;
+    in property <bool> compact: false;
+    // `shown` hides the button *and* collapses its layout slot (Slint keeps
+    // space for `visible: false` children, which would scatter row actions).
+    in property <bool> shown: true;
+    out property <bool> hovered: touch.has-hover;
+    callback clicked;
+    visible: root.shown;
+    // Preferred width is label-driven, clamped by max-width (the layout
+    // negotiates the final size; assigning width: directly would fight it).
+    preferred-width: !root.shown ? 0px : label-text.preferred-width + (root.compact ? 12px : 22px);
+    height: root.compact ? 24px : 28px;
+    background: !root.is-enabled ? transparent
+        : root.primary ? (touch.pressed ? Theme.accent : touch.has-hover ? Theme.accent-hi : Theme.accent)
+        : touch.pressed ? Theme.panel-hi
+        : touch.has-hover ? Theme.panel-hi
+        : transparent;
+    border-radius: Theme.radius-sm;
+    opacity: root.is-enabled ? 1 : 0.35;
+    clip: true;
+    label-text := Text {
+        width: 100%;
+        height: 100%;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        overflow: elide;
+        text: root.label;
+        color: root.primary ? white : touch.has-hover ? Theme.text : root.tint;
+        font-size: 12px;
+        font-weight: (root.primary || touch.has-hover) ? 600 : 400;
+    }
+    touch := TouchArea {
+        enabled: root.is-enabled;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// Linear progress bar, 4px tall with 2px radius (HIG: thin, quiet, rounded).
+// `fraction < 0` means "size unknown".
+export component ProgressBar inherits Rectangle {
+    in property <float> fraction;
+    in property <color> tint: Theme.accent;
+    in property <bool> failed: false;
+    in property <bool> done: false;
+    height: 4px;
+    background: Theme.track;
+    border-radius: 2px;
+    clip: true;
+    fill-bar := Rectangle {
+        x: 0px;
+        width: root.fraction < 0 ? parent.width * 0.22 : parent.width * min(max(root.fraction, 0), 1);
+        height: parent.height;
+        border-radius: 2px;
+        background: root.failed ? Theme.err : root.done ? Theme.ok : root.tint;
+        animate width { duration: 180ms; easing: ease-in-out; }
+    }
+}
+
+// Single item in a context popup menu.
+export component ContextMenuItem inherits Rectangle {
+    in property <string> label;
+    in property <bool> is-danger: false;
+    in property <bool> is-enabled: true;
+    callback clicked;
+    height: 26px;
+    background: !root.is-enabled ? transparent : touch.has-hover ? Theme.chip : transparent;
+    border-radius: Theme.radius-sm;
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        Text {
+            vertical-alignment: center;
+            text: root.label;
+            font-size: 12px;
+            color: !root.is-enabled ? Theme.text-faint
+                : root.is-danger ? Theme.err
+                : touch.has-hover ? Theme.text
+                : Theme.text-dim;
+        }
+    }
+    touch := TouchArea {
+        enabled: root.is-enabled;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// Section heading for the forms.
+export component SectionTitle inherits Text {
+    text: root.label;
+    in property <string> label;
+    color: Theme.text-faint;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.8px;
+}
+
+// Key/value line for the About view.
+export component KeyValue inherits HorizontalLayout {
+    in property <string> key;
+    in property <string> value;
+    in property <color> value-color: Theme.text;
+    spacing: 12px;
+    height: max(k.preferred-height, v.preferred-height) + 4px;
+    k := Text {
+        width: 150px;
+        text: root.key;
+        color: Theme.text-faint;
+        font-size: 12px;
+    }
+    v := Text {
+        horizontal-stretch: 1;
+        min-width: 0px;
+        text: root.value;
+        color: root.value-color;
+        font-size: 12px;
+        overflow: elide;
+    }
+}

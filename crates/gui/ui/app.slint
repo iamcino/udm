@@ -1,0 +1,733 @@
+import { I18n } from "i18n.slint";
+import { Theme as CinoTheme, Lang } from "@cino-ui";
+export { I18n }
+// Sidebar navigation item (Apple HIG "source list" style): quiet until
+// hovered, accent-tinted fill when selected, no left bar, no divider.
+component NavItem inherits Rectangle {
+    in property <string> label;
+    in property <string> glyph;
+    in property <string> badge;
+    in property <bool> active: false;
+    callback clicked;
+    height: 30px;
+    background: root.active ? Theme.accent-soft : touch.has-hover ? Theme.row-hover : transparent;
+    border-radius: Theme.radius-sm;
+    clip: true;
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 8px;
+        Text {
+            text: root.glyph;
+            font-size: 13px;
+            vertical-alignment: center;
+            visible: root.glyph != "";
+        }
+        Text {
+            horizontal-stretch: 1;
+            text: root.label;
+            color: root.active ? Theme.text : Theme.text-dim;
+            font-size: 13px;
+            font-weight: root.active ? 600 : 400;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        Text {
+            visible: root.badge != "";
+            text: root.badge;
+            color: root.active ? Theme.text-dim : Theme.text-faint;
+            font-size: 11px;
+            vertical-alignment: center;
+        }
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// Small caption above a sidebar group ("LIBRARY", "GENERAL").
+component SidebarCaption inherits Text {
+    in property <string> label;
+    text: root.label;
+    color: Theme.text-faint;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    height: 26px;
+    vertical-alignment: bottom;
+}
+
+// Recessed single-line text field used by the unified toolbar.
+component ToolbarField inherits Rectangle {
+    in-out property <string> text;
+    in property <string> placeholder;
+    in property <length> field-width: 240px;
+    callback submit;
+    height: 28px;
+    width: root.field-width;
+    background: Theme.input-bg;
+    border-radius: Theme.radius-sm;
+    border-width: 1px;
+    border-color: input.has-focus ? Theme.accent : Theme.border-soft;
+    clip: true;
+    input := TextInput {
+        x: 10px;
+        width: parent.width - 20px;
+        height: parent.height;
+        vertical-alignment: center;
+        text <=> root.text;
+        color: Theme.text;
+        font-size: 12px;
+        accepted => { root.submit(); }
+    }
+    // hand-drawn placeholder (TextInput's placeholder-color is not in 1.6)
+    Text {
+        visible: root.text == "" && !input.has-focus;
+        x: 10px;
+        width: parent.width - 20px;
+        height: parent.height;
+        vertical-alignment: center;
+        text: root.placeholder;
+        color: Theme.text-faint;
+        font-size: 12px;
+        overflow: elide;
+    }
+}
+
+
+// udm main window.
+//
+// Layout: dark sidebar (recessed) + content canvas (raised) + hairline
+// status strip. One unified toolbar sits on the content side; there is no
+// second header inside the views.
+
+import { Theme } from "theme.slint";
+import { TaskRow, TaskDetail, StatusInfo, EndpointRow } from "model.slint";
+import { ActionButton, Pill, ProgressBar, KeyValue } from "widgets.slint";
+import { DownloadsView } from "views/downloads.slint";
+import { AddView } from "views/add.slint";
+import { SettingsView } from "views/settings.slint";
+import { AboutView } from "views/about.slint";
+import { ScrollView, Palette } from "std-widgets.slint";
+
+export component AppWindow inherits Window {
+    title: "Universal Download Manager";
+    icon: @image-url("../assets/icon.png");
+    background: Theme.bg;
+    default-font-family: Theme.family;
+    default-font-size: 13px;
+    preferred-width: 1040px;
+    preferred-height: 640px;
+    min-width: 800px;
+    min-height: 460px;
+    // View content must not become a native maximum track size. A generous,
+    // stable bound prevents a tab switch from resizing the software surface
+    // during a redraw; Windows still maximizes to the monitor work area.
+    max-width: 100000px;
+    max-height: 100000px;
+
+    // 0 = downloads, 1 = add, 2 = settings, 3 = about
+    in-out property <int> view: 0;
+    in-out property <int> theme-index <=> Theme.mode;
+    in-out property <int> accent-index <=> Theme.accent-index;
+    in-out property <int> language-index <=> I18n.language;
+    in-out property <ColorScheme> native-color-scheme <=> Palette.color-scheme;
+    public function apply-native-theme() {
+        CinoTheme.dark = root.theme-index == 0;
+        CinoTheme.accent = Theme.accents[min(max(root.accent-index, 0), 4)];
+        Lang.english = root.language-index == 0;
+        root.native-color-scheme = root.theme-index == 1 ? ColorScheme.light : ColorScheme.dark;
+    }
+    callback appearance-changed;
+    public pure function translate(key: string) -> string { return I18n.tr(key); }
+    // downloads-list filter: 0 = all, 1 = active, 2 = completed, 3 = failed
+    in-out property <int> library: 0;
+    // substring filter on the file name, applied in Rust
+    in-out property <string> filter;
+
+    // G1 responsive toolbar budget (row 2 of the toolbar): the row shares
+    // its width between the filter field and the action buttons. When a
+    // bulk selection is active the buttons are guaranteed their measured
+    // share first and the field takes what remains (floor 120px). Below
+    // 920px window width the row runs "tight": the selected-count label
+    // yields its space (Remove still names the count) and button labels
+    // are capped so EN and VI both fit at the 800px minimum window.
+    property <length> row2-avail: root.width - 220px - 32px;
+    property <bool> row2-tight: root.width < 920px;
+    property <length> row2-actions-w: root.selected-count > 0
+        ? min(pause-m.preferred-width + resume-m.preferred-width + remove-m.preferred-width + clear-measure.preferred-width + 88px, row2-avail - 152px)
+        : min(clear-measure.preferred-width + 22px, row2-avail - 152px);
+
+    in property <[TaskRow]> tasks;
+    in property <TaskDetail> detail;
+    in-out property <bool> detail-visible: false;
+    callback close-detail;
+    in property <int> selected-count: 0;
+    in-out property <bool> bulk-remove-armed: false;
+    callback fit-column(int) -> length;
+    callback toggle-selection(string);
+    callback row-clicked(string, bool, bool);
+    callback select-all;
+    callback clear-selection;
+    callback bulk-pause;
+    callback bulk-resume;
+    callback bulk-remove;
+    out property <bool> table-needs-scroll-clamp: downloads.needs-scroll-clamp;
+    public function clamp-table-scroll() { downloads.clamp-scroll(); }
+    in property <string> measure-text;
+    in property <float> measure-font-size: 13;
+    out property <length> measured-text-width: column-measure.preferred-width;
+    // One font-metric probe, used only on a divider double-click. No repeated
+    // hidden rows or approximate character-width arithmetic on UI ticks.
+    column-measure := Text {
+        visible: false;
+        text: root.measure-text;
+    }
+    // G1 font-metric probes for the toolbar action labels (12px), so row 2
+    // can budget each button exactly what its current-language label needs.
+    // Invisible and layout-free, same pattern as column-measure above.
+    pause-m := Text { visible: false; font-size: 12px; text: I18n.tr("Pause"); }
+    resume-m := Text { visible: false; font-size: 12px; text: I18n.tr("Resume"); }
+    remove-m := Text { visible: false; font-size: 12px; text: root.bulk-remove-armed ? I18n.tr("Confirm remove") + " " + root.selected-count + "?" : I18n.tr("Remove") + " " + root.selected-count; }
+    clear-measure := Text { visible: false; font-size: 12px; text: I18n.tr("Clear finished"); }
+    in property <StatusInfo> status;
+    in property <[EndpointRow]> endpoints;
+    in property <string> version-text;
+    in property <bool> http3-available;
+
+    // add form
+    in-out property <string> add-urls;
+    in-out property <string> add-dir;
+    in-out property <string> add-hash;
+    in-out property <int> add-segments: 8;
+    in-out property <int> add-transport-index: 0;
+    in-out property <bool> add-paused: false;
+    in-out property <string> add-preview;
+
+    // settings form
+    in-out property <string> set-download-dir;
+    in-out property <int> set-max-tasks: 3;
+    in-out property <int> set-segments: 8;
+    in-out property <int> set-transport-index: 0;
+    in-out property <int> set-conflict-index: 0;
+    in-out property <bool> set-http3: true;
+    in-out property <bool> set-proxy: true;
+    in-out property <bool> set-verify: true;
+    in-out property <bool> set-auto-categorize: false;
+    in-out property <string> set-user-agent;
+    in-out property <int> set-log-index: 3;
+
+    // notifications
+    in-out property <string> toast: "";
+    in-out property <bool> toast-error: false;
+
+    // callbacks into Rust
+    callback pause(float);
+    callback resume(float);
+    callback cancel(float);
+    callback retry(float);
+    callback remove(float);
+    callback delete-file(float);
+    callback copy-url(float);
+    callback open-file(float);
+    callback open-folder(float);
+    callback add-submitted;
+    callback add-pick-dir;
+    callback add-dir-edited;
+    callback add-urls-edited;
+    callback settings-pick-dir;
+    callback settings-saved;
+    callback settings-reset;
+    callback open-data-dir;
+    callback open-log;
+    callback clear-finished;
+    callback add-from-clipboard;
+
+    // Absolute shell bounds keep view-specific layout hints from resizing the
+    // native window during a redraw. Only the content inside this shell flexes.
+    Rectangle {
+        // A real painted surface invalidates the entire software-rendered frame
+        // when the palette changes, including transparent gaps between controls.
+        background: Theme.bg;
+        width: 100%;
+        height: 100%;
+
+        HorizontalLayout {
+            x: 0px;
+            y: 0px;
+            width: 100%;
+            height: max(root.height - 29px - (root.toast != "" ? 32px : 0px), 0px);
+            min-height: 0px;
+            vertical-stretch: 1;
+
+            // ------------------------------------------------------- sidebar
+            Rectangle {
+                width: 220px;
+                height: 100%;
+                vertical-stretch: 1;
+                background: Theme.bg-raised;
+                VerticalLayout {
+                    padding: 12px;
+                    spacing: 2px;
+
+                    // brand row
+                    HorizontalLayout {
+                        spacing: 8px;
+                        height: 40px;
+                        alignment: start;
+                        Image {
+                            source: @image-url("../assets/icon-256.png");
+                            width: 26px;
+                            height: 26px;
+                            y: 7px;
+                        }
+                        Text {
+                            text: "UDM";
+                            height: 40px;
+                            color: Theme.text;
+                            font-size: 15px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                        }
+                        HorizontalLayout { horizontal-stretch: 1; }
+                    }
+
+                    Rectangle { height: 8px; }
+
+                    SidebarCaption { label: I18n.tr("LIBRARY"); }
+                    NavItem {
+                        glyph: "≡";
+                        label: I18n.tr("All Downloads");
+                        badge: root.status.active-count + root.status.queued-count
+                            + root.status.paused-count + root.status.completed-count
+                            + root.status.failed-count > 0
+                            ? (root.status.active-count + root.status.queued-count
+                                + root.status.paused-count + root.status.completed-count
+                                + root.status.failed-count) + ""
+                            : "";
+                        active: root.view == 0 && root.library == 0;
+                        clicked => { root.view = 0; root.library = 0; }
+                    }
+                    NavItem {
+                        glyph: "▶";
+                        label: I18n.tr("Active");
+                        badge: root.status.active-count + root.status.queued-count > 0
+                            ? (root.status.active-count + root.status.queued-count) + "" : "";
+                        active: root.view == 0 && root.library == 1;
+                        clicked => { root.view = 0; root.library = 1; }
+                    }
+                    NavItem {
+                        glyph: "✓";
+                        label: I18n.tr("Completed");
+                        badge: root.status.completed-count > 0 ? root.status.completed-count + "" : "";
+                        active: root.view == 0 && root.library == 2;
+                        clicked => { root.view = 0; root.library = 2; }
+                    }
+                    NavItem {
+                        glyph: "!";
+                        label: I18n.tr("Failed");
+                        badge: root.status.failed-count > 0 ? root.status.failed-count + "" : "";
+                        active: root.view == 0 && root.library == 3;
+                        clicked => { root.view = 0; root.library = 3; }
+                    }
+
+                    SidebarCaption { label: I18n.tr("GENERAL"); }
+                    NavItem {
+                        glyph: "+";
+                        label: I18n.tr("Add Download");
+                        active: root.view == 1;
+                        clicked => { root.view = 1; }
+                    }
+                    NavItem {
+                        glyph: "⚙";
+                        label: I18n.tr("Settings");
+                        active: root.view == 2;
+                        clicked => { root.view = 2; }
+                    }
+                    NavItem {
+                        glyph: "ℹ";
+                        label: I18n.tr("About & Privacy");
+                        active: root.view == 3;
+                        clicked => { root.view = 3; }
+                    }
+
+                    VerticalLayout { vertical-stretch: 1; }
+
+                    // storage widget: linear bar, no gauge (HIG: quiet, flat)
+                    Rectangle {
+                        height: storage-col.preferred-height + 20px;
+                        background: Theme.panel;
+                        border-radius: Theme.radius;
+                        storage-col := VerticalLayout {
+                            padding: 10px;
+                            spacing: 6px;
+                            Text {
+                                text: I18n.tr("STORAGE");
+                                color: Theme.text-faint;
+                                font-size: 10px;
+                                font-weight: 600;
+                                letter-spacing: 1px;
+                            }
+                            Text {
+                                text: root.status.disk-text != "" ? root.status.disk-text : "measuring…";
+                                color: Theme.text;
+                                font-size: 12px;
+                                overflow: elide;
+                            }
+                            Rectangle {
+                                height: 4px;
+                                background: Theme.track;
+                                border-radius: 2px;
+                                clip: true;
+                                Rectangle {
+                                    x: 0px;
+                                    width: parent.width * min(max(root.status.disk-fraction, 0), 1);
+                                    height: parent.height;
+                                    border-radius: 2px;
+                                    background: root.status.disk-fraction > 0.9 ? Theme.warn : Theme.accent;
+                                }
+                            }
+                        }
+                    }
+
+                }
+            }
+
+            // ------------------------------------------------------- content
+            Rectangle {
+                horizontal-stretch: 1;
+                vertical-stretch: 1;
+                // Hard width: the table rows position their columns
+                // absolutely off the row width, and the layout's implicit
+                // min-width propagation would otherwise keep this pane at its
+                // preferred (too wide) size and clip the right-hand columns.
+                width: root.width - 220px;
+                height: 100%;
+                clip: true;
+
+                VerticalLayout {
+                    width: 100%;
+                    height: 100%;
+                    vertical-stretch: 1;
+                    // Keep the toolbar instance alive across view changes. The
+                    // collapsed slot avoids rebuilding the window's layout tree.
+                    Rectangle {
+                        height: root.view == 0 ? 84px : 0px;
+                        visible: root.view == 0;
+                        clip: true;
+                        VerticalLayout {
+                            padding-left: Theme.pad;
+                            padding-right: Theme.pad;
+                            padding-top: 10px;
+                            padding-bottom: 10px;
+                            spacing: 8px;
+                            HorizontalLayout {
+                                spacing: 8px;
+                                ToolbarField {
+                                    field-width: max(root.width - 220px - 32px - 60px, 120px);
+                                    text <=> root.add-urls;
+                                    placeholder: I18n.tr("Paste a URL and press Enter to download");
+                                    submit => { root.add-submitted(); }
+                            }
+                            ActionButton {
+                                label: I18n.tr("Add");
+                                primary: true;
+                                clicked => { root.add-submitted(); }
+                            }
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                ToolbarField {
+                                    field-width: max(root.width - 220px - 32px - root.row2-actions-w - 24px, 120px);
+                                    text <=> root.filter;
+                                    placeholder: I18n.tr("Filter downloads");
+                            }
+                            if root.selected-count > 0 && !row2-tight: Text {
+                                vertical-alignment: center;
+                                text: root.selected-count + " " + I18n.tr("selected");
+                                color: Theme.accent-hi;
+                                font-size: 12px;
+                                font-weight: 600;
+                            }
+                            if root.selected-count > 0: ActionButton {
+                                label: I18n.tr("Pause");
+                                clicked => { root.bulk-remove-armed = false; root.bulk-pause(); }
+                            }
+                            if root.selected-count > 0: ActionButton {
+                                label: I18n.tr("Resume");
+                                clicked => { root.bulk-remove-armed = false; root.bulk-resume(); }
+                            }
+                            if root.selected-count > 0: ActionButton {
+                                label: root.bulk-remove-armed ? I18n.tr("Confirm remove") + " " + root.selected-count + "?"
+                                    : I18n.tr("Remove") + " " + root.selected-count;
+                                clicked => {
+                                    if (root.bulk-remove-armed) {
+                                        root.bulk-remove-armed = false;
+                                        root.bulk-remove();
+                                    } else {
+                                        root.bulk-remove-armed = true;
+                                    }
+                                }
+                            }
+                            ActionButton {
+                                label: I18n.tr("Clear finished");
+                                max-width: root.row2-tight ? 118px : 220px;
+                                clicked => { root.clear-finished(); }
+                            }
+                            }
+                        }
+                        // hairline under the toolbar (single divider per region)
+                        Rectangle {
+                            y: parent.height - 1px;
+                            width: 100%;
+                            height: 1px;
+                            background: Theme.border-soft;
+                        }
+                    }
+
+                    Rectangle {
+                        vertical-stretch: 1;
+                        min-height: 0px;
+                        clip: true;
+                        downloads := DownloadsView {
+                            width: 100%;
+                            height: 100%;
+                            visible: root.view == 0;
+                            tasks: root.tasks;
+                            selected-count: root.selected-count;
+                            fit-column(index) => { root.fit-column(index) }
+                            toggle-selection(key) => { root.toggle-selection(key); }
+                            row-clicked(key, ctrl, shift) => { root.row-clicked(key, ctrl, shift); }
+                            select-all => { root.select-all(); }
+                            clear-selection => { root.clear-selection(); }
+                            pause(id) => { root.pause(id); }
+                            resume(id) => { root.resume(id); }
+                            cancel(id) => { root.cancel(id); }
+                            retry(id) => { root.retry(id); }
+                            remove(id) => { root.remove(id); }
+                            delete-file(id) => { root.delete-file(id); }
+                            copy-url(id) => { root.copy-url(id); }
+                            open-file(id) => { root.open-file(id); }
+                            open-folder(id) => { root.open-folder(id); }
+                        }
+                        AddView {
+                            width: 100%;
+                            height: 100%;
+                            visible: root.view == 1;
+                            urls <=> root.add-urls;
+                            dir <=> root.add-dir;
+                            hash <=> root.add-hash;
+                            segments <=> root.add-segments;
+                            transport-index <=> root.add-transport-index;
+                            paused <=> root.add-paused;
+                            preview: root.add-preview;
+                            dir-edited => { root.add-dir-edited(); }
+                            urls-edited => { root.add-urls-edited(); }
+                            pick-dir => { root.add-pick-dir(); }
+                            submitted => { root.add-submitted(); }
+                        }
+                        SettingsView {
+                            width: 100%;
+                            height: 100%;
+                            visible: root.view == 2;
+                            theme-index <=> root.theme-index;
+                            accent-index <=> root.accent-index;
+                            language-index <=> root.language-index;
+                            appearance-changed => { root.appearance-changed(); }
+                            download-dir <=> root.set-download-dir;
+                            max-tasks <=> root.set-max-tasks;
+                            segments <=> root.set-segments;
+                            transport-index <=> root.set-transport-index;
+                            conflict-index <=> root.set-conflict-index;
+                            http3 <=> root.set-http3;
+                            proxy <=> root.set-proxy;
+                            verify <=> root.set-verify;
+                            auto-categorize <=> root.set-auto-categorize;
+                            user-agent <=> root.set-user-agent;
+                            log-index <=> root.set-log-index;
+                            pick-dir => { root.settings-pick-dir(); }
+                            saved => { root.settings-saved(); }
+                            reset => { root.settings-reset(); }
+                        }
+                        AboutView {
+                            width: 100%;
+                            height: 100%;
+                            visible: root.view == 3;
+                            version-text: root.version-text;
+                            status: root.status;
+                            endpoints: root.endpoints;
+                            http3-available: root.http3-available;
+                            open-data-dir => { root.open-data-dir(); }
+                            open-log => { root.open-log(); }
+                        }
+                    }
+
+                    // --------------------------------- bottom Task Detail panel (Commit 2)
+                    // Shown only in the downloads view while a task is focused.
+                    // Closing it returns its full height to the table above.
+                    Rectangle {
+                        height: root.view == 0 && root.detail-visible ? 196px : 0px;
+                        visible: root.view == 0 && root.detail-visible;
+                        clip: true;
+                        background: Theme.bg-raised;
+                        Rectangle { y: 0px; width: 100%; height: 1px; background: Theme.border-soft; }
+                        VerticalLayout {
+                            padding-left: Theme.pad;
+                            padding-right: Theme.pad;
+                            padding-top: 8px;
+                            padding-bottom: 8px;
+                            spacing: 6px;
+                            HorizontalLayout {
+                                height: 28px;
+                                spacing: 8px;
+                                Text {
+                                    horizontal-stretch: 1;
+                                    text: root.detail.name;
+                                    color: Theme.text;
+                                    font-size: 13px;
+                                    font-weight: 700;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+                                Rectangle {
+                                    width: detail-state.width;
+                                    height: 28px;
+                                    detail-state := Pill {
+                                        y: (parent.height - self.height) / 2;
+                                        text: I18n.tr(root.detail.state-label);
+                                        fg: root.detail.state == "failed" ? Theme.err
+                                        : root.detail.state == "completed" ? Theme.ok
+                                        : root.detail.state == "downloading" ? Theme.accent-hi
+                                        : Theme.text-dim;
+                                    }
+                                }
+                                ActionButton {
+                                    compact: true;
+                                    label: I18n.tr("Open");
+                                    shown: root.detail.can-open-file;
+                                    tint: Theme.accent-hi;
+                                    clicked => { root.open-file(root.detail.id); }
+                                }
+                                ActionButton {
+                                    compact: true;
+                                    label: I18n.tr("Folder");
+                                    shown: root.detail.can-open-folder;
+                                    tint: Theme.text;
+                                    clicked => { root.open-folder(root.detail.id); }
+                                }
+                                ActionButton {
+                                    compact: true;
+                                    label: I18n.tr("Copy URL");
+                                    clicked => { root.copy-url(root.detail.id); }
+                                }
+                                ActionButton {
+                                    compact: true;
+                                    label: "×";
+                                    tint: Theme.text-dim;
+                                    clicked => { root.close-detail(); }
+                                }
+                            }
+                            ProgressBar {
+                                fraction: root.detail.percent;
+                                failed: root.detail.state == "failed";
+                                done: root.detail.state == "completed";
+                            }
+                            HorizontalLayout {
+                                spacing: 24px;
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    spacing: 2px;
+                                    KeyValue { key: I18n.tr("Progress"); value: root.detail.progress-text + (root.detail.percent >= 0 ? " (" + round(min(max(root.detail.percent, 0), 1) * 100) + "%)" : ""); }
+                                    KeyValue { key: I18n.tr("URL"); value: root.detail.url; }
+                                    KeyValue { key: I18n.tr("File"); value: root.detail.final-path; }
+                                    KeyValue { key: I18n.tr("Destination"); value: root.detail.dest-dir; }
+                                    if root.detail.error-text != "": KeyValue { key: I18n.tr("Error"); value: root.detail.error-text; value-color: Theme.err; }
+                                }
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    spacing: 2px;
+                                    KeyValue { key: I18n.tr("Speed"); value: root.detail.speed-text + (root.detail.eta-text != "" ? "  ·  " + root.detail.eta-text : ""); }
+                                    KeyValue { key: I18n.tr("Segments"); value: root.detail.segments-text; }
+                                    KeyValue { key: I18n.tr("Transport"); value: root.detail.transport-label; }
+                                    KeyValue { key: I18n.tr("Created"); value: root.detail.created-text + "  ·  " + I18n.tr("Started") + " " + root.detail.started-text + "  ·  " + I18n.tr("Finished") + " " + root.detail.finished-text; }
+                                    KeyValue { key: I18n.tr("Attempts"); value: root.detail.attempts-text; }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text {
+                                    text: I18n.tr("Checksum");
+                                    color: Theme.text-faint;
+                                    font-size: 12px;
+                                    width: 150px;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    horizontal-stretch: 1;
+                                    text: root.detail.checksum-status
+                                        + (root.detail.expected-hash-text != "" ? "  ·  " + I18n.tr("Expected") + " " + root.detail.expected-hash-text + " (" + I18n.tr("preview") + ")" : "")
+                                        + (root.detail.computed-hash-text != "" ? "  ·  " + I18n.tr("Computed") + " " + root.detail.computed-hash-text + " (" + I18n.tr("preview") + ")" : "");
+                                    color: root.detail.checksum-verified ? Theme.ok : Theme.text-dim;
+                                    font-size: 12px;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // toast bar when toolbar is hidden (e.g. Settings / About)
+        if root.toast != "": Rectangle {
+            y: root.height - 61px;
+            width: 100%;
+            height: 32px;
+            background: root.toast-error ? Theme.err.with-alpha(0.12) : Theme.accent-soft;
+            HorizontalLayout {
+                padding-left: 16px;
+                padding-right: 16px;
+                alignment: center;
+                Text {
+                    vertical-alignment: center;
+                    text: root.toast;
+                    color: root.toast-error ? Theme.err : Theme.accent-hi;
+                    font-size: 12px;
+                    font-weight: 500;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
+            }
+        }
+
+        // ------------------------------------------------------- status bar
+        Rectangle { y: root.height - 29px; width: 100%; height: 1px; background: Theme.border-soft; }
+        Rectangle {
+            y: root.height - 28px;
+            width: 100%;
+            height: 28px;
+            background: Theme.bg-raised;
+            HorizontalLayout {
+                padding-left: 14px;
+                padding-right: 14px;
+                spacing: 16px;
+                Text {
+                    vertical-alignment: center;
+                    text: "↓ " + root.status.speed-text;
+                    color: root.status.active-count > 0 ? Theme.accent-hi : Theme.text-faint;
+                    font-size: 11px;
+                    font-weight: 600;
+                }
+                Text {
+                    vertical-alignment: center;
+                    text: root.status.active-count + " " + I18n.tr("active") + " · " + root.status.queued-count + " " + I18n.tr("queued");
+                    color: Theme.text-dim;
+                    font-size: 11px;
+                }
+                HorizontalLayout { horizontal-stretch: 1; }
+            }
+        }
+    }
+}
