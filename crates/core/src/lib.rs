@@ -22,16 +22,19 @@
 //!
 //! ## Layout
 //!
-//! | module        | responsibility                                             |
-//! |---------------|------------------------------------------------------------|
-//! | [`config`]    | user settings (serialised into redb)                       |
-//! | [`engine`]    | task lifecycle, queueing, segment workers                  |
-//! | [`error`]     | one error type for the whole engine                        |
-//! | [`hash`]      | MD5/SHA-1/SHA-256/SHA-512/BLAKE3 verification              |
-//! | [`net`]       | HTTP/3 (quinn+h3) and HTTP/1.1-2 (reqwest) transports      |
-//! | [`paths`]     | privilege-free filesystem locations                        |
-//! | [`store`]     | redb schema, records, Alt-Svc cache                        |
-//! | [`util`]      | filename/URL/size/duration helpers                         |
+//! | module         | responsibility                                             |
+//! |----------------|------------------------------------------------------------|
+//! | [`category`]   | filename-based download routing (G2)                       |
+//! | [`config`]     | user settings (serialised into redb)                       |
+//! | [`durability`] | versioned progress proofs (data-sync receipts)             |
+//! | [`engine`]     | task lifecycle, queueing, segment workers                  |
+//! | [`error`]      | one error type for the whole engine                        |
+//! | [`finalize`]   | durable rename transactions (finalize intent)              |
+//! | [`hash`]       | MD5/SHA-1/SHA-256/SHA-512/BLAKE3 verification              |
+//! | [`net`]        | HTTP/3 (quinn+h3) and HTTP/1.1-2 (reqwest) transports      |
+//! | [`paths`]      | privilege-free filesystem locations                        |
+//! | [`store`]      | redb schema, records, Alt-Svc cache                        |
+//! | [`util`]       | filename/URL/size/duration helpers                         |
 
 pub mod category;
 pub mod config;

@@ -13,7 +13,7 @@ and shipping), `OPERATIONS.md` (running it), `REFERENCES.md` (specs & deps).
 ```
 udm/
 ├── crates/
-│   ├── core/   udm-core  — the whole product minus pixels (5.0k lines)
+│   ├── core/   udm-core  — the whole product minus pixels (13,215 lines)
 │   │   ├── engine/   mod.rs (queue, API, persistence) · task.rs (one
 │   │   │             download's state machine) · speed.rs (EWMA meter)
 │   │   ├── net/      stack.rs (transport selection, segmented transfer)
@@ -28,7 +28,7 @@ udm/
 │   ├── cli/    udm-cli — headless front-end (clap): get, probe, import,
 │   │           list, watch, pause, resume, cancel, retry, remove, settings,
 │   │           doctor; global --no-learning
-│   └── gui/    udm — Slint 1.6 window (software renderer, winit backend)
+│   └── gui/    udm — Slint 1.18.1 window (software renderer, winit backend)
 │       ├── ui/        app.slint (shell + full Rust contract), theme.slint
 │       │              (tokens), model.slint (row structs), widgets.slint,
 │       │              views/{downloads,add,settings,about}.slint
@@ -83,6 +83,14 @@ internal and knows nothing about UI. All three binaries are single-process.
   DB stats, the Alt-Svc table, and disk free space.
 * **CLI**: `get`/`watch` block on the same snapshot loop with ANSI output;
   one-shot verbs (`pause 42`) mutate and exit.
+* **Connection totals (owner decision 2026-11-08):** the engine reports no
+  connection total for v0.1.0 - `EngineConnections` is `Unavailable` and the
+  H1/H2 gauges read `Unknown`, because the pinned reqwest/hyper-util stack
+  exposes no pool observability. Totals must never be derived from
+  per-protocol counts, and no pool is owned or replaced in v1. Reopen only if
+  the owner approves an N1 connection budget, N2/N3 multi-path starts,
+  upstream ships pool observability, or a real incident traces to the
+  missing count.
 
 **Single instance**: redb opens the database file exclusively. A second
 process gets `Error::DatabaseLocked` and exits with code 2 (GUI shows the

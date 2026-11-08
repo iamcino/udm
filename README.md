@@ -67,11 +67,13 @@ On Windows:
 .\packaging\windows\build.ps1                  # -> dist\ + NSIS installer
 ```
 
-GitHub Actions (`.github/workflows/ci.yml`): every push runs the tests and
-builds Windows artifacts twice — natively on `windows-latest` (MSVC: exe +
-per-user NSIS installer + portable zip) and cross-compiled on `ubuntu-latest`
-(GNU: portable zip). Pushing a `v*` tag publishes a GitHub Release with those
-files attached.
+GitHub Actions (`.github/workflows/ci.yml`) defines five jobs - test,
+slint-compile, windows-msvc, windows-gnu, release - but while this
+repository is private every job is skipped (each carries
+`if: ${{ !github.event.repository.private }}`, and release also `needs` the
+four skipped jobs), so no push runs the tests and no `v*` tag publishes a
+release. The jobs run again automatically once the repo is public; until
+then the local/VM gates are the actual gates.
 
 Slint UI codegen: by default (`slint-compile` feature) `udm-gui` compiles
 `ui/*.slint` during the build via `slint-build`, which needs ~2 GB of RAM
@@ -95,7 +97,7 @@ Portable mode: put an empty `udm.portable` file next to `udm.exe` (or set
 ```
 crates/core      engine (supervisor + per-task segment workers), net stack
                  (tls / h3 / http12 / altsvc / stack), store (redb), config,
-                 hash, paths, util            ~6.7k lines, 50+ unit tests
+                 hash, paths, util            13,215 lines, 50+ unit tests
 crates/gui       Slint UI (ui/*.slint) + thin event-loop glue (src/state.rs)
 crates/cli       clap front-end with a live ANSI progress renderer
 packaging/       asInvoker manifest, .rc, NSIS per-user installer, build scripts

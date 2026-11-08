@@ -31,7 +31,7 @@ Standards, libraries and documents this project builds on, with a note on
 
 | Crate | Version line | Role |
 |---|---|---|
-| `slint` / `slint-build` / `i-slint-compiler` | 1.6.0 (pinned; generated code is version-coupled) | Declarative UI, software renderer + winit backend; build-time `.slint` compiler |
+| `slint` / `slint-build` / `i-slint-compiler` | 1.18.1 (pinned; generated code is version-coupled) | Declarative UI, software renderer + winit backend; build-time `.slint` compiler |
 | `quinn` | 0.11.x | QUIC client endpoint (shared per process) |
 | `h3` + `h3-quinn` | 0.0.10 | HTTP/3 request/response on top of quinn |
 | `reqwest` | 0.13.x (rustls, no default TLS) | HTTP/2 & HTTP/1.1 transfers, proxy support |

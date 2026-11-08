@@ -46,7 +46,7 @@ UI or fail to compile against changed contracts.
 works in this repo's 1 GB sandbox:
 
 1. A **standalone driver crate** (outside the workspace) depending only on
-   `slint-build = "=1.6.0"` whose `main()` calls
+   `slint-build = "=1.18.1"` whose `main()` calls
    `compile_with_config("ui/app.slint", CompilerConfiguration::new()
    .embed_resources(EmbedFiles).with_style("fluent"))` with
    `CARGO_MANIFEST_DIR=<repo>/crates/gui`, `OUT_DIR=<tmp>` faked in the env.
@@ -60,7 +60,7 @@ works in this repo's 1 GB sandbox:
 4. Run the driver, prepend the standard 3-line header, overwrite
    `crates/gui/src/slint_generated.rs`, commit.
 
-Keep the slint pin (currently **1.6.0**) identical between `slint`,
+Keep the slint pin (currently **1.18.1**) identical between `slint`,
 `slint-build` and the regeneration environment — generated code is
 version-coupled.
 
@@ -135,12 +135,16 @@ always check timestamps/strings of what you ship.
 
 ## 7. CI (`.github/workflows/ci.yml`)
 
-Three jobs: (1) Linux — `cargo test --workspace --no-default-features`
+Five jobs: (1) Linux test — `cargo test --workspace --no-default-features`
 (includes the `no_telemetry` guard) + `cargo check --workspace
---all-targets`; (2) Windows MSVC — `build.ps1 -NoSlintCompile` + NSIS
-installer, artifacts uploaded; (3) Linux→Windows GNU cross-build via
-`build-windows.sh`, artifacts uploaded. A publish job attaches `dist/`
-artifacts to GitHub Releases on tags.
+--all-targets`; (2) Slint source compile — `cargo check -p udm-gui
+--features slint-compile`; (3) Windows MSVC — `build.ps1 -NoSlintCompile` +
+NSIS installer, artifacts uploaded; (4) Linux→Windows GNU cross-build via
+`build-windows.sh`, artifacts uploaded; (5) release — attaches `dist/`
+artifacts to GitHub Releases on `v*` tags. While the repository is private,
+no job runs: every job carries `if: ${{ !github.event.repository.private }}`
+(and release `needs` the four skipped jobs), so the local/VM gates are the
+actual gates until the repo goes public.
 
 ## 8. Tests
 
