@@ -45,6 +45,7 @@ pub mod engine;
 pub mod error;
 pub mod hash;
 pub mod handoff;
+pub mod handoff_pipe;
 pub mod net;
 pub mod paths;
 pub mod store;

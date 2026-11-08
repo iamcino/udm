@@ -24,6 +24,15 @@
 //! pairing handshake that establishes the caller identity used here, and
 //! the `udm-host` bridge. Caller identity is therefore an input to every
 //! operation, never a field of the request payload (freeze §6).
+//!
+//! Concurrency: every coordinator operation - including materialization and
+//! the open-time recovery pass - runs under the coordinator's single lock,
+//! and materialization is only ever invoked with that lock held. The marker
+//! lookup-then-Add sequence therefore cannot interleave inside the one
+//! coordinator a data instance is allowed to have (freeze: one coordinator
+//! per user/data-directory instance), so at most one engine task is ever
+//! created per transaction. The only writer of the marker is
+//! [`EngineAdapter::add_handoff_task`], called solely by the coordinator.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -252,6 +261,7 @@ pub trait HandoffStore: Send {
 
 /// In-memory store for tests and transport prototyping. Not durable;
 /// never used by the production coordinator.
+#[derive(Debug)]
 pub struct MemoryStore {
     records: Vec<HandoffRecord>,
 }
@@ -288,6 +298,7 @@ impl HandoffStore for MemoryStore {
 /// it, rename over the live file — the PR 2 finalize-journal
 /// discipline). Records are few and small; a full rewrite per
 /// transition is the honest cost of never journaling a partial state.
+#[derive(Debug)]
 pub struct FileStore {
     path: PathBuf,
 }
@@ -352,6 +363,7 @@ pub trait HandoffClock: Send + Sync {
 }
 
 /// Wall clock.
+#[derive(Debug)]
 pub struct SystemClock;
 
 impl HandoffClock for SystemClock {
@@ -375,6 +387,12 @@ pub trait EnginePort: Send + Sync {
 /// [`EnginePort`] over the real [`Engine`].
 pub struct EngineAdapter {
     engine: Arc<Engine>,
+}
+
+impl std::fmt::Debug for EngineAdapter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EngineAdapter").finish_non_exhaustive()
+    }
 }
 
 impl EngineAdapter {
@@ -404,12 +422,19 @@ impl EnginePort for EngineAdapter {
 /// Coordinator configuration. `lease` is required: the freeze (§5)
 /// reserves its production value to the owner, so this library ships
 /// no default and never renews a deadline implicitly.
+#[derive(Debug)]
 pub struct CoordinatorConfig {
     pub lease: Duration,
     /// Authenticated caller identities the transport may present
     /// (design handoff §3). Anything else is refused before any
     /// record is read or written.
     pub allowed_callers: Vec<String>,
+}
+
+impl std::fmt::Debug for Coordinator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Coordinator").finish_non_exhaustive()
+    }
 }
 
 struct Inner {
@@ -773,4 +798,63 @@ impl Coordinator {
         }
         Ok(HandoffReply::of_record(HandoffStatus::of(rec.state), rec))
     }
+}
+
+impl Coordinator {
+    /// Whether `caller` is on this coordinator's allow-list. The pipe
+    /// transport checks this during the pairing handshake; a request
+    /// payload never carries a caller (freeze section 6).
+    pub fn caller_allowed(&self, caller: &str) -> bool {
+        self.allowed_callers.iter().any(|c| c == caller)
+    }
+}
+
+/// Generate a fresh 256-bit pairing secret (hex, 64 chars). Entropy comes
+/// from the OS-seeded `RandomState` keys (std draws them from the OS RNG),
+/// stretched through SHA-256 with the current time and process id. The
+/// coordinator side writes the secret into the pairing file at startup and
+/// replaces it on every start; the host re-reads the file per connection,
+/// so a coordinator restart heals without re-registration.
+pub fn generate_pairing_secret() -> String {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    let mut material = String::new();
+    for _ in 0..4 {
+        let state = RandomState::new();
+        let mut h1 = state.build_hasher();
+        h1.write_u64(util::now_millis() as u64);
+        let a = h1.finish();
+        let mut h2 = state.build_hasher();
+        h2.write_u32(std::process::id());
+        let b = h2.finish();
+        material.push_str(&format!("{a:016x}{b:016x}"));
+    }
+    let digest = Sha256::digest(material.as_bytes());
+    let mut out = String::with_capacity(64);
+    for byte in digest.iter() {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
+/// Read the registered caller list (`<data>/handoff/callers.json`, written
+/// by `udm-host --register`) - the coordinator's allow-list source. A
+/// missing or malformed file means no callers.
+pub fn read_callers(paths: &crate::Paths) -> Vec<String> {
+    let path = paths.root.join("handoff").join("callers.json");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    value
+        .get("callers")
+        .and_then(serde_json::Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
 }

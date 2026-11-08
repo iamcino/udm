@@ -5984,6 +5984,7 @@ dependencies = [
  "tracing",
  "url",
  "winapi-util",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6001,6 +6002,15 @@ dependencies = [
  "tray-icon",
  "udm-core",
  "url",
+ "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "udm-host"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "udm-core",
  "windows-sys 0.52.0",
 ]
 

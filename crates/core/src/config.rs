@@ -159,6 +159,15 @@ pub struct Settings {
     pub accent: String,
     /// tracing level written to the local log file.
     pub log_level: String,
+
+    // --- browser handoff (G5) ----------------------------------------------
+    /// Lease for a prepared browser handoff, in seconds. `None` (the
+    /// default, and what existing configs load) means the handoff
+    /// coordinator is never started and the feature is fully inert. The
+    /// production value is an open owner decision (freeze section 5), so
+    /// this library ships no default; setting it is also the opt-in that
+    /// lets the GUI serve the handoff pipe at all.
+    pub handoff_lease_secs: Option<u64>,
 }
 
 impl Default for Settings {
@@ -190,6 +199,7 @@ impl Default for Settings {
             language: "en".to_string(),
             accent: "blue".to_string(),
             log_level: "info".to_string(),
+            handoff_lease_secs: None,
         }
     }
 }

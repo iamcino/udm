@@ -508,3 +508,34 @@ fn engine_marker_round_trip() {
     let dup = c.commit(ALICE, "tx-real", true).unwrap();
     assert_eq!(dup.task_ref.as_deref(), Some(task_ref.as_str()));
 }
+
+#[test]
+fn concurrent_duplicate_commits_add_exactly_once() {
+    // Shen condition (2026-11-09): at-most-one-task must hold not only for
+    // sequential crash recovery but also against concurrent materialization.
+    // The coordinator serializes every operation under its single lock, so
+    // two racing commits for the same transaction Add exactly once and both
+    // observe the same recorded association.
+    let engine = Arc::new(FakeEngine::default());
+    let clock = Arc::new(ManualClock::new());
+    let coord = Arc::new(coordinator(engine.clone(), clock, 60_000));
+    coord.prepare(ALICE, "tx-race", intent()).unwrap();
+    let mut handles = Vec::new();
+    for _ in 0..2 {
+        let c = coord.clone();
+        handles.push(std::thread::spawn(move || {
+            c.commit(ALICE, "tx-race", true).map(|r| r.task_ref)
+        }));
+    }
+    let mut refs = Vec::new();
+    for h in handles {
+        refs.push(h.join().expect("commit thread panicked").expect("commit ok"));
+    }
+    assert_eq!(
+        engine.add_calls(),
+        1,
+        "concurrent commits must Add exactly once"
+    );
+    assert_eq!(refs[0], refs[1], "both callers see the recorded association");
+    assert_eq!(refs[0].as_deref(), Some("1001"));
+}

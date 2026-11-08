@@ -1,0 +1,17 @@
+[package]
+name = "udm-host"
+version = "0.1.0"
+edition = "2021"
+description = "udm browser handoff host (Native Messaging bridge to the coordinator pipe)"
+publish = false
+
+[[bin]]
+name = "udm-host"
+path = "src/main.rs"
+
+[dependencies]
+udm-core = { path = "../core" }
+serde_json = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = ["Win32_System_Registry"] }

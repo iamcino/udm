@@ -14,6 +14,7 @@
 // The slint 1.6 code generator still emits `core::usize::MAX`; silence that.
 #![allow(deprecated)]
 
+mod handoff_boot;
 mod i18n;
 mod state;
 mod tray;
@@ -55,6 +56,7 @@ fn main() {
         "udm starting"
     );
 
+    let handoff_paths = paths.clone();
     let engine = match EngineBuilder::new().paths(paths).build() {
         Ok(e) => Arc::new(e),
         Err(udm_core::error::Error::DatabaseLocked(p)) => {
@@ -73,6 +75,7 @@ fn main() {
     };
 
     tracing::info!("engine ready");
+    handoff_boot::start(&handoff_paths, engine.clone());
 
     let ui = match AppWindow::new() {
         Ok(ui) => ui,
