@@ -1,160 +1,168 @@
-# udm
+<div align="center">
 
-**UDM — Universal Download Manager.**
+<img src="crates/gui/assets/icon-256.png" width="96" alt="UDM rabbit icon">
 
-The application is **Universal Download Manager (UDM)**, with desktop binary
-`udm` and command-line binary `udm-cli`. Its upgraded core engine will be named
-**Usagi**. The core package is `usagi`.
+# Universal Download Manager
 
-A download manager for Windows 11 (and Linux) written in Rust, with a Slint
-GUI and a [redb](https://github.com/cberner/redb) database. It speaks
-**HTTP/3 over QUIC** (`quinn` + `h3`), falls back to HTTP/2 and HTTP/1.1
-automatically, and promises two things most download managers cannot:
+**Keep your downloads moving, with a native Windows 11 app that puts you in control.**<br>
+UDM splits large files into concurrent transfers, keeps recoverable progress on disk, and brings your downloads together in one quiet interface.
 
-* **No administrator rights, ever.** Per-user install or portable folder;
-  data lives in `%LOCALAPPDATA%\udm` (or beside the executable).
-* **Zero telemetry.** No analytics, no crash reporting, no auto-updates.
-  Enforced at build time by `crates/core/tests/no_telemetry.rs` and
-  `deny.toml`. See [docs/PRIVACY.md](docs/PRIVACY.md).
+**English** · [Tiếng Việt](README.vi.md)
 
-## Features (v1)
+Rust · Slint · Windows 11 x64 · [MIT OR Apache-2.0](LICENSE)
 
-| Feature | How |
+[Getting started](#getting-started) · [Browser setup](extension/README.md) · [Build from source](docs/BUILD.md) · [Privacy](docs/PRIVACY.md)
+
+</div>
+
+---
+
+## What UDM does
+
+UDM downloads files from HTTP and HTTPS links. Its engine, **Usagi** (the
+`usagi` Rust package), supports segmented transfers over HTTP/1.1, HTTP/2
+and HTTP/3 over QUIC. It uses HTTP/3 when available and falls back when the
+selected transport policy allows it.
+
+UDM is a file download manager, not a torrent client or a tool for extracting
+video links from websites. A browser handoff passes a download URL to UDM;
+it does not copy your signed-in browser session.
+
+The current source version is **0.1.0**. This README describes the code at
+`241f550`; it does not announce a public release or an available download.
+Windows 11 x64 is the desktop target. Linux and macOS paths support
+development and testing; Windows integration is platform-specific.
+
+## Why UDM
+
+| What you get | What it means for you |
 |---|---|
-| Multi-connection downloads | File probed once, then split into up to 64 ranged segments (`Range: bytes=`), each on its own connection, written positionally into one `.part` file |
-| Resume | Segments persisted in redb; restart uses `Range` + `If-Range` (ETag/Last-Modified); interrupted tasks recover as *paused* |
-| Pause / cancel / retry | Cooperative stop tokens; retry resets the backoff budget |
-| Queue with concurrency limit | Supervisor admits queued tasks up to `max_concurrent_tasks` |
-| Progress + speed | Live per-task and aggregate speed/ETA, 150 ms UI refresh |
-| HTTP/3 (QUIC) | `Alt-Svc` learning cache in redb with circuit breaker; `TransportPref` per task (auto / prefer / only / never) |
-| Integrity | Optional SHA-256 / SHA-512 / SHA-1 / MD5 / BLAKE3 verification before the `.part` file is renamed |
-| Persistence | Single redb file; progress is committed durably once per second (configurable), so even a power cut costs at most that much |
-| Checksums & conflicts | Unique-suffix / overwrite / refuse policies |
+| **Concurrent transfers** | Large files can use several byte-range requests, with a separate limit on how many downloads run at once. Servers and your connection still determine the speed. |
+| **Careful resume** | Synced checkpoints and representation checks let UDM reuse eligible partial data without combining different versions of a file. |
+| **Optional checksums** | Supply a publisher's checksum to check the file before completion: SHA-256, SHA-512, SHA-1, MD5 or BLAKE3. |
+| **Files kept in order** | Optional category routing places downloads into subfolders by filename suffix. It is off by default. |
+| **A useful tray icon** | See live totals, open the active-downloads popup, pause or resume its rows, or return to the main window. |
+| **Your preferred appearance** | English or Vietnamese, Dark/Light/Auto themes, and a choice of accent colours. Auto follows Windows' app theme. |
+| **Browser handoff** | A Chrome or Firefox extension hands eligible downloads to the running app through a local native messaging host. Setup is an explicit opt-in. |
+| **Private and per-user** | No telemetry, administrator rights or services. Settings and history stay in user directories. There are no update checks in this version. |
 
-Out of scope for v1 (deliberately): speed limits, scheduler, proxy
-configuration UI beyond system-proxy on/off, clipboard watcher, mirror
-failover, browser extensions.
+## Getting started
 
-## The two binaries
+1. **Build UDM** using [the Windows build guide](docs/BUILD.md), or use a
+   build supplied to you. The packaging scripts create a per-user installer
+   and a portable ZIP.
+2. **Run `udm.exe`.** Paste a direct HTTP or HTTPS file link into the toolbar
+   and press Enter. Use **Add Download** for several links, a destination,
+   a checksum or per-download options.
+3. **Follow the download.** The list shows progress, speed, state and the
+   transport in use. Pause and resume from the row controls; open a completed
+   file or its folder from the list.
 
-* **`udm`** – the Slint desktop app (dark Fluent-style UI, software
-  renderer, works over RDP/VMs without GPU).
-* **`udm-cli`** – the same engine, headless:
+Closing the window hides UDM to the tray by default, so downloads can
+continue. Double-click the tray icon to reopen it; use the tray menu's
+**Exit** to quit. Minimize to tray, start minimized and start with Windows
+are separate settings and are off by default.
 
-```text
-udm-cli get https://example.com/big.iso -s 16 --hash sha256:deadbeef...
-udm-cli probe https://example.com/big.iso        # headers, ranges, Alt-Svc, HTTP/3?
-udm-cli import urls.txt                          # batch enqueue
-udm-cli list | watch | pause 3 | resume 3 | retry 3 | cancel 3 | remove 3 --files
-udm-cli settings --set segments_per_task=12
-udm-cli doctor                                   # paths, TLS roots, QUIC, telemetry status
-```
+**Start with Windows** is a disclosed, per-user option. Enabling it writes
+only UDM's entry in `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`;
+disabling it removes that entry. Keep the executable in a stable folder.
 
-## Building
+For browser downloads, follow [the extension setup guide](extension/README.md).
+The current installer and portable ZIP do **not** bundle `udm-host` or the
+extension; build the host separately. Handoff uses durable prepare/commit
+records. Unresolved committed associations appear as read-only **Needs
+recovery** rows in the **All** task view; they are not ordinary downloads
+with a Retry button.
 
-Linux/macOS cross-build (what CI does):
+## Where your files go
 
-```bash
-rustup target add x86_64-pc-windows-gnu
-sudo apt install gcc-mingw-w64-x86-64          # linker + windres
-./packaging/cross/build-windows.sh             # -> dist/udm.exe, portable zip
-cargo test --workspace                         # incl. the no-telemetry guard
-```
+| Mode | Application data |
+|---|---|
+| Per-user installation or bare executable | `%LOCALAPPDATA%\udm` |
+| Portable (`udm.portable` beside the executable, or `UDM_PORTABLE=1`) | `data\` beside the executable |
+| Explicit override | The directory set by `UDM_DATA_DIR` |
 
-On Windows:
+Downloaded files use the configured download folder, normally your Windows
+Downloads folder. Portable mode changes the application data location; it
+**does not automatically move downloads beside the executable**. Partial
+files sit in the download destination as `<filename>.udm.part`.
+
+The database is `udm.redb`; the desktop log is `logs\udm.log`. Browser
+handoff keeps additional local files under `handoff\`. Older `quget`
+paths and environment names remain supported for upgrades. See
+[operations and backups](docs/OPERATIONS.md) before moving existing data.
+
+## Command-line use
+
+`udm-cli` runs the same Usagi engine without the desktop interface:
 
 ```powershell
-.\packaging\windows\build.ps1                  # -> dist\ + NSIS installer
+udm-cli get https://example.com/file.iso --segments 8
+udm-cli probe https://example.com/file.iso
+udm-cli import urls.txt
+udm-cli list
+udm-cli settings --list
+udm-cli settings segments_per_task=12
+udm-cli doctor
 ```
 
-GitHub Actions (`.github/workflows/ci.yml`) defines five jobs - test,
-slint-compile, windows-msvc, windows-gnu, release - but while this
-repository is private every job is skipped (each carries
-`if: ${{ !github.event.repository.private }}`, and release also `needs` the
-four skipped jobs), so no push runs the tests and no `v*` tag publishes a
-release. The jobs run again automatically once the repo is public; until
-then the local/VM gates are the actual gates.
+Replace the example URL with a real download link. Use
+`get --hash sha256:<digest>` with the publisher's full digest when available.
+Run `udm-cli --help` for commands and `udm-cli <command> --help` for options.
 
-Slint UI codegen: by default (`slint-compile` feature) `udm-gui` compiles
-`ui/*.slint` during the build via `slint-build`, which needs ~2 GB of RAM
-(`i-slint-compiler` is a big crate). Low-memory machines can pass
-`--no-default-features` and use the checked-in
-`crates/gui/src/slint_generated.rs` instead — `build-windows.sh` already does
-this, `build.ps1` has a `-NoSlintCompile` switch. After editing any `.slint`
-file, regenerate it with `packaging/regenerate-slint.sh` (Slint is pinned to
-1.18.1 for both the runtime and build compiler).
+The GUI and CLI cannot open the same database at the same time. Exit UDM
+from the tray before using the CLI on its data. Browser IPC is a separate,
+narrow handoff interface, not remote CLI control.
 
-The installer (`packaging/windows/installer.nsi`) is per-user
-(`RequestExecutionLevel user`, installs to `$LOCALAPPDATA\Programs\udm`),
-and the executable embeds an `asInvoker` manifest
-(`packaging/windows/app.manifest`) so Windows never shows a UAC prompt.
+## Limits and future work
 
-Portable mode: put an empty `udm.portable` file next to `udm.exe` (or set
-`UDM_PORTABLE=1`); all data then lives in that folder.
+- Resume depends on what the server proves. Weak ETags or Last-Modified
+  alone do not permit reuse of saved bytes; some downloads restart from zero.
+- QUIC uses UDP and bypasses system HTTP proxies. Use **Never HTTP/3** on
+  networks that require all traffic to go through an HTTP proxy.
+- Segments are concurrent requests, not a count of physical connections:
+  HTTP/2 and HTTP/3 can multiplex them. An engine-wide connection total is
+  unavailable in this version.
+- There is no global speed limit, timed queue scheduling, torrent support
+  or media resolving. The existing queue only limits concurrent downloads.
+- The authenticated updater, dual-stack N2 and multi-family N3 are
+  **design-only, not built**. This version has no in-app updater, does not
+  use IPv4 and IPv6 together, and does not split one download across address
+  families. N2/N3 implementation remains gated on measurements.
 
-## Architecture
+## Privacy and removal
 
-```
-crates/core      engine (supervisor + per-task segment workers), net stack
-                 (tls / h3 / http12 / altsvc / stack), store (redb), config,
-                 hash, paths, util            13,215 lines, 50+ unit tests
-crates/gui       Slint UI (ui/*.slint) + thin event-loop glue (src/state.rs)
-crates/cli       clap front-end with a live ANSI progress renderer
-packaging/       asInvoker manifest, .rc, NSIS per-user installer, build scripts
-docs/            design, architecture, engine, operations, build, references,
-                 privacy
-```
+UDM has no analytics, advertising or remote crash reporting. It contacts
+servers for downloads you create, their probes, redirects and transport
+setup. It works offline for local task/history management. It has no
+background version check. Local logs and download URLs can still contain
+sensitive information; review them before sharing. Read the
+[privacy policy](docs/PRIVACY.md) for storage and registration details.
 
-Threading: the engine owns a Tokio multi-thread runtime on its own threads;
-the UI thread only polls `Engine::snapshot()` on a timer and sends commands,
-so the interface never blocks on I/O. The supervisor task serialises
-lifecycle decisions (queue admission, pause/cancel, removal).
+Before removing UDM, disable **Start with Windows** and unregister any
+browser host you enabled. Then exit the app. The per-user uninstaller
+removes the installed app and its uninstall entry, and keeps application
+data and downloads. A portable copy can be deleted after the same optional
+registrations have been undone. See [removal instructions](docs/OPERATIONS.md#removing-udm).
 
-Storage: one redb database (`udm.redb`) with tables for tasks, segments,
-counters, settings and the Alt-Svc cache. In-flight progress is committed
-durably once per `persist_interval_ms` (default 1 s): redb's
-`Durability::None` keeps data purely in process memory, so a non-durable
-progress commit would vanish on a hard kill - the exact moment resume
-matters. Minor in-between record updates still ride on `Durability::None`
-and are promoted by the next durable commit.
+## Read next
 
-TLS: rustls with the **ring** provider (never aws-lc-rs: simpler cross-builds)
-and the operating-system trust store (`rustls-native-certs`).
-
-## Documentation
-
-| Document | Contents |
+| If you want to… | Read |
 |---|---|
-| [docs/DESIGN.md](docs/DESIGN.md) | Product principles and the Apple-HIG-derived visual language (tokens, layout, interactions) |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Crate map, layering, threading, the Slint↔Rust contract, persistence schema |
-| [docs/ENGINE.md](docs/ENGINE.md) | The download pipeline: probing, transport selection, segmentation, resume, verification |
-| [docs/OPERATIONS.md](docs/OPERATIONS.md) | Deploying (portable/installer), data & backups, CLI operations, troubleshooting |
-| [docs/BUILD.md](docs/BUILD.md) | Toolchains, the two GUI build modes, regenerating UI code, manifest/icon embedding, CI |
-| [docs/REFERENCES.md](docs/REFERENCES.md) | Standards, crates and design references, annotated |
-| [docs/PRIVACY.md](docs/PRIVACY.md) | The zero-telemetry contract and how it is enforced |
+| Run, back up or troubleshoot UDM | [Operations](docs/OPERATIONS.md) |
+| Hand browser downloads to UDM | [Browser extension](extension/README.md) |
+| Build the app and understand packaging | [Build guide](docs/BUILD.md) |
+| Understand crates, storage and IPC | [Architecture](docs/ARCHITECTURE.md) |
+| Follow a download from URL to final file | [Usagi engine](docs/ENGINE.md) |
+| Understand the interface and interaction choices | [Design](docs/DESIGN.md) |
+| Check privacy claims | [Privacy](docs/PRIVACY.md) |
+| Find standards and upstream projects | [References](docs/REFERENCES.md) |
 
-## Verifying the privacy claims
+## License and credits
 
-```bash
-cargo test -p usagi --test no_telemetry   # Cargo.lock + source tripwires
-cargo deny check                               # licence/advisory/telemetry bans
-```
+UDM is dual-licensed under [MIT OR Apache-2.0](LICENSE).
 
-and at runtime: with an empty queue, udm opens zero sockets.
-
-## License
-
-MIT OR Apache-2.0 — see [LICENSE](LICENSE).
-
-The GUI is built with [Slint](https://slint.dev), used under the Slint
-Royalty-free License 2.0.
-
-<p align="center">
-  <a href="https://slint.dev">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="assets/icons/made-with-slint-dark.svg">
-      <source media="(prefers-color-scheme: light)" srcset="assets/icons/made-with-slint-light.svg">
-      <img alt="Made with Slint" src="assets/icons/made-with-slint-light.svg" height="50">
-    </picture>
-  </a>
-</p>
+The interface uses [Slint](https://slint.dev) under the Slint Royalty-free
+License 2.0, the vendored [cino-ui library](crates/gui/vendor/cino-ui/LICENSE),
+and [Be Vietnam Pro](crates/gui/vendor/cino-ui/ui/fonts/OFL.txt). Rust
+dependencies retain their respective licences.

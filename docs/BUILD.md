@@ -1,159 +1,187 @@
-# udm — Build Document
+# Build UDM from source
 
-Everything needed to build, package and ship udm, including the
-low-memory workarounds this repo relies on. Companion: `OPERATIONS.md`
-(running it), `ARCHITECTURE.md` (what the pieces are).
+Build the desktop app, CLI and browser host from the same checkout. This
+guide describes the scripts at `241f550` (version 0.1.0), including what
+they currently leave out. For running the results, see [Operations](OPERATIONS.md).
 
-## 1. Toolchains
+## What you need
 
-| Target | Toolchain | Extra tools |
-|---|---|---|
-| Windows x64 (native, primary) | Rust stable `x86_64-pc-windows-msvc` | NSIS 3 (installer), PowerShell 5+ |
-| Windows x64 (cross from Linux/macOS) | Rust stable + `x86_64-pc-windows-gnu` | `gcc-mingw-w64-x86-64`, `zip` |
-| Linux / macOS (dev & tests) | Rust stable | — |
+| Build | Requirements |
+|---|---|
+| Windows 11 x64, native | Rust stable with the MSVC toolchain, MSVC C++ build tools and Windows SDK; PowerShell 5+ |
+| Windows installer | The native build tools above, plus NSIS 3 (`makensis` on PATH) |
+| Windows x64 from Linux | Rust with `x86_64-pc-windows-gnu`, MinGW-w64 GCC and resource compiler, Bash and `zip` |
+| Engine/CLI development on Linux or macOS | Rust and the platform linker; GUI builds also need the platform's Slint/winit system dependencies |
 
-Edition 2021; no nightly features are used by the product itself.
+The workspace uses Rust edition 2021 and declares Rust **1.92** as its
+minimum version. Use the checked-in `Cargo.lock` for reproducible dependency
+selection. Product builds do not require nightly Rust.
 
-## 2. The two GUI build modes
+Run the commands below from the repository root. Building and running UDM
+does not require administrator rights; installing a compiler or SDK follows
+your machine's own provisioning policy.
 
-`udm-gui` can obtain its Slint code two ways (feature `slint-compile`,
-default **on**):
-
-1. **Compile `.slint` at build time** — `build.rs` runs `slint-build`
-   (which embeds `i-slint-compiler`) over `ui/app.slint`, style `fluent`,
-   `EmbedResourcesKind::EmbedFiles`. Needs ~2 GB RAM for the compiler
-   dependency graph; this is the normal developer path.
-2. **Checked-in generated code** — `cargo build --no-default-features`
-   uses `crates/gui/src/slint_generated.rs` verbatim (build.rs only exports
-   `SLINT_INCLUDE_GENERATED`). This is what CI and 1 GB build boxes use.
-
-**Rule: whenever anything under `crates/gui/ui/` changes,
-`slint_generated.rs` must be regenerated and committed** — otherwise
-`--no-default-features` builds (CI, cross-builds, installers) ship the old
-UI or fail to compile against changed contracts.
-
-## 3. Regenerating `slint_generated.rs`
-
-### 3.1 Normal machine (≥2 GB RAM)
-
-```sh
-./packaging/regenerate-slint.sh      # builds with slint-compile, copies out/app.rs
-```
-
-### 3.2 Low-memory machine / sandbox (the recipe actually used here)
-
-`i-slint-compiler` cannot be compiled by LLVM under ~1 GB. Workaround that
-works in this repo's 1 GB sandbox:
-
-1. A **standalone driver crate** (outside the workspace) depending only on
-   `slint-build = "=1.18.1"` whose `main()` calls
-   `compile_with_config("ui/app.slint", CompilerConfiguration::new()
-   .embed_resources(EmbedFiles).with_style("fluent"))` with
-   `CARGO_MANIFEST_DIR=<repo>/crates/gui`, `OUT_DIR=<tmp>` faked in the env.
-2. Compile it with **nightly rustc + `-Zcodegen-backend=cranelift`**
-   (via a `RUSTC=` wrapper), `CARGO_BUILD_JOBS=1`, jemalloc preloaded.
-3. **Except the `pulp` crate**: cranelift drops `global_asm!` and leaves
-   `\x01`-prefixed undefined symbol references (`libpulp_v0_22_3_*`) that no
-   stub can satisfy. The wrapper must route `--crate-name pulp` to plain
-   nightly-LLVM rustc; the crate then carries its own asm definitions and
-   the link is clean.
-4. Run the driver, prepend the standard 3-line header, overwrite
-   `crates/gui/src/slint_generated.rs`, commit.
-
-Keep the slint pin (currently **1.18.1**) identical between `slint`,
-`slint-build` and the regeneration environment — generated code is
-version-coupled.
-
-## 4. Native Windows build & packaging
+## Build on Windows
 
 ```powershell
-./packaging/windows/build.ps1                  # full build (needs ~2 GB RAM)
-./packaging/windows/build.ps1 -NoSlintCompile  # uses checked-in generated code
+cargo build --release --locked -p udm-gui -p udm-cli -p udm-host
 ```
 
-Produces `dist\udm.exe`, `dist\udm-cli.exe`,
-`dist\udm-0.1.0-portable.zip` (adds the `udm.portable` marker,
-`LICENSE.txt`, `PRIVACY.md`) and, with NSIS on PATH,
-`dist\udm-0.1.0-setup.exe` from `packaging/windows/installer.nsi`
-(per-user: `RequestExecutionLevel user`, installs under
-`%LOCALAPPDATA%\Programs`, HKCU-only registry writes).
+The binaries are `target\release\udm.exe`, `udm-cli.exe` and `udm-host.exe`.
+To use the checked-in generated UI instead of compiling Slint sources:
 
-## 5. Windows resources — manifest & icon (read this before touching)
+```powershell
+cargo build --release --locked --no-default-features -p udm-gui -p udm-cli -p udm-host
+```
 
-`crates/gui/build.rs` embeds `packaging/windows/udm.rc` via
-`embed-resource` when `CARGO_CFG_TARGET_OS == "windows"` (**not**
-`#[cfg(target_os)]` — in a build script that describes the *host*, which
-silently skips embedding when cross-compiling). The `.rc` pulls in
-`assets/icon.ico` and `packaging/windows/app.manifest`, which declares:
+To build and package the desktop app and CLI:
 
-* `requestedExecutionLevel level="asInvoker"` — never elevate;
-* PerMonitorV2 DPI awareness + longPath awareness;
-* **`Microsoft.Windows.Common-Controls` version 6.0.0.0 dependency** —
-  mandatory. The `rfd` dialog crate imports `TaskDialogIndirect`, which
-  exists only in comctl32 **v6**. Without this manifest block the OS loader
-  binds comctl32 v5 and the process dies with *“Entry Point Not Found:
-  TaskDialogIndirect”* **before `main` runs**. This exact bug shipped once
-  and is the reason `build.rs` has
-  `cargo:rerun-if-changed=../../packaging/windows`.
+```powershell
+.\packaging\windows\build.ps1 -NoSlintCompile
+```
 
-Verify a built exe (should all be present):
+Omit `-NoSlintCompile` for a normal source-compiled UI build. Use
+`-SkipInstaller` if NSIS is unavailable, or `-Profile debug` for a debug
+package. The script reads the version from the workspace manifest and
+stages these outputs under `dist\`:
+
+- `udm.exe` and `udm-cli.exe`;
+- `udm-0.1.0-setup.exe` unless the installer is skipped;
+- `udm-0.1.0-portable.zip`, containing the executables, `udm.portable`,
+  privacy documentation and bundled licence notices.
+
+**Packaging gap:** neither `build.ps1`, `installer.nsi` nor the cross-build
+script includes `udm-host` or the extension at this revision. Building the
+host with Cargo does not add it to those packages. For browser testing,
+place the separately built host in a stable user-writable directory and
+follow [extension setup](../extension/README.md). Portable mode requires
+the app and host to resolve the same data directory.
+
+The installer is per-user, under `%LOCALAPPDATA%\Programs\udm`. It creates
+shortcuts and an HKCU uninstall entry. It does not register the browser
+host or enable startup. Its uninstaller keeps application data and downloads;
+undo optional startup/host registration first, as explained in
+[Operations](OPERATIONS.md#removing-udm).
+
+## Keep both UI build modes in step
+
+`udm-gui` pins `slint` and `slint-build` to **1.18.1**. Its default
+`slint-compile` feature compiles `crates/gui/ui/app.slint` with the Fluent
+style, embedded resources and the vendored cino-ui import mapping.
+
+With `--no-default-features`, the build uses
+`crates/gui/src/slint_generated.rs`. This reduces compiler memory use, but
+it makes regeneration part of every Slint source or embedded UI asset change.
+Commit the generated file alongside the source change.
+
+On Windows:
+
+```powershell
+.\packaging\regenerate-slint.ps1
+```
+
+The PowerShell script runs Cargo with `--locked --offline`, so dependencies
+must already be cached. It rewrites embedded asset includes to be relative
+to `CARGO_MANIFEST_DIR`, then writes strict UTF-8 output. An ordinary
+feature-enabled build alone does not refresh the checked-in file.
+
+On a Unix development machine:
 
 ```sh
-python3 - <<'EOF'
-d = open('dist/udm.exe','rb').read()
-for s in [b'asInvoker', b'Microsoft.Windows.Common-Controls', b'6595b64144ccf1df']:
-    print(s, s in d)
-EOF
+./packaging/regenerate-slint.sh
 ```
 
-MSVC only: `build.rs` adds `/MANIFEST:NO` so link.exe does not append a
-second default manifest (that flag is invalid for GNU ld — the code guards
-on `CARGO_CFG_TARGET_ENV`).
+Review the generated includes for relocatability before moving the checkout
+or cross-building. The shell script still prints a legacy `1.6.0` header;
+the actual compiler comes from the crate's 1.18.1 pin. Unlike the PowerShell
+script, it copies output without rewriting asset includes. Check its chosen
+`out/app.rs` and resulting diff carefully. Keep compiler and runtime pins identical.
 
-## 6. Cross-building from Linux
+## Cross-build for Windows
+
+On a Debian/Ubuntu build machine, provision MinGW-w64 and `zip`, then run:
 
 ```sh
-./packaging/cross/build-windows.sh    # x86_64-pc-windows-gnu, --no-default-features
+rustup target add x86_64-pc-windows-gnu
+./packaging/cross/build-windows.sh
 ```
 
-Outputs `dist/udm.exe`, `dist/udm-cli.exe`, `dist/udm-0.1.0-portable.zip`
-(with embedded `.rsrc`: manifest + icon — verify with `strings`/`wrestool`
-as above). **Memory guard for ≤1 GB boxes:** the release profile is
-`opt-level=3, lto="thin", codegen-units=1`, which OOMs on the 54k-line
-generated GUI crate. Temporarily append, build, then revert:
+The script uses `--no-default-features`, builds the GUI and CLI, and creates
+the portable ZIP in `dist/`. It does not create an NSIS installer or build
+the host. It uses `set -euo pipefail`: a failed Cargo build stops the script
+before copying new binaries. Existing files in `dist/` can still be stale,
+so inspect exit status and output timestamps before distributing anything.
 
-```toml
-[profile.release.package.udm-gui]
-opt-level = 0
-codegen-units = 256
-```
+## Windows resources that must survive packaging
 
-(The shipped exe is opt-3 for *core/cli*; the GUI crate's own codegen level
-has no measurable effect on a UI that is I/O-bound on its 150 ms poll.)
-Note the script copies `dist/` artifacts even when compilation fails —
-always check timestamps/strings of what you ship.
+`crates/gui/build.rs` reads `CARGO_CFG_TARGET_OS`, so resource embedding
+follows the target even when the build host is Linux. It embeds
+`packaging/windows/udm.rc`, the rabbit icon and `app.manifest`.
 
-## 7. CI (`.github/workflows/ci.yml`)
+| Resource or linker setting | Why it matters |
+|---|---|
+| `asInvoker` | Runs with the current user's rights without requesting elevation. |
+| Common-Controls v6 dependency | Provides `TaskDialogIndirect` for native dialogs; omitting it can prevent the process from reaching `main`. |
+| PerMonitorV2 and long-path declarations | Windows DPI and path behaviour. |
+| 8 MiB main-thread stack | Accommodates initialization of the generated Slint window. |
+| MSVC `/MANIFEST:NO` after successful embedding | Avoids a second default manifest; this flag is not sent to GNU ld. |
 
-Five jobs: (1) Linux test — `cargo test --workspace --no-default-features`
-(includes the `no_telemetry` guard) + `cargo check --workspace
---all-targets`; (2) Slint source compile — `cargo check -p udm-gui
---features slint-compile`; (3) Windows MSVC — `build.ps1 -NoSlintCompile` +
-NSIS installer, artifacts uploaded; (4) Linux→Windows GNU cross-build via
-`build-windows.sh`, artifacts uploaded; (5) release — attaches `dist/`
-artifacts to GitHub Releases on `v*` tags. While the repository is private,
-no job runs: every job carries `if: ${{ !github.event.repository.private }}`
-(and release `needs` the four skipped jobs), so the local/VM gates are the
-actual gates until the repo goes public.
-
-## 8. Tests
+`UDM_EMBED_RC=0` skips resource embedding for diagnosis. Do not treat such a
+build as a normal Windows deliverable. Check a candidate's PE architecture,
+icon and embedded manifest, then launch it as an ordinary Windows user.
+For a quick marker check on Unix:
 
 ```sh
-cargo test --workspace --no-default-features
+file dist/udm.exe
+strings dist/udm.exe | rg 'asInvoker|Microsoft.Windows.Common-Controls|6595b64144ccf1df'
 ```
 
-Covers: engine unit/integration (probe/segment/resume/hash paths), store
-round-trips, config, CLI parsing, E2E downloads against a local test server
-with SHA-256 verification — including kill-9/SIGTERM mid-download resume —
-plus policy tests (`no_telemetry.rs` rejects analytics/crash crates;
-`deny.toml` encodes the same at the dependency level).
+Marker checks supplement a native launch; they do not prove that dialogs,
+tray behaviour or startup registration work.
+
+## Memory-constrained builds
+
+Compiling the Slint compiler can require a few GiB of RAM. First use the
+generated-code build and `CARGO_BUILD_JOBS=1`. The workspace already disables
+development debug information and gives the GUI more codegen units.
+
+The release profile uses optimization, thin LTO and one codegen unit. It can
+still exceed a 1 GiB machine's memory even without Slint compilation. Prefer
+a machine with enough RAM for release artifacts. Historical nightly
+Cranelift/jemalloc regeneration recipes are environment workarounds, not
+requirements or a portable replacement for the supported regeneration scripts.
+
+## Verification
+
+```powershell
+cargo test -p usagi --locked
+cargo test --workspace --locked --no-default-features
+cargo check --workspace --all-targets --locked --no-default-features
+cargo check -p udm-gui --locked --features slint-compile
+node extension/tests/handoff.test.js
+```
+
+Add `--offline` only when dependencies are cached. Engine tests include local
+HTTP/TLS fixtures, checksum and resume paths, durability, finalization,
+generation fencing, representation checks, handoff and policy guards. Some
+tests are platform-gated; a passing non-Windows run does not exercise Windows
+named pipes or registry integration. Review GUI changes visually with seeded
+tasks as well as compiling them.
+
+`cargo deny check` is an additional dependency-policy check when cargo-deny
+is installed. It is not invoked by the current CI workflow.
+
+## CI and publication
+
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) defines Linux tests,
+a Slint source check, Windows MSVC packaging, a GNU cross-build and a release
+job. The four verification/build jobs skip private repositories. The release
+job requires those jobs and a `v*` tag; it has no separate private-repository
+condition. Skipped prerequisite jobs prevent the normal release path there.
+
+The workflow describes automation, not release approval. It neither packages
+the browser integration nor implements an authenticated app updater. No
+updater is built by any command in this guide.
+
+Continue with [Architecture](ARCHITECTURE.md) for component boundaries or
+[Operations](OPERATIONS.md) for deployment, logs and recovery.

@@ -1,14 +1,29 @@
-//! `udm-cli` - headless control of the udm engine.
+//! # udm-cli: standalone command-line downloads with Usagi
 //!
-//! Useful on its own (scripted downloads, `cron`-free batch jobs) and as the
-//! test harness for the engine that the Slint GUI also drives.
+//! Uses the same `usagi` engine as Universal Download Manager's desktop
+//! app. Commands download/probe URLs, import lists, inspect or change tasks,
+//! update supported settings and report local diagnostics. No telemetry,
+//! administrator rights, service or updater is involved.
+//!
+//! This process opens its own engine/store; it does not control a running
+//! GUI through IPC. Exit the GUI from the tray before using its database,
+//! or choose a separate `--data-dir`. `watch` resumes eligible work; it is
+//! not a read-only status command. `get --no-wait` does not leave a daemon.
 //!
 //! ```text
-//! udm-cli probe https://example.com/big.iso --h3     # what does the server offer?
-//! udm-cli get https://example.com/big.iso -s 8       # download with 8 connections
-//! udm-cli list                                       # what is in the database?
-//! udm-cli doctor                                     # paths, TLS roots, QUIC, telemetry
+//! udm-cli probe https://example.com/file.iso --h3
+//! udm-cli get https://example.com/file.iso --segments 8
+//! udm-cli list
+//! udm-cli settings --list
+//! udm-cli settings segments_per_task=12
+//! udm-cli doctor
 //! ```
+//!
+//! Replace example URLs with real file links. Segment limits describe
+//! concurrent requests, not measured physical connections. Removal can
+//! delete owned partials under the default policy even without `--files`.
+//! See command `--help` and the repository's `docs/OPERATIONS.md` before
+//! destructive task operations or moving an existing database.
 
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
@@ -47,7 +62,7 @@ struct Cli {
     #[arg(long, global = true, default_value = "warn")]
     log: String,
 
-    /// Force portable mode (data directory next to the executable).
+    /// Force portable mode (application data in <exe directory>/data).
     #[arg(long, global = true)]
     portable: bool,
 
@@ -67,7 +82,7 @@ enum Command {
     Import(ImportArgs),
     /// List the tasks stored in the database.
     List,
-    /// Resume paused, queued or failed tasks and wait for them.
+    /// Resume non-terminal tasks and wait; skip Completed, Failed and Canceled.
     Watch,
     /// Pause tasks.
     Pause { ids: Vec<u64> },
@@ -127,7 +142,7 @@ struct GetArgs {
     #[arg(short = 'o', long, value_name = "NAME")]
     out: Option<String>,
 
-    /// Connections per task (default: from settings, usually 8).
+    /// Byte-range requests per task (default: from settings, usually 8).
     #[arg(short = 's', long, value_name = "N")]
     segments: Option<u32>,
 
@@ -359,9 +374,9 @@ async fn cmd_probe(cli: &Cli, args: ProbeArgs) -> Result<ExitCode> {
             println!(
                 "  segmented resume:  {}",
                 if resumable {
-                    format!("yes, up to {} connections", settings.segments_per_task)
+                    format!("yes, up to {} concurrent byte-range requests", settings.segments_per_task)
                 } else {
-                    "no - a single connection will be used".to_string()
+                    "no - a single request will be used".to_string()
                 }
             );
             stack.shutdown().await;

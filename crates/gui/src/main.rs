@@ -1,10 +1,22 @@
-//! udm - a download manager with HTTP/3 (QUIC) support.
+//! # UDM: Universal Download Manager desktop app
 //!
-//! * no administrator rights, ever (data lives under %LOCALAPPDATA%, or next
-//!   to the executable in portable mode)
-//! * no telemetry of any kind (see docs/PRIVACY.md)
+//! A native Rust/Slint front-end for the Usagi (`usagi`) download engine,
+//! targeting Windows 11. The desktop app presents task/detail views,
+//! category options, EN/VI strings, Dark/Light/Auto appearance, tray totals
+//! and an active-downloads popup. The engine performs the transfers.
 //!
-//! This binary is the Slint front-end; the headless workhorse is `udm-cli`.
+//! Closing hides to the tray by default; minimize-to-tray, start-minimized
+//! and start-with-Windows are separate opt-ins. Startup uses a disclosed
+//! per-user HKCU Run entry. The optional browser-handoff coordinator serves
+//! registered local callers and exposes pending associations as read-only
+//! Needs recovery rows, distinct from engine tasks.
+//!
+//! No telemetry, administrator rights, services or updater are required or
+//! implemented. Application data is per-user, or in `data/` beside the
+//! executable in portable mode; downloads have their own destination.
+//! Panic diagnostics stay in the local log. See `docs/PRIVACY.md` and
+//! `docs/OPERATIONS.md` in the repository. `udm-cli` is the standalone
+//! headless front-end, not a remote controller for this process.
 
 // Hide the console window on release builds for Windows.
 #![cfg_attr(

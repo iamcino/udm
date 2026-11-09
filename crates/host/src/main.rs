@@ -1,27 +1,27 @@
-//! `udm-host` - the Native Messaging bridge between a browser extension
-//! and the UDM handoff coordinator (G5 slice 2).
+//! # udm-host: UDM's local browser bridge
 //!
-//! Two modes:
+//! Bridges Chrome/Firefox Native Messaging to the running UDM handoff
+//! coordinator. It does not own a download engine or start the desktop app.
 //!
-//! * **Bridge (no arguments)** - what the browser runs. stdin/stdout carry
-//!   length-prefixed JSON frames (Native Messaging framing); stdout
-//!   carries framed replies ONLY - no banners, no logs, no panic text
-//!   (freeze §6). Diagnostics go to a local log file in the data
-//!   directory. Each request opens a fresh pipe connection, pairs, and
-//!   forwards, so a coordinator restart heals on the next request. Any
-//!   failure to reach or pair with the coordinator answers the wire
-//!   status `unavailable` and the browser keeps its download - the host
-//!   never invents a state.
-//! * **Registration (`--register` / `--unregister`)** - run by the user or
-//!   the installer, never by the app and never silently (AGENTS.md §7):
-//!   writes the HKCU Native Messaging host key + manifest, the caller
-//!   sidecar next to this executable, and the coordinator callers list in
-//!   the data directory.
+//! With no arguments, stdin/stdout carry length-prefixed JSON frames.
+//! Stdout is reserved for framed replies. Each request reads the local
+//! pairing key, opens a fresh per-user pipe connection, pairs and forwards
+//! the request. Connection/pairing failure returns `unavailable`; the host
+//! never invents a successful commitment or guarantees browser ownership.
+//! Coarse diagnostics are appended to `<data>/handoff/host.log`.
 //!
-//! The caller identity (`chrome:<extension-id>` /
-//! `firefox:<extension-id>`) comes from the registration sidecar - it is
-//! established by which manifest the browser used to launch this host,
-//! never from a payload field (freeze §6).
+//! `--register <chrome|firefox> <extension-id>` is an explicit per-user
+//! operation: it writes an HKCU Native Messaging key, a host manifest,
+//! the coordinator caller list and `udm-host.caller` beside this executable.
+//! `--unregister <browser>` removes that browser's key/callers and its
+//! matching sidecar. No administrator rights or service are involved.
+//!
+//! Caller identity comes from the sidecar, not the request payload. There
+//! is only one sidecar identity per host directory: a later registration
+//! overwrites it. A single host location must not be described as isolating
+//! simultaneous Chrome and Firefox identities. App and host must resolve
+//! the same data root. The current packaging scripts omit this binary;
+//! see `extension/README.md` for build, registration and recovery limits.
 
 mod reg;
 

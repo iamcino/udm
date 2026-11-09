@@ -1,67 +1,128 @@
-# udm — References
+# Standards and implementation references
 
-Standards, libraries and documents this project builds on, with a note on
-*why each one matters here*.
+Use this page to connect UDM's behaviour to the standards and libraries
+behind it. The implementation baseline is `241f550`; `Cargo.lock` is the
+source of truth for exact dependency versions. An upstream specification
+describes a protocol, not a claim that UDM implements every optional part.
 
-## 1. Protocols & standards
+## HTTP, QUIC and safe ranges
 
-| Reference | Relevance to udm |
+| Reference | Why it matters to UDM |
 |---|---|
-| RFC 9000 — QUIC: A UDP-Based Multiplexed and Secure Transport | Transport under HTTP/3; why UDP egress can matter (§ OPERATIONS 7) |
-| RFC 9114 — HTTP/3 | Wire protocol implemented via `h3` + `quinn` |
-| RFC 7838 — HTTP Alternative Services (Alt-Svc) | How HTTP/3 endpoints are *learned*; basis of `net/altsvc.rs` and the `alt_svc.v1` table |
-| RFC 9110 — HTTP Semantics (Range, ETag, Last-Modified, If-Range, 416) | Segmented downloads and safe resume: `If-Range` validators, `416` handling (ENGINE §2–5) |
-| RFC 9112 / 9113 — HTTP/1.1, HTTP/2 | Fallback paths negotiated by `reqwest` via ALPN |
-| RFC 6249 etc. (hash prefixes) — convention only | `sha256:…`-style expected-hash syntax accepted by the Add form |
-| FIPS 180-4 (SHA-1/256/512), RFC 1321 (MD5), RFC 7693 (BLAKE3) | Checksum algorithms offered for verification (`hash.rs`) |
-| Microsoft application manifest docs — `requestedExecutionLevel`, Common-Controls v6 assembly | `asInvoker` + comctl32 v6 dependency; the missing v6 dependency is the classic `TaskDialogIndirect` *“Entry Point Not Found”* startup crash (BUILD §5) |
-| Microsoft PerMonitorV2 DPI docs | DPI awareness block in `app.manifest` |
-| Taskbar/Explorer icon resources (RT_GROUP_ICON, `.rc`) | `udm.rc` + `embed-resource` embedding |
+| [RFC 9110 — HTTP Semantics](https://www.rfc-editor.org/rfc/rfc9110) | GET/HEAD, redirects, validators, Range, Content-Range, If-Range and response status semantics. See [Engine](ENGINE.md) for UDM's stricter representation-binding rules. |
+| [RFC 9112 — HTTP/1.1](https://www.rfc-editor.org/rfc/rfc9112) | The HTTP/1.1 compatibility transport. |
+| [RFC 9113 — HTTP/2](https://www.rfc-editor.org/rfc/rfc9113) | Multiplexed streams on the HTTP/2 path; requests are not physical connections. |
+| [RFC 9000 — QUIC](https://www.rfc-editor.org/rfc/rfc9000) | UDP-based transport used for HTTP/3. |
+| [RFC 9114 — HTTP/3](https://www.rfc-editor.org/rfc/rfc9114) | HTTP request/response semantics over QUIC streams. |
+| [RFC 7838 — HTTP Alternative Services](https://www.rfc-editor.org/rfc/rfc7838) | Alt-Svc service learning and expiry, backed by UDM's local origin cache. |
 
-## 2. Design references
+The relevant implementation is under
+[`crates/core/src/net/`](../crates/core/src/net/), with task response checks
+in [`engine/task.rs`](../crates/core/src/engine/task.rs). UDM requires a
+strong ETag for reusable bound coverage; recording Last-Modified does not
+mean it is accepted as a resume validator.
 
-| Reference | Relevance |
+## Checksums and local recovery
+
+[`hash.rs`](../crates/core/src/hash.rs) defines the accepted expected-hash
+syntax and supported algorithms: SHA-256, SHA-512, SHA-1, MD5 and BLAKE3.
+The `sha256:<hex>` notation is an application convention, not an HTTP or
+hash-prefix RFC implemented by UDM.
+
+The [official BLAKE3 repository and specification links](https://github.com/BLAKE3-team/BLAKE3)
+describe BLAKE3. RFC 7693 describes **BLAKE2**, not BLAKE3, and should not
+be used as the BLAKE3 reference. A checksum supplied by a trusted publisher
+and a locally computed recovery digest serve different purposes: the latter
+helps reconcile file operations but does not authenticate the publisher.
+
+For UDM's local ordering and recovery rules, read
+[`durability.rs`](../crates/core/src/durability.rs),
+[`finalize.rs`](../crates/core/src/finalize.rs),
+[`store/mod.rs`](../crates/core/src/store/mod.rs) and
+[Architecture](ARCHITECTURE.md#storage-and-schema). A durable database commit
+alone does not prove that file content was synchronized first.
+
+## Windows and browser integration
+
+| Reference | Implementation connection |
 |---|---|
-| Apple Human Interface Guidelines (macOS Sonoma/Sequoia): dark-mode surfaces, source lists, unified toolbars, progress indicators | The visual language adopted in `DESIGN.md`: depth by lightness, one accent, thin linear progress, quiet tables |
-| Apple HIG — Color: system blue `#0A84FF` (dark), semantic green/orange/red | Exact token values in `theme.slint` |
-| Microsoft Fluent 2 (dark) | Cross-check for Windows-native feel; Segoe UI Variable as the family |
-| Anti-references: “Dribbble IDM” style (gauges, gradients, promo cards) | Explicitly rejected — see DESIGN §2.1 |
+| [Microsoft: application manifests](https://learn.microsoft.com/en-us/windows/win32/sbscs/application-manifests) | `asInvoker`, DPI/long-path declarations and the Common-Controls v6 assembly dependency in `packaging/windows/app.manifest`. |
+| [Chrome: Native Messaging](https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging) | Host manifest, pinned extension origin, stdio message framing and per-user host discovery. |
+| [Mozilla: Native Messaging](https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/Native_messaging) | Firefox host discovery and allowed-extension identity. |
 
-## 3. Rust crates (pinned via `Cargo.lock`)
+UDM's prepare/commit/abort/query semantics are its own local protocol on top
+of these transports. Read [the extension guide](../extension/README.md),
+[`handoff.rs`](../crates/core/src/handoff.rs),
+[`handoff_pipe.rs`](../crates/core/src/handoff_pipe.rs) and
+[`crates/host/src/`](../crates/host/src/). Browser Native Messaging does not
+itself provide durable download ownership transfer.
 
-| Crate | Version line | Role |
+Startup registration is implemented in
+[`crates/gui/src/startup.rs`](../crates/gui/src/startup.rs): a disclosed
+per-user HKCU Run entry. It is separate from browser host registration and
+the NSIS uninstall entry. None is a system service or an elevation mechanism.
+
+## Main Rust dependencies
+
+The versions below identify manifest lines at this baseline, rather than
+promising compatibility with future upstream releases. Resolve exact
+versions through `Cargo.lock` and inspect features in the crate manifests.
+
+| Dependency | Manifest line | Role |
 |---|---|---|
-| `slint` / `slint-build` / `i-slint-compiler` | 1.18.1 (pinned; generated code is version-coupled) | Declarative UI, software renderer + winit backend; build-time `.slint` compiler |
-| `quinn` | 0.11.x | QUIC client endpoint (shared per process) |
-| `h3` + `h3-quinn` | 0.0.10 | HTTP/3 request/response on top of quinn |
-| `reqwest` | 0.13.x (rustls, no default TLS) | HTTP/2 & HTTP/1.1 transfers, proxy support |
-| `rustls` + `ring` + `rustls-native-certs` | current | TLS with the OS trust store; no OpenSSL anywhere |
-| `redb` | 4.x | Embedded, ACID, single-file store; `Durability::None/Immediate` batching (ARCHITECTURE §5) |
-| `tokio` | 1.x | Engine runtime (multi-thread) |
-| `blake3`, `sha2`, `sha1`, `md-5` | current | The five verification algorithms |
-| `rfd` | 0.16.x (`common-controls-v6`, xdg-portal, tokio) | Native folder pickers / message dialogs — the crate whose `TaskDialogIndirect` import makes the v6 manifest dependency mandatory |
-| `clap` | 4.x | CLI surface |
-| `tracing` + `tracing-subscriber` | current | Local file/console logging (no remote sinks) |
-| `embed-resource` | 3.x | `.rc`/manifest/icon embedding from `build.rs` (note its `CompilationResult` API) |
-| `bincode`-style codecs | in-repo (`store/records.rs`) | Record serialization for redb values |
-| `windows-sys` (0.52, `Win32_Storage_FileSystem`) / `libc` | target-gated | One FFI call each: `GetDiskFreeSpaceExW` / `statvfs` for the sidebar storage widget |
+| `slint`, `slint-build` | Exactly 1.18.1 | UI runtime and compiler; generated Rust is version-coupled. |
+| `quinn` | 0.11 | QUIC endpoint and connections. |
+| `h3`, `h3-quinn` | 0.0.8 / 0.0.10 | HTTP/3 and the Quinn adapter; these are distinct version lines. |
+| `reqwest` | 0.13 | HTTP/1.1/2, streaming bodies and system proxy support. |
+| `rustls`, `ring`, `rustls-native-certs` | See manifests/lockfile | TLS using ring and OS roots, without OpenSSL/native-tls. |
+| `redb` | 4.4 | Embedded transactional database with an exclusive file lock. |
+| `tokio`, `tokio-util` | See manifests/lockfile | Async execution, synchronization and cancellation. |
+| `sha2`, `sha1`, `md-5`, `blake3` | See manifests/lockfile | Expected-checksum verification and local recovery digests. |
+| `serde`, `serde_json` | See manifests/lockfile | Settings, records, handoff journal and wire objects. |
+| `clap` | 4.5 | CLI parsing. |
+| `rfd` | 0.16 | Native dialogs. |
+| `tray-icon`, `muda`, `windows-sys` | See GUI/host manifests and lockfile | Tray/menu and narrowly scoped Windows APIs. |
+| `tracing`, `tracing-subscriber` | See manifests/lockfile | Local diagnostics; no remote sink. |
+| `embed-resource` | 3 | Windows icon/manifest resource embedding. |
 
-Policy: `deny.toml` + `tests/no_telemetry.rs` reject analytics,
-crash-reporting and updater crates at build time (PRIVACY.md).
+## Interface and design sources
 
-## 4. Tooling
+[Design](DESIGN.md) explains the implemented product language. The
+vendored cino-ui snapshot supplies shared theme/components and Be Vietnam
+Pro; UDM's theme adapter and task views remain local. Read the source tokens
+for current colours and fonts rather than treating earlier mockup values
+as an API.
 
-| Tool | Role |
+The design draws on Apple HIG-style surfaces and source lists, adapted for
+Windows. This influence does not imply Apple or Microsoft endorsement or
+that every control is a native system widget. The vendored
+[cino-ui licence](../crates/gui/vendor/cino-ui/LICENSE) and
+[font licence](../crates/gui/vendor/cino-ui/ui/fonts/OFL.txt) travel with
+the packaged app.
+
+## Tooling and verification
+
+| Source | What to inspect |
 |---|---|
-| MinGW-w64 (`x86_64-w64-mingw32-gcc`) | GNU cross-linker for the Linux→Windows build |
-| NSIS 3 | Per-user installer (`installer.nsi`: HKCU-only, no UAC) |
-| GitHub Actions (`ci.yml`) | Tests on Linux, MSVC + GNU Windows artifacts, release publishing |
-| nightly `rustc` + `rustc_codegen_cranelift` | *Build-environment workaround only* (never shipped): compiles `i-slint-compiler` under ~1 GB RAM for code regeneration; the `pulp` crate must stay on LLVM because cranelift drops `global_asm!` (BUILD §3.2) |
-| `jemalloc` (LD_PRELOAD) | Allocator headroom on 1 GB build boxes |
+| [Build guide](BUILD.md) | Native MSVC builds, GNU cross-build, Slint regeneration and current package omissions. |
+| [`ci.yml`](../.github/workflows/ci.yml) | Actual job commands and private-repository conditions. |
+| [`crates/core/tests/`](../crates/core/tests/) | Local network fixtures, integrity/recovery gates, handoff, instrumentation and policy guards. |
+| [`no_telemetry.rs`](../crates/core/tests/no_telemetry.rs) | Dependency/source tripwires; the core's separate empty endpoint constant is not directly asserted by this test. |
+| [`deny.toml`](../deny.toml) | Explicit dependency bans and licence/advisory/source policy. |
+| [`packaging/verification/`](../packaging/verification/) | Longer-running file/finalization campaigns, separate from a routine build. |
 
-## 5. Internal documents
+Policy checks are useful guardrails, not exhaustive proof of network
+behaviour. See [Privacy](PRIVACY.md) for precise claims and runtime inspection.
 
-`README.md` (overview) · `DESIGN.md` (product/UI) · `ARCHITECTURE.md`
-(system) · `ENGINE.md` (download pipeline) · `OPERATIONS.md` (running &
-troubleshooting) · `BUILD.md` (build & ship) · `PRIVACY.md` (the
-zero-telemetry contract).
+## Documentation path
+
+Start with the [README](../README.md) or its [Vietnamese companion](../README.vi.md).
+Use [Operations](OPERATIONS.md) for day-to-day work and
+[the extension guide](../extension/README.md) for browser setup. For changes,
+read [Architecture](ARCHITECTURE.md), [Engine](ENGINE.md), [Design](DESIGN.md)
+and [Build](BUILD.md) in the order relevant to your work.
+
+The authenticated updater, N2 dual-stack (IPv4/IPv6 selection) and N3
+multi-family transfers (splitting one download across address families) are
+design-only, not built. They are not implementation references for a shipped
+feature at this baseline. N2/N3 implementation remains measurement-gated.

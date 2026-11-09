@@ -1,125 +1,157 @@
-# udm — Design Document
+# UDM interface and product design
 
-This document describes the product design and the visual/interaction language
-of the udm desktop UI. It is the source of truth for *why the app looks the
-way it does*; `ARCHITECTURE.md` covers how it is built.
+UDM should make a long download easy to start, easy to understand and safe
+to leave running. The interface gives the files the space; transport and
+recovery details appear when they help explain what is happening.
 
-## 1. Product principles
+This guide describes the implemented desktop design at `241f550`.
+[Architecture](ARCHITECTURE.md) explains its Rust/Slint boundaries;
+[Operations](OPERATIONS.md) is the user guide.
 
-1. **A download manager is a utility, not a billboard.** No ads, no "upgrade"
-   surfaces, no gamification. The only content is the user's files.
-2. **Zero telemetry is a design feature.** The UI states it plainly
-   (`private` badge, status bar, About view) because it is verifiable from the
-   build (see `PRIVACY.md`, `deny.toml`, `tests/no_telemetry.rs`).
-3. **No administrator rights, ever.** Everything the app touches lives under
-   `%LOCALAPPDATA%\udm` (or beside the exe in portable mode). The design
-   must never imply system-level access (no "install for all users" affordances).
-4. **HTTP/3 first, invisibly.** QUIC is a transport detail: the UI surfaces it
-   as a small badge per row (`HTTP/3 (QUIC)`) and one global switch — never as
-   a workflow the user must manage.
-5. **Calm progress.** Downloads are long-running background work. Motion and
-   colour are reserved for state changes; idle screens are quiet.
+## Product principles
 
-## 2. Design language (Apple HIG, adapted for Windows 11)
+- **A utility earns its space.** No advertisements, promotional panels,
+  account requirement or engagement prompts. The main content is the task list.
+- **Privacy is the default.** No telemetry switch is needed because there
+  is no telemetry implementation. Diagnostics remain local.
+- **Stay within the user's account.** No elevation or service is required.
+  Startup and browser registration are disclosed per-user integrations.
+- **Show evidence, not promises.** A protocol badge names the transport in
+  use; a segment count is not presented as a physical connection count.
+  Unknown information should not look like a measured zero.
+- **Make background work predictable.** Closing, minimizing, starting hidden
+  and starting with Windows are separate choices. A recovery record must
+  remain visible without pretending it is a runnable task.
 
-The UI follows the Apple Human Interface Guidelines dark-mode surface model
-(macOS Sonoma/Sequoia era), rendered with Segoe UI Variable on Windows:
+## Visual language
 
-* **Depth through lightness, not borders.** Three surface levels do all the
-  work: sidebar `#18181B` (recessed) → canvas `#1E1E22` → elevated card
-  `#27272C`. Hairlines (`#FFFFFF14`, 1 px) appear only between large regions
-  (toolbar/content, content/status bar) — never around every control.
-* **One accent.** System blue `#0A84FF` marks exactly three things: the
-  primary action, the focused field, and in-flight progress. Semantic colours
-  are fixed: success `#30D158`, warning `#FF9F0A`, danger `#FF453A`.
-* **Three text tiers.** `#F4F4F6` primary / `#8E8E93` secondary / `#636366`
-  tertiary. Nothing else.
-* **Compact radii.** 10 px cards/popovers, 7–8 px buttons/inputs/rows, 2 px
-  progress bars.
-* **Flat everything.** No gradients, no drop shadows inside the window, no
-  skeuomorphism, no gauge/dial widgets.
+The interface uses Slint with the vendored cino-ui components and theme.
+Its quiet surfaces, source-list navigation and grouped settings draw from
+the Apple HIG style shared by the project's companion apps, adapted to
+Windows 11. It is not a claim that the app uses native Windows controls
+for every element.
 
-Design tokens live in `crates/gui/ui/theme.slint` (single global `Theme`); no
-view is allowed to hard-code a colour.
+`crates/gui/ui/theme.slint` adapts UDM token names to
+`vendor/cino-ui/ui/theme.slint`. The shared theme owns surfaces, text,
+spacing-related shapes and the **Be Vietnam Pro** font. UDM owns table
+geometry and supplies five accent choices with light-mode contrast
+adjustments: blue, green, orange, pink and purple.
 
-### 2.1 Things this design deliberately removed
-
-Earlier concept mockups (Dribbble-style "IDM" looks) contained: a double
-header (window title bar + in-app title bar), a semi-circular disk gauge,
-promotional cards, gradient buttons, and per-row divider lines. All of them
-are banned by this document: the window chrome already carries the title, a
-linear 4 px bar communicates free space better than a dial, and dividers add
-noise that rounded hover rows make unnecessary.
-
-## 3. Window structure
-
-```
-┌────────────┬──────────────────────────────────────────────┐
-│ sidebar    │ unified toolbar (52 px)                      │
-│ 220 px     │ [quick-add URL field] [Add] [Clear finished] │
-│ #18181B    │            (toast)          [🔍 filter]      │
-│            ├──────────────────────────────────────────────┤
-│ brand      │ table header (NAME SIZE STATUS SPEED ADDED)  │
-│ LIBRARY    │ rows: 56 px, radius 8, hover #FFFFFF08       │
-│  All / Active / Completed / Failed   (with count badges)  │
-│ GENERAL    │ [icon tile] name / meta line                 │
-│  Add / Settings / About                [4 px progress]   │
-│            │                            [hover actions]   │
-│ STORAGE    │                                              │
-│  x GB free ├──────────────────────────────────────────────┤
-│  ▓▓▓▓░░░░  │ status bar (28 px): ↓ speed · mode · dir · db│
-└────────────┴──────────────────────────────────────────────┘
-```
-
-* **Sidebar** — source-list style. Selected item = accent 15 % fill + white
-  text; hover = `#FFFFFF08`; no left selection bar, no dividers. Two groups:
-  LIBRARY (filtered views over the same table) and GENERAL (forms). The
-  STORAGE widget is a card with a 4 px *linear* bar showing used fraction of
-  the download volume (warning colour above 90 %), plus a queue pulse line
-  (`n active · m queued` + current speed).
-* **Unified toolbar** — the only header. Hosts the quick-add field (paste a
-  URL, press Enter, done — the full Add form stays available for checksums
-  and per-task options), the primary `Add` button, `Clear finished`, transient
-  toast messages, and the name filter field (applied live, in Rust).
-* **Table** — uppercase 11 px muted column header; divider-less rows with a
-  category icon tile (derived from the file extension), two-line name cell
-  (name + transport/segments/checksum meta), right-aligned size and speed,
-  state label + 4 px linear progress, and row actions that sit at 32 %
-  opacity until the row is hovered. Double-click opens a finished file.
-* **Status bar** — 28 px, recessed, monochrome except the live speed.
-
-## 4. Interaction model
-
-| Task | Path |
+| Element | Design role |
 |---|---|
-| Add one URL | toolbar field → Enter |
-| Add many URLs / checksum / paused | sidebar “Add Download” form (one URL per line) |
-| Pause / resume / stop / retry / remove | row actions (hover), or CLI |
-| Open file / containing folder | row actions; double-click = open file |
-| Find a download | toolbar filter (substring, live) |
-| Narrow the list | sidebar LIBRARY groups (All / Active / Completed / Failed) |
-| Everything else | Settings form; persisted in redb |
+| Window, sidebar and grouped surfaces | Separate navigation, content and controls through surface tone. |
+| Accent | Primary actions, selection and active progress. |
+| Semantic colours | Success, warning and failure, reinforced by text labels. |
+| Thin linear progress | Communicate transfer progress without a large gauge. |
+| Typography | Clear task names, quieter metadata, compact labels and units. |
+| Rounded groups and controls | Follow shared theme radii rather than view-specific shapes. |
 
-State colours: downloading = accent, paused = warning, completed = success,
-failed = danger (with the error text inline in the row's meta line). Unknown
-size renders as a 22 % static fill (indeterminate affordance).
+Dark, Light and Auto are implemented. Auto reads Windows' app colour
+preference and resolves the same light/dark tokens; it is refreshed while
+the application runs. The native tray menu follows the operating system's
+menu appearance rather than an independently forced Slint theme.
 
-Feedback rules: every mutation produces either a visible state change or a
-toast; errors are always toasts in danger colour; nothing modal except native
-folder pickers.
+## Main window
 
-## 5. Typography
+The sidebar contains library filters, the Add Download form, Settings,
+About and an entry for the active-downloads popup. Its storage display
+describes the download volume. The main toolbar provides quick-add,
+filtering and **Clear finished**. The task table carries file identity,
+size, state, progress, speed and added time.
 
-Segoe UI Variable Text (Windows 11), 13 px base. Scale: 15/600 view titles →
-13/500 row names → 12 body → 11 secondary → 10 meta/badges. Group captions
-are 10 px, 600 weight, 1 px letter-spacing, uppercase. Emoji category glyphs
-render via Segoe UI Emoji fallback.
+Rows combine a filename-extension badge, a readable name and compact
+transport/segment/checksum metadata. Actions are state-dependent. The
+table supports row selection, bulk operations, a right-click menu and
+resizable columns; double-clicking a completed row opens its file. A task
+detail view exposes information that would make the table too dense.
 
-## 6. Known gaps / roadmap
+The layout must remain usable at the supported minimum window size, at
+normal and maximized sizes, and with bulk selection active. Clear finished
+and row controls must remain visible and clickable. Long names, translated
+labels and narrow columns need truncation or wrapping that preserves actions.
 
-* Right-click context menus (popover style: radius 10, `#25252AE6`, 1 px
-  `#FFFFFF22` border) — designed, not yet wired.
-* File-type CATEGORIES sidebar group (needs an extension→category index in
-  redb).
-* Column sorting (needs an order key on the rows model).
-* Light theme (tokens are ready; only `theme.slint` would change).
+## Common tasks
+
+| To… | Use… |
+|---|---|
+| Start a direct file download | Paste its URL in the toolbar and press Enter. |
+| Add several links or supply a checksum | Add Download; one URL per line. |
+| Choose a destination | The Add form's folder control. |
+| Find or narrow the list | Text filter and All/Active/Completed/Failed library views. |
+| Pause, resume, cancel, retry or remove | Eligible row, context-menu or bulk actions. |
+| Inspect one task | Its detail view. |
+| Open a finished file or its folder | The task's available file/folder actions. |
+| Change appearance or background behaviour | Settings. |
+| Glance at ongoing work | Active-downloads popup from the tray menu or sidebar. |
+
+State labels accompany colour: active work uses the accent, paused/recovery
+uses warning, completed uses success and failed uses danger. Unknown-size
+progress remains indeterminate. Errors are visible through row/detail
+information and transient feedback; they do not disappear into a console
+that the desktop user cannot see.
+
+## Tray, popup and lifecycle
+
+The tray tooltip and menu summaries show live download totals and speed.
+Pause all, resume all, show/hide, active downloads and Exit provide a small
+set of explicit actions. A single tray click is neutral; double-click shows
+the main window. The popup opens only through an explicit tray-menu or
+sidebar action, not automatically on a download event.
+
+The borderless popup is positioned within the work area and includes totals,
+download rows, pause/resume controls and a labelled **Open UDM** action.
+Paused tasks are included so they can be resumed there. Focus loss closes
+the popup; it is a glanceable control surface rather than a second main window.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| Close to tray | On | Closing hides the window and keeps the app running. |
+| Minimize to tray | Off | Minimizing can hide the window to the tray. |
+| Start minimized | Off | Launch with the main window hidden. |
+| Start with Windows | Off | Register a per-user HKCU Run entry. |
+
+Exit in the tray menu always quits. Startup settings explain the registry
+write; the UI reads actual registry presence when showing the toggle and
+warns about an executable under Temp or Downloads. Startup synchronization
+uses the current executable path, so a moved portable copy can update its
+entry on a later launch.
+
+## Categories and browser recovery
+
+Category routing is a destination policy, not a separate category library
+in the sidebar. It is off by default. When enabled, eligible new tasks use
+filename suffixes to select a subfolder. The preview and engine share the
+classification code; already-locked tasks are not moved when settings change.
+
+Browser handoff has its own ownership boundary: prepare must be durable
+before browser cancellation, and commit follows confirmed cancellation.
+An unresolved committed task association appears as **Needs recovery** in
+the All list. These rows are read-only and filterable, with no engine
+selection or action capabilities. The warning label describes uncertainty;
+it must not imply that clicking Retry will repair it.
+
+The extension also presents recovery outcomes, including an expired commit.
+That extension status is broader than the GUI's pending-association rows.
+The UI must not promise that every interrupted handoff produces a GUI row
+or that the browser still has the file after cancellation.
+
+## Language and verification
+
+English and Vietnamese are implemented through the GUI's Rust strings and
+Slint translation boundary. Protocol diagnostics can remain verbatim; task
+IDs, category IDs and physical folder names do not change with language.
+Popup text is supplied independently from Rust rather than assuming the main
+window's translation callback exists on another window instance.
+
+For a UI change, compile both Slint paths and inspect screenshots with
+completed, active, paused, failed and recovery data. Check both themes,
+long English/Vietnamese labels, resizing, selection and unobscured controls.
+Compilation alone cannot establish that the layout is readable.
+
+## Scope beyond this interface
+
+No global speed limit, timed queue scheduling, torrent support or media
+resolver is implemented. The authenticated updater, N2 dual-stack (IPv4/IPv6
+selection) and N3 multi-family transfers (splitting one download across
+address families) are design-only, not built. N2/N3 implementation remains
+measurement-gated. None should appear as a working setting or a shipped benefit.

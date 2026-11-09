@@ -1,41 +1,56 @@
-//! # usagi
+//! # Usagi: the engine behind Universal Download Manager
 //!
-//! The download engine behind `udm`: HTTP/1.1, HTTP/2 and HTTP/3 (QUIC)
-//! transports, segmented transfers with resume, checksum verification and
-//! crash-safe persistence in a single [`redb`] file.
+//! The `usagi` package provides HTTP/1.1, HTTP/2 and HTTP/3 (QUIC) downloads
+//! for UDM's desktop and command-line front-ends. It owns queue admission,
+//! segmented transfers, optional filename-based routing and checksum checks.
+//! Synced progress checkpoints, representation binding, run-generation fences
+//! and a durable finalization journal govern reuse and completion of files.
 //!
-//! ## Hard rules this crate is built around
+//! ## Behaviour and boundaries
 //!
-//! 1. **No telemetry.** There is no analytics, no crash reporting, no metric
-//!    export, no "check for updates" beacon and no outbound connection that the
-//!    user did not explicitly request. See `docs/PRIVACY.md` and the
-//!    `tests/no_telemetry.rs` guard test.
-//! 2. **No privileges.** Nothing here ever asks for elevation, writes to the
-//!    registry, installs a service, or touches a directory outside the user
-//!    profile (unless the user explicitly picks one). [`paths::Paths`] resolves
-//!    everything under `%LOCALAPPDATA%` (or next to the executable in portable
-//!    mode).
-//! 3. **HTTP/3 first, with honest fallback.** QUIC/HTTP3 is attempted whenever
-//!    the origin advertises `Alt-Svc: h3` (or the user forces it); failures
-//!    degrade to HTTP/2 or HTTP/1.1 automatically and are remembered so we do
-//!    not keep paying the handshake cost.
+//! - HTTP/3 uses quinn and h3; HTTP/2 and HTTP/1.1 use reqwest. Transport
+//!   preference controls fallback: a failed H3-only attempt for an eligible
+//!   HTTPS hostname is returned. Plain HTTP/IP-literal URLs and the global
+//!   HTTP/3-off setting still take the HTTP/1.1/2 path in this implementation.
+//! - Saved bytes need a valid local checkpoint and a matching representation
+//!   binding for reuse. Weak ETags and Last-Modified alone are insufficient.
+//! - [`Engine`] owns its task store. A GUI and CLI cannot independently open
+//!   the same database while it is locked. Browser handoff uses the separate
+//!   local coordinator/pipe boundary and persisted task transaction markers.
+//! - No telemetry, remote crash reporting, metric export or updater is
+//!   implemented. Local instrumentation is not an engine-wide connection
+//!   census; unavailable totals must not be displayed as zero.
+//! - No administrator rights or services are required. [`Paths`] resolves
+//!   user data to a per-user directory or `data/` beside the executable in
+//!   portable mode; download destinations are selected independently.
 //!
-//! ## Layout
+//! The application adds disclosed per-user startup and browser registration
+//! outside the engine's transfer path. See the repository's `docs/PRIVACY.md`,
+//! `docs/ARCHITECTURE.md` and `docs/ENGINE.md` for the complete product contract.
 //!
-//! | module         | responsibility                                             |
-//! |----------------|------------------------------------------------------------|
-//! | [`category`]   | filename-based download routing (G2)                       |
-//! | [`config`]     | user settings (serialised into redb)                       |
-//! | [`durability`] | versioned progress proofs (data-sync receipts)             |
-//! | [`engine`]     | task lifecycle, queueing, segment workers                  |
-//! | [`error`]      | one error type for the whole engine                        |
-//! | [`finalize`]   | durable rename transactions (finalize intent)              |
-//! | [`hash`]       | MD5/SHA-1/SHA-256/SHA-512/BLAKE3 verification              |
-//! | [`handoff`]    | browser-handoff coordinator (G5)                           |
-//! | [`net`]        | HTTP/3 (quinn+h3) and HTTP/1.1-2 (reqwest) transports      |
-//! | [`paths`]      | privilege-free filesystem locations                        |
-//! | [`store`]      | redb schema, records, Alt-Svc cache                        |
-//! | [`util`]       | filename/URL/size/duration helpers                         |
+//! ## Module map
+//!
+//! | Module | Responsibility |
+//! |---|---|
+//! | [`engine`] | Task API, supervision, queue admission and segment workers. |
+//! | [`net`] | Transport selection, HTTP clients, TLS, Alt-Svc and local gauges. |
+//! | [`store`] | redb records, settings and schema marker 2. |
+//! | [`category`] | Validated filename-suffix routing shared with previews. |
+//! | [`config`] | Persisted settings and supported key/value updates. |
+//! | [`hash`] | SHA-256/SHA-512/SHA-1/MD5/BLAKE3 verification. |
+//! | [`handoff`] | Durable browser ownership transactions and recovery entries. |
+//! | [`handoff_pipe`] | Framing, pairing and Windows per-user named-pipe transport. |
+//! | [`paths`] | Data and default download location discovery, including legacy fallbacks. |
+//! | [`error`] | Shared errors. |
+//! | [`util`] | Filename, path, byte-count and duration helpers. |
+//!
+//! Internal durability and finalization modules enforce file-sync ordering
+//! and reconcile rename/database boundaries. They are not a public updater
+//! API. Timed scheduling, a global speed limit, torrents and media resolving
+//! are not implemented here. The authenticated updater, N2 dual-stack
+//! (IPv4/IPv6 selection) and N3 multi-family transfers (splitting one download
+//! across address families) are design-only, not built; N2/N3 implementation
+//! remains measurement-gated.
 
 pub mod category;
 pub mod config;
@@ -67,8 +82,10 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// nothing about the machine.
 pub const DEFAULT_USER_AGENT: &str = concat!("udm/", env!("CARGO_PKG_VERSION"));
 
-/// Telemetry endpoints this crate contacts. The list is empty and is asserted
-/// to stay empty by `tests/no_telemetry.rs`.
+/// Telemetry endpoints this crate contacts. The list is empty.
+/// `tests/no_telemetry.rs` checks dependency names, reporting-endpoint source
+/// patterns and selected socket-construction strings; it does not assert
+/// this constant.
 pub const TELEMETRY_ENDPOINTS: &[&str] = &[];
 
 /// Set to `true` if this build is a debug build (used by the About view).
