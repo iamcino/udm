@@ -18,10 +18,37 @@ use usagi::net::h3::{H3Pool, H3StableIds};
 use usagi::net::{EngineConnections, ProtocolGauge, RequestSpec};
 use usagi::{AddRequest, Engine, EngineBuilder, Paths, Settings, TaskState, TransportPref};
 
-use common::dev_tls::{HarnessCa, HARNESS_MARKER};
+use common::dev_tls::{HARNESS_MARKER, HarnessCa};
+
+/// Rendezvous budget for this suite's condition and operation waits. A
+/// rendezvous wait returns the moment its condition holds (a tenth of a
+/// second on an idle machine), so a generous ceiling costs nothing on the
+/// passing path; it only keeps a loaded machine - the full workspace suite
+/// compiling and running beside these tests - from expiring a wait whose
+/// condition was about to hold. Semantic deadlines are not rendezvous
+/// waits and keep their own values: the cancel promptness pair in
+/// `cancel_drops_in_use_without_waiting_out_stall_timeout`, the pool
+/// connect-timeout configurations, and the fixture servers' lifetimes.
+const RENDEZVOUS: Duration = Duration::from_secs(30);
+
+/// The tests in this file share one process. Run in parallel they contend
+/// for the same cores, and that self-inflicted load is what starved the
+/// rendezvous waits above (four flakes on 2026-11-09, always under load,
+/// always passing standalone). Serialising the file's own tests removes
+/// that half of the contention; the budget above covers the rest. It also
+/// keeps the process-wide panic hook in the abort/drop test from recording
+/// a panic that belongs to a different test running beside it.
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    SERIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 #[tokio::test]
 async fn parallel_misses_open_one_quic_connection() -> Result<(), String> {
+    let _serial = serial();
     let ca = HarnessCa::generate()?;
     let server = ca.spawn_h3().await?;
     let pool = harness_pool(&ca, Duration::from_secs(5))?;
@@ -49,6 +76,7 @@ async fn parallel_misses_open_one_quic_connection() -> Result<(), String> {
 
 #[tokio::test]
 async fn eight_streams_share_one_stable_id() -> Result<(), String> {
+    let _serial = serial();
     let ca = HarnessCa::generate()?;
     let server = ca.spawn_h3().await?;
     let pool = harness_pool(&ca, Duration::from_secs(5))?;
@@ -75,6 +103,7 @@ async fn eight_streams_share_one_stable_id() -> Result<(), String> {
 
 #[tokio::test]
 async fn failed_handshake_records_no_stable_id() -> Result<(), String> {
+    let _serial = serial();
     let trusted = HarnessCa::generate()?;
     let presented = HarnessCa::generate()?;
     let server = presented.spawn_h3().await?;
@@ -112,6 +141,7 @@ async fn failed_handshake_records_no_stable_id() -> Result<(), String> {
 
 #[test]
 fn production_builders_still_do_not_name_the_harness_ca() -> Result<(), String> {
+    let _serial = serial();
     let harness = read_rel("crates/core/tests/common/dev_tls.rs")?;
     if !harness.contains("struct HarnessCa") {
         return Err("the dev harness no longer defines HarnessCa".to_string());
@@ -157,6 +187,7 @@ fn production_builders_still_do_not_name_the_harness_ca() -> Result<(), String> 
 
 #[test]
 fn held_body_eight_streams_are_one_active_connection() -> Result<(), String> {
+    let _serial = serial();
     let rt = harness_runtime()?;
     let ca = HarnessCa::generate()?;
     let server = rt.block_on(ca.spawn_h3_file(vec![b'B'; 8 * 64 * 1024], true))?;
@@ -174,7 +205,7 @@ fn held_body_eight_streams_are_one_active_connection() -> Result<(), String> {
         )
         .map_err(|e| format!("add: {e}"))?;
 
-    wait_until("eight held streams", Duration::from_secs(15), || {
+    wait_until("eight held streams", RENDEZVOUS, || {
         engine
             .task(id)
             .is_some_and(|task| task.active_requests == 8)
@@ -215,6 +246,7 @@ fn held_body_eight_streams_are_one_active_connection() -> Result<(), String> {
 
 #[test]
 fn network_eof_ends_in_use_while_the_flush_is_held() -> Result<(), String> {
+    let _serial = serial();
     let rt = harness_runtime()?;
     let ca = HarnessCa::generate()?;
     let payload = vec![b'C'; 64 * 1024];
@@ -234,25 +266,21 @@ fn network_eof_ends_in_use_while_the_flush_is_held() -> Result<(), String> {
         )
         .map_err(|e| format!("add: {e}"))?;
 
-    let observed = wait_until(
-        "flush held after network EOF",
-        Duration::from_secs(15),
-        || {
-            gate.entered()
-                && engine.task(id).is_some_and(|task| task.active_requests > 0)
-                && pool.in_use_requests() == Some(0)
-                && matches!(
-                    pool.connection_gauge(),
-                    ProtocolGauge::Known {
-                        active: 0,
-                        idle: 1,
-                        draining: 0,
-                        pooled: 1,
-                        ..
-                    }
-                )
-        },
-    );
+    let observed = wait_until("flush held after network EOF", RENDEZVOUS, || {
+        gate.entered()
+            && engine.task(id).is_some_and(|task| task.active_requests > 0)
+            && pool.in_use_requests() == Some(0)
+            && matches!(
+                pool.connection_gauge(),
+                ProtocolGauge::Known {
+                    active: 0,
+                    idle: 1,
+                    draining: 0,
+                    pooled: 1,
+                    ..
+                }
+            )
+    });
     let requests_while_held = engine.task(id).map(|task| task.active_requests);
     let in_use_while_held = pool.in_use_requests();
     gate.release();
@@ -266,15 +294,11 @@ fn network_eof_ends_in_use_while_the_flush_is_held() -> Result<(), String> {
         ));
     }
 
-    wait_until(
-        "download finished after the flush",
-        Duration::from_secs(15),
-        || {
-            engine
-                .task(id)
-                .is_some_and(|task| task.state == TaskState::Completed)
-        },
-    )?;
+    wait_until("download finished after the flush", RENDEZVOUS, || {
+        engine
+            .task(id)
+            .is_some_and(|task| task.state == TaskState::Completed)
+    })?;
     let task = engine.task(id).ok_or("task disappeared")?;
     let downloaded = std::fs::read(&task.final_path).map_err(|e| format!("read download: {e}"))?;
     if downloaded != payload {
@@ -291,6 +315,7 @@ fn network_eof_ends_in_use_while_the_flush_is_held() -> Result<(), String> {
 
 #[test]
 fn cancel_drops_in_use_without_waiting_out_stall_timeout() -> Result<(), String> {
+    let _serial = serial();
     let rt = harness_runtime()?;
     let ca = HarnessCa::generate()?;
     let server = rt.block_on(ca.spawn_h3_file(vec![b'D'; 64 * 1024], true))?;
@@ -308,7 +333,7 @@ fn cancel_drops_in_use_without_waiting_out_stall_timeout() -> Result<(), String>
         )
         .map_err(|e| format!("add: {e}"))?;
 
-    wait_until("request is on the network", Duration::from_secs(10), || {
+    wait_until("request is on the network", RENDEZVOUS, || {
         engine
             .task(id)
             .is_some_and(|task| task.active_requests >= 1)
@@ -353,6 +378,7 @@ fn cancel_drops_in_use_without_waiting_out_stall_timeout() -> Result<(), String>
 /// including a `catch_unwind` wrapped around the call.
 #[tokio::test]
 async fn abort_or_drop_during_pending_chunk_read_does_not_panic() -> Result<(), String> {
+    let _serial = serial();
     let ca = HarnessCa::generate()?;
     let server = ca.spawn_h3_file(vec![b'P'; 64 * 1024], true).await?;
     let pool = harness_pool(&ca, Duration::from_secs(5))?;
@@ -414,18 +440,16 @@ async fn abort_or_drop_during_pending_chunk_read_does_not_panic() -> Result<(), 
 
 #[tokio::test]
 async fn goaway_drains_the_id_and_refuses_a_new_request() -> Result<(), String> {
+    let _serial = serial();
     let ca = HarnessCa::generate()?;
     let server = ca.spawn_h3_file(b"goaway-body".to_vec(), true).await?;
     let pool = harness_pool(&ca, Duration::from_secs(5))?;
     let url = origin_url(server.addr);
 
-    let held = tokio::time::timeout(
-        Duration::from_secs(8),
-        pool.request(&RequestSpec::get(&url)),
-    )
-    .await
-    .map_err(|_| "first request timed out".to_string())?
-    .map_err(|e| format!("first request: {e}"))?;
+    let held = tokio::time::timeout(RENDEZVOUS, pool.request(&RequestSpec::get(&url)))
+        .await
+        .map_err(|_| "first request timed out".to_string())?
+        .map_err(|e| format!("first request: {e}"))?;
     let id = held.connection_id;
     if pool.in_use_requests() != Some(1) {
         return Err(format!(
@@ -447,13 +471,10 @@ async fn goaway_drains_the_id_and_refuses_a_new_request() -> Result<(), String> 
     server.goaway().await?;
     // The driver has to read the GOAWAY before send_request observes it.
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let refused = tokio::time::timeout(
-        Duration::from_secs(5),
-        pool.request(&RequestSpec::get(&url)),
-    )
-    .await
-    .map_err(|_| "refused request timed out".to_string())?
-    .map_err(|e| e.to_string());
+    let refused = tokio::time::timeout(RENDEZVOUS, pool.request(&RequestSpec::get(&url)))
+        .await
+        .map_err(|_| "refused request timed out".to_string())?
+        .map_err(|e| e.to_string());
     let Err(refused) = refused else {
         return Err("GOAWAY accepted a new request on the pooled id".to_string());
     };
@@ -543,6 +564,7 @@ async fn goaway_drains_the_id_and_refuses_a_new_request() -> Result<(), String> 
 /// GOAWAY draining miss the refusal.
 #[tokio::test]
 async fn pinned_h3_goaway_refusal_display_strings() -> Result<(), String> {
+    let _serial = serial();
     let closing = capture_remote_closing_display().await?;
     let rejected = capture_rejected_connection_close_display().await?;
     const REMOTE_CLOSING: &str = "Remote is closing the connection";
@@ -577,6 +599,7 @@ async fn pinned_h3_goaway_refusal_display_strings() -> Result<(), String> {
 
 #[test]
 fn two_tasks_on_one_connection_report_global_active_one() -> Result<(), String> {
+    let _serial = serial();
     let rt = harness_runtime()?;
     let ca = HarnessCa::generate()?;
     let server = rt.block_on(ca.spawn_h3_file(vec![b'E'; 64 * 1024], true))?;
@@ -603,28 +626,24 @@ fn two_tasks_on_one_connection_report_global_active_one() -> Result<(), String> 
         )
         .map_err(|e| format!("add second: {e}"))?;
 
-    wait_until(
-        "both tasks holding one connection",
-        Duration::from_secs(15),
-        || {
-            let both_held = engine
-                .task(first)
-                .is_some_and(|task| task.active_requests >= 1)
-                && engine
-                    .task(second)
-                    .is_some_and(|task| task.active_requests >= 1);
-            both_held
-                && pool.in_use_requests() == Some(2)
-                && matches!(
-                    pool.connection_gauge(),
-                    ProtocolGauge::Known {
-                        active: 1,
-                        pooled: 1,
-                        ..
-                    }
-                )
-        },
-    )?;
+    wait_until("both tasks holding one connection", RENDEZVOUS, || {
+        let both_held = engine
+            .task(first)
+            .is_some_and(|task| task.active_requests >= 1)
+            && engine
+                .task(second)
+                .is_some_and(|task| task.active_requests >= 1);
+        both_held
+            && pool.in_use_requests() == Some(2)
+            && matches!(
+                pool.connection_gauge(),
+                ProtocolGauge::Known {
+                    active: 1,
+                    pooled: 1,
+                    ..
+                }
+            )
+    })?;
     if server.accepted() != 1 {
         return Err(format!(
             "two tasks opened {} QUIC connections",
@@ -639,6 +658,7 @@ fn two_tasks_on_one_connection_report_global_active_one() -> Result<(), String> 
 
 #[test]
 fn h3_failure_then_h1_leaves_the_engine_snapshot_unavailable() -> Result<(), String> {
+    let _serial = serial();
     let rt = harness_runtime()?;
     let ca = HarnessCa::generate()?;
     // Production trust does not accept this certificate, so the H3 dial fails.
@@ -667,15 +687,11 @@ fn h3_failure_then_h1_leaves_the_engine_snapshot_unavailable() -> Result<(), Str
                 .transport_pref(TransportPref::PreferHttp3),
         )
         .map_err(|e| format!("add https: {e}"))?;
-    wait_until(
-        "H3 failure reached a terminal task",
-        Duration::from_secs(20),
-        || {
-            engine
-                .task(id)
-                .is_some_and(|task| task.state == TaskState::Failed)
-        },
-    )?;
+    wait_until("H3 failure reached a terminal task", RENDEZVOUS, || {
+        engine
+            .task(id)
+            .is_some_and(|task| task.state == TaskState::Failed)
+    })?;
     if fallback_hits.load(std::sync::atomic::Ordering::SeqCst) == 0 {
         return Err(
             "HTTP/1-2 fallback never connected; H3 failure was not followed by H1/H2".to_string(),
@@ -702,7 +718,7 @@ fn h3_failure_then_h1_leaves_the_engine_snapshot_unavailable() -> Result<(), Str
                 .transport_pref(TransportPref::NoHttp3),
         )
         .map_err(|e| format!("add http: {e}"))?;
-    wait_until("H1 download completed", Duration::from_secs(15), || {
+    wait_until("H1 download completed", RENDEZVOUS, || {
         engine
             .task(http_id)
             .is_some_and(|task| task.state == TaskState::Completed)
@@ -794,16 +810,18 @@ fn wait_until(
 }
 
 fn expect_known(pool: &H3Pool, want: ProtocolGauge) -> Result<(), String> {
+    // Wait while the gauge is unpublished (Unknown); a concrete gauge is
+    // judged immediately, exactly as before - only the patience for the
+    // pool to publish under load grows, from ~200ms to the rendezvous
+    // budget.
+    let deadline = Instant::now() + RENDEZVOUS;
     let mut last = pool.connection_gauge();
-    for _ in 0..20 {
-        last = pool.connection_gauge();
-        if last == want {
-            return Ok(());
-        }
-        if !matches!(last, ProtocolGauge::Unknown) {
-            break;
-        }
+    while matches!(last, ProtocolGauge::Unknown) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
+        last = pool.connection_gauge();
+    }
+    if last == want {
+        return Ok(());
     }
     Err(format!("gauge {last:?}, want {want:?}"))
 }
@@ -908,15 +926,11 @@ async fn join_fetches(pool: &Arc<H3Pool>, url: &str, n: usize) -> Result<Vec<usi
     Ok(ids)
 }
 
-async fn accepted_response(
-    pool: &H3Pool,
-    url: &str,
-) -> Result<usagi::net::h3::H3Response, String> {
-    let response =
-        tokio::time::timeout(Duration::from_secs(8), pool.request(&RequestSpec::get(url)))
-            .await
-            .map_err(|_| "request timed out".to_string())?
-            .map_err(|e| format!("request: {e}"))?;
+async fn accepted_response(pool: &H3Pool, url: &str) -> Result<usagi::net::h3::H3Response, String> {
+    let response = tokio::time::timeout(RENDEZVOUS, pool.request(&RequestSpec::get(url)))
+        .await
+        .map_err(|_| "request timed out".to_string())?
+        .map_err(|e| format!("request: {e}"))?;
     if response.status.as_u16() != 200 {
         return Err(format!("status {}", response.status));
     }
@@ -1005,13 +1019,10 @@ fn panic_payload(payload: Box<dyn std::any::Any + Send>) -> String {
 }
 
 async fn fetch(pool: &H3Pool, url: &str) -> Result<usize, String> {
-    let mut response = tokio::time::timeout(
-        Duration::from_secs(12),
-        pool.request(&RequestSpec::get(url)),
-    )
-    .await
-    .map_err(|_| "request timed out".to_string())?
-    .map_err(|e| format!("request failed: {e}"))?;
+    let mut response = tokio::time::timeout(RENDEZVOUS, pool.request(&RequestSpec::get(url)))
+        .await
+        .map_err(|_| "request timed out".to_string())?
+        .map_err(|e| format!("request failed: {e}"))?;
     if response.status.as_u16() != 200 {
         return Err(format!("status {}", response.status));
     }
@@ -1064,11 +1075,9 @@ fn expect_engine_total_unavailable(pool: &H3Pool) -> Result<(), String> {
 }
 
 async fn wait_for_count(mut read: impl FnMut() -> usize, want: usize) -> usize {
+    let deadline = Instant::now() + RENDEZVOUS;
     let mut seen = read();
-    for _ in 0..50 {
-        if seen >= want {
-            break;
-        }
+    while seen < want && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(10)).await;
         seen = read();
     }
@@ -1084,7 +1093,7 @@ async fn capture_remote_closing_display() -> Result<String, String> {
         .map_err(|e| format!("endpoint: {e}"))?;
     endpoint.set_default_client_config(ca.quic_client_config()?);
     let quinn_conn = tokio::time::timeout(
-        Duration::from_secs(5),
+        RENDEZVOUS,
         endpoint
             .connect(server.addr, "localhost")
             .map_err(|e| format!("connect: {e}"))?,
@@ -1093,7 +1102,7 @@ async fn capture_remote_closing_display() -> Result<String, String> {
     .map_err(|_| "quic handshake timed out".to_string())?
     .map_err(|e| format!("quic handshake: {e}"))?;
     let (mut driver, mut sender) = tokio::time::timeout(
-        Duration::from_secs(5),
+        RENDEZVOUS,
         h3::client::new(h3_quinn::Connection::new(quinn_conn)),
     )
     .await
@@ -1106,18 +1115,18 @@ async fn capture_remote_closing_display() -> Result<String, String> {
     let opened = http::Request::get("https://localhost/pin")
         .body(())
         .map_err(|e| format!("request: {e}"))?;
-    let mut stream = tokio::time::timeout(Duration::from_secs(5), sender.send_request(opened))
+    let mut stream = tokio::time::timeout(RENDEZVOUS, sender.send_request(opened))
         .await
         .map_err(|_| "first request timed out".to_string())?
         .map_err(|e| format!("first request: {e}"))?;
     stream.finish().await.map_err(|e| format!("finish: {e}"))?;
-    tokio::time::timeout(Duration::from_secs(5), stream.recv_response())
+    tokio::time::timeout(RENDEZVOUS, stream.recv_response())
         .await
         .map_err(|_| "response timed out".to_string())?
         .map_err(|e| format!("response: {e}"))?;
 
     server.goaway().await?;
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + RENDEZVOUS;
     let mut last = String::new();
     while Instant::now() < deadline {
         let late = http::Request::get("https://localhost/late")
@@ -1152,7 +1161,7 @@ async fn capture_remote_closing_display() -> Result<String, String> {
     drive.abort();
     server.shutdown().await;
     Err(format!(
-        "pinned h3 0.0.8 did not surface RemoteClosing within 3s (last error: {last:?})"
+        "pinned h3 0.0.8 did not surface RemoteClosing within the rendezvous budget (last error: {last:?})"
     ))
 }
 
@@ -1190,7 +1199,7 @@ async fn capture_rejected_connection_close_display() -> Result<String, String> {
         .map_err(|e| format!("client endpoint: {e}"))?;
     client.set_default_client_config(ca.quic_client_config()?);
     let quinn_conn = tokio::time::timeout(
-        Duration::from_secs(5),
+        RENDEZVOUS,
         client
             .connect(addr, "localhost")
             .map_err(|e| format!("connect: {e}"))?,
@@ -1199,7 +1208,7 @@ async fn capture_rejected_connection_close_display() -> Result<String, String> {
     .map_err(|_| "quic handshake timed out".to_string())?
     .map_err(|e| format!("quic handshake: {e}"))?;
     let (mut driver, mut sender) = tokio::time::timeout(
-        Duration::from_secs(5),
+        RENDEZVOUS,
         h3::client::new(h3_quinn::Connection::new(quinn_conn.clone())),
     )
     .await
@@ -1209,7 +1218,7 @@ async fn capture_rejected_connection_close_display() -> Result<String, String> {
         let _ = std::future::poll_fn(|cx| driver.poll_close(cx)).await;
     });
     let _ = release.send(true);
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + RENDEZVOUS;
     while quinn_conn.close_reason().is_none() && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
@@ -1225,9 +1234,7 @@ async fn capture_rejected_connection_close_display() -> Result<String, String> {
     let request = http::Request::get("https://localhost/rejected")
         .body(())
         .map_err(|e| format!("request: {e}"))?;
-    let captured = match tokio::time::timeout(Duration::from_secs(5), sender.send_request(request))
-        .await
-    {
+    let captured = match tokio::time::timeout(RENDEZVOUS, sender.send_request(request)).await {
         Ok(Err(err)) => Ok(err.to_string()),
         Ok(Ok(_)) => {
             Err("pinned h3 accepted a request after H3_REQUEST_REJECTED close".to_string())
