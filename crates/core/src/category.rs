@@ -260,6 +260,25 @@ fn is_reparse(path: &Path) -> bool {
     }
 }
 
+/// Whether a canonical path names the same location as the path it came from.
+///
+/// Windows paths are case-insensitive: `C:\WINDOWS\Temp` canonicalizes to
+/// `C:\Windows\Temp`, and a root the user typed as `c:\downloads` comes back
+/// as `C:\Downloads`. A difference in letter case alone is not a redirection
+/// (junctions and symlinks are caught component by component before this),
+/// so it must not be refused. Any other difference, such as an 8.3 short name
+/// expanding to its long name, still counts as a different spelling.
+#[cfg(windows)]
+fn same_spelling(real: &Path, given: &Path) -> bool {
+    real == given || real.to_string_lossy().to_uppercase() == given.to_string_lossy().to_uppercase()
+}
+
+/// Elsewhere paths are case-sensitive and must match exactly.
+#[cfg(not(windows))]
+fn same_spelling(real: &Path, given: &Path) -> bool {
+    real == given
+}
+
 /// The deepest existing ancestor of `dir` (or `dir` itself when it exists).
 ///
 /// Used before any creation: the part of the path that already exists must
@@ -327,7 +346,7 @@ pub fn verify_plain_dir(dir: &Path) -> Result<PathBuf> {
             crate::paths::display(dir)
         ))
     })?;
-    if dunce::simplified(&real) != dunce::simplified(dir) {
+    if !same_spelling(dunce::simplified(&real), dunce::simplified(dir)) {
         return Err(Error::Route(format!(
             "download root {} resolves to {}; category routing refuses redirected roots",
             crate::paths::display(dir),
@@ -553,6 +572,20 @@ mod tests {
         std::fs::write(&file_root, b"x").unwrap();
         let err = prepare_category_dir(&file_root, "Music", "x.mp3").unwrap_err();
         assert!(matches!(err, Error::Route(_)), "file-as-root: {err:?}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_root_spelled_in_different_letter_case_is_accepted() {
+        // The runner's SYSTEM temp folder is C:\WINDOWS\SystemTemp, which
+        // canonicalizes to C:\Windows\SystemTemp; users can type any case too.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("Downloads");
+        std::fs::create_dir(&root).unwrap();
+        let shouted = PathBuf::from(root.to_string_lossy().to_uppercase());
+        assert!(verify_plain_dir(&shouted).is_ok());
+        let dest = prepare_category_dir(&shouted, "Music", "x.mp3").unwrap();
+        assert!(dest.is_dir());
     }
 
     #[test]
