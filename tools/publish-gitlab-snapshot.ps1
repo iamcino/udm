@@ -43,7 +43,9 @@ Set-StrictMode -Version 2
 
 function Step($text) { Write-Host "`n== $text" -ForegroundColor Cyan }
 function RunGit {
-    $out = & git.exe @args
+    # git reports progress on stderr (push does even on success); judge by the exit code
+    $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & git.exe @args } finally { $ErrorActionPreference = $old }
     if ($LASTEXITCODE -ne 0) { throw "git $($args -join ' ') failed with exit code $LASTEXITCODE" }
     $out
 }

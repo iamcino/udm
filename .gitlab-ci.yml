@@ -42,6 +42,12 @@ variables:
   $env:RUSTUP_HOME = Join-Path $rust 'rustup'
   $env:CARGO_HOME = Join-Path $rust 'cargo'
   $env:Path = "$env:CARGO_HOME\bin;${env:ProgramFiles(x86)}\NSIS;$env:Path"
+  # LocalSystem's temp folder is C:\WINDOWS\SystemTemp, which canonicalizes to C:\Windows\...;
+  # the category-routing tests would see that as a redirected root. Use a folder whose
+  # spelling matches the disk.
+  # (GetFullPath also turns CI_BUILDS_DIR's forward slashes into backslashes)
+  $env:TEMP = $env:TMP = [IO.Path]::GetFullPath((Join-Path (Split-Path $env:CI_BUILDS_DIR) 'tmp'))
+  New-Item -ItemType Directory -Force $env:TEMP | Out-Null
   if (-not (Test-Path "$env:CARGO_HOME\bin\cargo.exe")) {
     New-Item -ItemType Directory -Force $rust | Out-Null
     $init = Join-Path $rust 'rustup-init.exe'
