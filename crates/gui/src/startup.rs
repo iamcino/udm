@@ -37,8 +37,7 @@ mod imp {
         unsafe {
             let mut key: HKEY = 0;
             let path = wide(key_path);
-            if RegOpenKeyExW(HKEY_CURRENT_USER, path.as_ptr(), 0, access, &mut key)
-                == ERROR_SUCCESS
+            if RegOpenKeyExW(HKEY_CURRENT_USER, path.as_ptr(), 0, access, &mut key) == ERROR_SUCCESS
             {
                 Some(key)
             } else {
@@ -136,10 +135,7 @@ pub fn exe_in_temp_or_downloads() -> bool {
         return true;
     }
     if let Some(home) = std::env::var_os("USERPROFILE") {
-        let downloads = format!(
-            "{}\\downloads\\",
-            home.to_string_lossy().to_lowercase()
-        );
+        let downloads = format!("{}\\downloads\\", home.to_string_lossy().to_lowercase());
         if exe.starts_with(&downloads) {
             return true;
         }

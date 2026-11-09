@@ -16,8 +16,8 @@ use std::time::Duration;
 
 use usagi::engine::Engine;
 use usagi::handoff::{
-    generate_pairing_secret, read_callers, Coordinator, CoordinatorConfig,
-    EngineAdapter, FileStore, SystemClock,
+    generate_pairing_secret, read_callers, Coordinator, CoordinatorConfig, EngineAdapter,
+    FileStore, SystemClock,
 };
 use usagi::paths::Paths;
 

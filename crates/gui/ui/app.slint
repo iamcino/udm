@@ -116,7 +116,11 @@ import { ScrollView, Palette } from "std-widgets.slint";
 export component AppWindow inherits Window {
     title: "Universal Download Manager";
     icon: @image-url("../assets/icon.png");
-    background: Theme.bg;
+    // Restore-repaint pulse: flipping this property changes the window
+    // background by an invisible 3%, which dirties the full window and
+    // forces the software renderer to repaint everything (see
+    // state::repaint_guard). The two states are visually identical.
+    background: root.repaint-pulse ? Theme.bg.brighter(1.03) : Theme.bg;
     default-font-family: Theme.family;
     default-font-size: 13px;
     preferred-width: 1040px;
@@ -139,6 +143,9 @@ export component AppWindow inherits Window {
     in-out property <bool> set-close-to-tray: true;
     in-out property <bool> set-minimize-to-tray: false;
     in-out property <bool> set-start-minimized: false;
+    // Restore-repaint guard state (state::repaint_guard flips this for a
+    // few poll ticks after the window becomes visible again).
+    in-out property <bool> repaint-pulse: false;
     // G3 startup option: the toggle mirrors the actual HKCU Run entry;
     // the warning flags a Temp/Downloads executable location.
     in-out property <bool> set-start-with-windows: false;

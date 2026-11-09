@@ -93,12 +93,8 @@ mod imp {
     impl Tray {
         pub fn new(vi: bool) -> Option<Tray> {
             let icon = load_icon()?;
-            let show_hide = MenuItem::with_id(
-                ID_SHOW_HIDE,
-                text(vi, "Hide UDM", "Ẩn UDM"),
-                true,
-                None,
-            );
+            let show_hide =
+                MenuItem::with_id(ID_SHOW_HIDE, text(vi, "Hide UDM", "Ẩn UDM"), true, None);
             let pause_all = MenuItem::with_id(
                 ID_PAUSE_ALL,
                 text(vi, "Pause all", "Tạm dừng tất cả"),
@@ -116,8 +112,7 @@ mod imp {
                 .iter()
                 .map(|id| MenuItem::with_id(*id, "", false, None))
                 .collect();
-            let mut top: Vec<&dyn tray_icon::menu::IsMenuItem> =
-                vec![&summary_total];
+            let mut top: Vec<&dyn tray_icon::menu::IsMenuItem> = vec![&summary_total];
             for f in &summary_files {
                 top.push(f);
             }
@@ -125,7 +120,11 @@ mod imp {
             top.push(&summary_sep);
             let popup_item = MenuItem::with_id(
                 ID_POPUP,
-                text(vi, "Active downloads\u{2026}", "T\u{1ea3}i \u{0111}ang ch\u{1ea1}y\u{2026}"),
+                text(
+                    vi,
+                    "Active downloads\u{2026}",
+                    "T\u{1ea3}i \u{0111}ang ch\u{1ea1}y\u{2026}",
+                ),
                 true,
                 None,
             );
@@ -240,9 +239,7 @@ mod imp {
     /// given physical size, with a small margin - the tray corner.
     pub fn work_area_bottom_right(width: i32, height: i32) -> (i32, i32) {
         use windows_sys::Win32::Foundation::RECT;
-        use windows_sys::Win32::UI::WindowsAndMessaging::{
-            SystemParametersInfoW, SPI_GETWORKAREA,
-        };
+        use windows_sys::Win32::UI::WindowsAndMessaging::{SystemParametersInfoW, SPI_GETWORKAREA};
         let mut area = RECT {
             left: 0,
             top: 0,

@@ -57,6 +57,11 @@ pub struct Gui {
     /// episode has been converted into a tray hide, so the poll does not
     /// repeat it until the window is restored and minimised again.
     pub minimized_seen: RefCell<bool>,
+    /// Restore-repaint guard: the previous poll tick's minimised state,
+    /// and how many full-repaint pulses are still owed after the window
+    /// becomes visible again (see repaint_guard).
+    pub was_minimized: RefCell<bool>,
+    pub repaint_pulses: RefCell<u8>,
     /// G3 popup: the lazily created downloads popup window and whether it
     /// is currently open. Refreshed only while open, from tray_poll.
     pub popup: RefCell<Option<crate::PopupWindow>>,
@@ -68,7 +73,12 @@ pub struct Gui {
     pub handoff: Option<Arc<Coordinator>>,
 }
 
-pub fn setup(ui: &AppWindow, engine: Arc<Engine>, handoff: Option<Arc<Coordinator>>, start_hidden: bool) {
+pub fn setup(
+    ui: &AppWindow,
+    engine: Arc<Engine>,
+    handoff: Option<Arc<Coordinator>>,
+    start_hidden: bool,
+) {
     ui.global::<crate::I18n>().on_translate(|key, language| {
         if language == 1 {
             crate::i18n::vi(key.as_str()).into()
@@ -98,6 +108,8 @@ pub fn setup(ui: &AppWindow, engine: Arc<Engine>, handoff: Option<Arc<Coordinato
         tray_summary_at: RefCell::new(Instant::now() - Duration::from_secs(2)),
         tray_summary_key: RefCell::new(String::new()),
         minimized_seen: RefCell::new(false),
+        was_minimized: RefCell::new(false),
+        repaint_pulses: RefCell::new(0),
         popup: RefCell::new(None),
         popup_open: RefCell::new(false),
         handoff,
@@ -339,11 +351,7 @@ pub fn setup(ui: &AppWindow, engine: Arc<Engine>, handoff: Option<Arc<Coordinato
         }
         g.selected.borrow_mut().clear();
         ui_set_bulk_remove_armed(&g, false);
-        toast(
-            &g,
-            format!("removed {handled}, skipped {skipped}"),
-            false,
-        );
+        toast(&g, format!("removed {handled}, skipped {skipped}"), false);
         refresh(&g);
     });
 
@@ -403,6 +411,7 @@ pub fn setup(ui: &AppWindow, engine: Arc<Engine>, handoff: Option<Arc<Coordinato
         Duration::from_millis(REFRESH_MS),
         move || {
             tray_poll(&gui);
+            repaint_guard(&gui);
             refresh(&gui);
         },
     );
@@ -505,6 +514,45 @@ fn pause_resume_ids(g: &Rc<Gui>, ids: &[u64], pause: bool) -> (usize, usize) {
     (handled, skipped)
 }
 
+/// Arm the restore-repaint guard (see repaint_guard): the next few
+/// poll ticks owe the window full repaints.
+fn arm_repaint(g: &Rc<Gui>) {
+    *g.repaint_pulses.borrow_mut() = 3;
+}
+
+/// Restore-repaint guard, run on every 150 ms poll tick. The winit
+/// software renderer paints partial frames into a buffer it believes
+/// still holds the previous frame; Windows discards a window's
+/// presented content across minimize, so the first partial frame after
+/// a restore leaves most of the window unpainted - the window behind
+/// shows through and only dirty fragments (caret field, scrollbar,
+/// refreshed rows) appear - until a resize forces a full repaint.
+/// Detect the transitions that can invalidate the presented frame
+/// (un-minimise here; the tray show paths arm the counter directly)
+/// and flip the root background pulse for a few ticks: the window
+/// background spans the whole window, so each flip dirties the full
+/// window and the renderer repaints everything, healing the buffer.
+fn repaint_guard(g: &Rc<Gui>) {
+    let Some(ui) = g.ui.upgrade() else {
+        return;
+    };
+    let minimized = ui.window().is_minimized();
+    let was = *g.was_minimized.borrow();
+    if was && !minimized {
+        arm_repaint(g);
+    }
+    *g.was_minimized.borrow_mut() = minimized;
+    if minimized {
+        return;
+    }
+    let owed = *g.repaint_pulses.borrow();
+    if owed > 0 {
+        *g.repaint_pulses.borrow_mut() = owed - 1;
+        ui.set_repaint_pulse(!ui.get_repaint_pulse());
+        ui.window().request_redraw();
+    }
+}
+
 /// Drain tray events (Phase 2). Runs inside the existing 150 ms poll, on
 /// the event-loop thread; the tray module itself never touches the UI.
 fn tray_poll(g: &Rc<Gui>) {
@@ -539,6 +587,7 @@ fn tray_poll(g: &Rc<Gui>) {
                 if let Some(ui) = g.ui.upgrade() {
                     let _ = ui.window().show();
                 }
+                arm_repaint(g);
                 if let Some(tray) = g.tray.borrow_mut().as_mut() {
                     tray.set_visible(true);
                 }
@@ -558,6 +607,7 @@ fn tray_poll(g: &Rc<Gui>) {
                         let _ = ui.window().show();
                     }
                 }
+                arm_repaint(g);
                 if let Some(tray) = g.tray.borrow_mut().as_mut() {
                     tray.set_visible(!visible);
                 }
@@ -597,6 +647,7 @@ fn show_main_window(g: &Rc<Gui>) {
     if let Some(ui) = g.ui.upgrade() {
         let _ = ui.window().show();
     }
+    arm_repaint(g);
     if let Some(tray) = g.tray.borrow_mut().as_mut() {
         tray.set_visible(true);
     }
@@ -839,7 +890,9 @@ fn refresh(g: &Rc<Gui>) {
     // Prune selection to currently visible rows, so bulk actions never
     // silently affect a hidden row, and removed tasks drop out.
     let visible_ids: BTreeSet<u64> = visible.iter().map(|s| s.id).collect();
-    g.selected.borrow_mut().retain(|id| visible_ids.contains(id));
+    g.selected
+        .borrow_mut()
+        .retain(|id| visible_ids.contains(id));
     let selected = g.selected.borrow().clone();
     ui.set_selected_count(selected.len() as i32);
     let mut rows: Vec<TaskRow> = visible
@@ -1032,7 +1085,11 @@ fn detail_from(s: &TaskSnapshot, vietnamese: bool) -> TaskDetail {
         None => format!(
             "{} / {}",
             util::human_bytes(s.received as f64),
-            if vietnamese { "không rõ kích thước" } else { "unknown size" }
+            if vietnamese {
+                "không rõ kích thước"
+            } else {
+                "unknown size"
+            }
         ),
     };
     let speed = if s.verify_bps > 0.0 {
@@ -1127,8 +1184,11 @@ fn detail_from(s: &TaskSnapshot, vietnamese: bool) -> TaskDetail {
         eta_text: SharedString::from(eta),
         transport_label: SharedString::from(transport_label),
         segments_text: SharedString::from(format!(
-            "{}/{} {} · {} {}", s.segments_done, s.segments_total,
-            if vietnamese { "xong" } else { "done" }, s.active_requests,
+            "{}/{} {} · {} {}",
+            s.segments_done,
+            s.segments_total,
+            if vietnamese { "xong" } else { "done" },
+            s.active_requests,
             if vietnamese { "yêu cầu" } else { "req" },
         )),
         url: SharedString::from(s.url.clone()),
@@ -1545,8 +1605,7 @@ fn save_settings(g: &Rc<Gui>) {
 fn os_prefers_dark() -> bool {
     use windows_sys::Win32::Foundation::ERROR_SUCCESS;
     use windows_sys::Win32::System::Registry::{
-        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ,
-        REG_DWORD,
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ, REG_DWORD,
     };
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -1767,7 +1826,11 @@ fn open_task_file(g: &Rc<Gui>, id: u64, folder: bool) {
     } else {
         // A deleted completed file must be reported, not silently
         // papered over by opening its parent folder.
-        toast(g, format!("file no longer exists: {}", path.display()), true);
+        toast(
+            g,
+            format!("file no longer exists: {}", path.display()),
+            true,
+        );
     }
 }
 
