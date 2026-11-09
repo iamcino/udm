@@ -158,6 +158,11 @@ export component KeyValue inherits HorizontalLayout {
     v := Text {
         horizontal-stretch: 1;
         min-width: 0px;
+        // An eliding value must not demand its full text width: a long
+        // URL/path would otherwise inflate this row's preferred width and
+        // starve a sibling column sharing the layout (the detail panel's
+        // right column collapsed to label-only width, 2026-11-09).
+        preferred-width: 0px;
         text: root.value;
         color: root.value-color;
         font-size: 12px;

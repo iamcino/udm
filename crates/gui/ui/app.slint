@@ -684,7 +684,9 @@ export component AppWindow inherits Window {
                                     KeyValue { key: I18n.tr("Speed"); value: root.detail.speed-text + (root.detail.eta-text != "" ? "  ·  " + root.detail.eta-text : ""); }
                                     KeyValue { key: I18n.tr("Segments"); value: root.detail.segments-text; }
                                     KeyValue { key: I18n.tr("Transport"); value: root.detail.transport-label; }
-                                    KeyValue { key: I18n.tr("Created"); value: root.detail.created-text + "  ·  " + I18n.tr("Started") + " " + root.detail.started-text + "  ·  " + I18n.tr("Finished") + " " + root.detail.finished-text; }
+                                    KeyValue { key: I18n.tr("Created"); value: root.detail.created-text; }
+                                    KeyValue { key: I18n.tr("Started"); value: root.detail.started-text; }
+                                    KeyValue { key: I18n.tr("Finished"); value: root.detail.finished-text; }
                                     KeyValue { key: I18n.tr("Attempts"); value: root.detail.attempts-text; }
                                 }
                             }

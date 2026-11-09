@@ -488,9 +488,23 @@ export component DownloadsView inherits Rectangle {
 
     // Column widths: GUI session state. Tuned for zero horizontal overflow at standard 1040x640 window.
     property <length> size-width: I18n.language == 1 ? 95px : 75px;
-    property <length> status-width: I18n.language == 1 ? 140px : 120px;
+    // Status column: sized from hidden font-metric probes (same pattern as
+    // the actions column below): the widest state label at 11px/500 in the
+    // current language (EN "Contacting server", VI "Đang kết nối máy chủ")
+    // plus a "100%" percent probe at 10px, the 6px label/percent spacing
+    // and the cell's 16px inner inset, with 4px slack. Floored at the
+    // previous fixed widths. (The fixed 120px/140px elided "Downloading"
+    // at every window width — owner screenshot review 2026-11-09.)
+    status-m := Text { visible: false; font-size: 11px; font-weight: 500; text: I18n.language == 1 ? "Đang kết nối máy chủ" : "Contacting server"; }
+    percent-m := Text { visible: false; font-size: 10px; text: "100%"; }
+    property <length> status-width: max(I18n.language == 1 ? 140px : 120px,
+        status-m.preferred-width + percent-m.preferred-width + 26px);
     property <length> speed-width: 75px;
-    property <length> added-width: 125px;
+    // Added column: the timestamp is a fixed-format 16-character string
+    // ("2026-11-09 14:17") at 11px; probe it and return the slack to the
+    // Name column. Floored at 104px so the format never elides.
+    added-m := Text { visible: false; font-size: 11px; text: "2026-11-09 14:17"; }
+    property <length> added-width: max(104px, added-m.preferred-width + 20px);
     // Row actions column: sized from hidden 12px font-metric probes of the
     // action labels in the current language (same pattern as the G1 toolbar
     // budget in app.slint). A row shows at most two labelled buttons plus
