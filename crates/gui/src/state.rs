@@ -14,6 +14,7 @@ use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel, Weak};
 
 use usagi::config::{ConflictPolicy, Settings, TransportPref};
 use usagi::engine::{AddRequest, Engine, Event, TaskSnapshot};
+use usagi::handoff::{Coordinator, RecoveryEntry};
 use usagi::hash::ExpectedHash;
 use usagi::store::records::TaskState;
 use usagi::util;
@@ -47,9 +48,14 @@ pub struct Gui {
     /// actually typed or browsed a folder; an untouched field or one the
     /// form pre-filled stays `false` and submits as `dest_dir: None`.
     pub add_dir_explicit: RefCell<bool>,
+    /// G5-closing: the live handoff coordinator, when one is serving.
+    /// Read-only here: the task list renders its recovery entries as
+    /// rows (owner decision 2026-11-09); the GUI never mutates handoff
+    /// records.
+    pub handoff: Option<Arc<Coordinator>>,
 }
 
-pub fn setup(ui: &AppWindow, engine: Arc<Engine>) {
+pub fn setup(ui: &AppWindow, engine: Arc<Engine>, handoff: Option<Arc<Coordinator>>) {
     ui.global::<crate::I18n>().on_translate(|key, language| {
         if language == 1 {
             crate::i18n::vi(key.as_str()).into()
@@ -76,6 +82,7 @@ pub fn setup(ui: &AppWindow, engine: Arc<Engine>) {
         slow: RefCell::new(Instant::now() - Duration::from_millis(SLOW_REFRESH_MS)),
         toast_until: RefCell::new(Instant::now()),
         add_dir_explicit: RefCell::new(false),
+        handoff,
     });
 
     push_settings_to_ui(ui, &engine.settings());
@@ -547,10 +554,30 @@ fn refresh(g: &Rc<Gui>) {
     g.selected.borrow_mut().retain(|id| visible_ids.contains(id));
     let selected = g.selected.borrow().clone();
     ui.set_selected_count(selected.len() as i32);
-    let rows: Vec<TaskRow> = visible
+    let mut rows: Vec<TaskRow> = visible
         .iter()
         .map(|s| row_from(s, ui.get_language_index() == 1, selected.contains(&s.id)))
         .collect();
+    // G5-closing (owner decision 2026-11-09): durable handoff commitments
+    // whose engine association never landed are rendered as read-only
+    // recovery rows in the All view. They are coordinator records, not
+    // engine tasks: no id, no actions - every row handler resolves keys
+    // through parse_key, which rejects the recovery: keys, so clicks on
+    // them are inert. The text filter applies to them like any row.
+    if library == 0 {
+        if let Some(coordinator) = &g.handoff {
+            let vietnamese = ui.get_language_index() == 1;
+            for entry in coordinator.recovery_entries() {
+                let row = recovery_row(&entry, vietnamese);
+                if filter.is_empty()
+                    || row.name.to_lowercase().contains(&filter)
+                    || row.url.to_lowercase().contains(&filter)
+                {
+                    rows.push(row);
+                }
+            }
+        }
+    }
     if g.tasks.row_count() == rows.len() {
         for (i, row) in rows.into_iter().enumerate() {
             g.tasks.set_row_data(i, row);
@@ -936,6 +963,60 @@ fn row_from(s: &TaskSnapshot, vietnamese: bool, selected: bool) -> TaskRow {
         can_open_folder: matches!(s.state, TaskState::Completed | TaskState::Paused),
         can_remove: true,
         hash_text: SharedString::from(hash),
+        glyph: SharedString::from(glyph_for(&name)),
+    }
+}
+
+/// A read-only recovery row for one lost-commit handoff record (see
+/// the refresh site). `state` uses the wire vocabulary
+/// (recovery-required); the label goes through the I18n translator like
+/// every state label. Size shows the browser's hint when one exists.
+fn recovery_row(e: &RecoveryEntry, _vietnamese: bool) -> TaskRow {
+    let url = e.url.clone().unwrap_or_default();
+    let name = e
+        .filename_hint
+        .clone()
+        .filter(|n| !n.is_empty())
+        .or_else(|| {
+            url::Url::parse(&url)
+                .ok()
+                .and_then(|u| util::filename_from_url(&u))
+        })
+        .unwrap_or_else(|| url.clone());
+    let detail = match &e.outcome {
+        Some(o) => format!("Browser handoff needs recovery ({o})"),
+        None => "Browser handoff needs recovery".to_string(),
+    };
+    TaskRow {
+        id: -1.0,
+        key: SharedString::from(format!("recovery:{}", e.tx)),
+        selected: false,
+        name: SharedString::from(name.clone()),
+        url: SharedString::from(url),
+        state: SharedString::from("recovery-required"),
+        state_label: SharedString::from("Needs recovery"),
+        received_text: SharedString::from(util::human_bytes(0.0)),
+        total_text: SharedString::from(match e.size_hint {
+            Some(t) => util::human_bytes(t as f64),
+            None => "unknown size".to_string(),
+        }),
+        percent: -1.0,
+        speed_text: SharedString::from(""),
+        eta_text: SharedString::from(""),
+        transport: SharedString::from(""),
+        transport_label: SharedString::from(""),
+        segments_text: SharedString::from(""),
+        error_text: SharedString::from(detail),
+        path_text: SharedString::from(""),
+        created_text: SharedString::from(util::format_timestamp(e.committed_at_ms)),
+        can_pause: false,
+        can_resume: false,
+        can_cancel: false,
+        can_retry: false,
+        can_open_file: false,
+        can_open_folder: false,
+        can_remove: false,
+        hash_text: SharedString::from(""),
         glyph: SharedString::from(glyph_for(&name)),
     }
 }

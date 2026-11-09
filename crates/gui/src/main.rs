@@ -75,7 +75,7 @@ fn main() {
     };
 
     tracing::info!("engine ready");
-    handoff_boot::start(&handoff_paths, engine.clone());
+    let handoff = handoff_boot::start(&handoff_paths, engine.clone());
 
     let ui = match AppWindow::new() {
         Ok(ui) => ui,
@@ -111,7 +111,7 @@ fn main() {
         });
     }
 
-    state::setup(&ui, engine.clone());
+    state::setup(&ui, engine.clone(), handoff);
     tracing::info!("entering event loop");
 
     let result = ui.run();

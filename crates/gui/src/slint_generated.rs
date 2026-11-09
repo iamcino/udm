@@ -3554,9 +3554,19 @@ mod slint_generatedAppWindow {
                                          sp :: Color :: from_argb_encoded ((4287451136f64) as u32) }
                                     ) as _ }
                                  else {
-                                     {
-                                         * & InnerTheme_820 :: FIELD_OFFSETS . r#label2 () }
-                                     . apply_pin (_self . globals () . global_Theme_820 . as_ref ()) . get () }
+                                     if ((((r#tmp_root_31_data) . r#state) . clone ())) == ((sp :: SharedString :: from ("recovery-required"))) {
+                                         (if {
+                                             * & InnerTheme_820 :: FIELD_OFFSETS . r#dark () }
+                                         . apply_pin (_self . globals () . global_Theme_820 . as_ref ()) . get () {
+                                             (sp :: Color :: from_argb_encoded ((4294939904f64) as u32)) as _ }
+                                         else {
+                                             sp :: Color :: from_argb_encoded ((4287451136f64) as u32) }
+                                        ) as _ }
+                                     else {
+                                         {
+                                             * & InnerTheme_820 :: FIELD_OFFSETS . r#label2 () }
+                                         . apply_pin (_self . globals () . global_Theme_820 . as_ref ()) . get () }
+                                     }
                                  }
                              }
                          }

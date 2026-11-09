@@ -161,12 +161,14 @@ pub struct Settings {
     pub log_level: String,
 
     // --- browser handoff (G5) ----------------------------------------------
-    /// Lease for a prepared browser handoff, in seconds. `None` (the
-    /// default, and what existing configs load) means the handoff
-    /// coordinator is never started and the feature is fully inert. The
-    /// production value is an open owner decision (freeze section 5), so
-    /// this library ships no default; setting it is also the opt-in that
-    /// lets the GUI serve the handoff pipe at all.
+    /// Lease for a prepared browser handoff, in seconds. The owner set
+    /// the production value to 60 s on 2026-11-09 (closing the freeze
+    /// section 5 question), so fresh configs default to `Some(60)`. An
+    /// explicitly stored `null` still loads as `None` — the coordinator
+    /// is never started and the feature is fully inert — so installs
+    /// that persisted `None` are never silently enabled. Serving the
+    /// pipe additionally requires the disclosed registration (a callers
+    /// list), which remains the user opt-in gate.
     pub handoff_lease_secs: Option<u64>,
 }
 
@@ -199,7 +201,7 @@ impl Default for Settings {
             language: "en".to_string(),
             accent: "blue".to_string(),
             log_level: "info".to_string(),
-            handoff_lease_secs: None,
+            handoff_lease_secs: Some(60),
         }
     }
 }
@@ -502,6 +504,24 @@ mod tests {
         s.sanitize();
         assert_eq!(s.transport_pref, TransportPref::NoHttp3);
         assert!(!s.learn_alt_svc);
+    }
+
+    #[test]
+    fn handoff_lease_default_is_the_owner_set_60s() {
+        // Fresh configs carry the owner-set production lease (2026-11-09).
+        assert_eq!(Settings::default().handoff_lease_secs, Some(60));
+        // A config with no key at all takes the struct default too.
+        let fresh: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(fresh.handoff_lease_secs, Some(60));
+        // An explicitly stored null is preserved as None: upgrades never
+        // silently enable the coordinator for existing installs.
+        let stored: Settings =
+            serde_json::from_str(r#"{"handoff_lease_secs": null}"#).unwrap();
+        assert_eq!(stored.handoff_lease_secs, None);
+        // And an explicit value round-trips.
+        let set: Settings =
+            serde_json::from_str(r#"{"handoff_lease_secs": 120}"#).unwrap();
+        assert_eq!(set.handoff_lease_secs, Some(120));
     }
 
     #[test]

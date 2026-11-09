@@ -539,3 +539,52 @@ fn concurrent_duplicate_commits_add_exactly_once() {
     assert_eq!(refs[0], refs[1], "both callers see the recorded association");
     assert_eq!(refs[0].as_deref(), Some("1001"));
 }
+
+
+/// G5-closing package (owner decision 2026-11-09): the GUI recovery
+/// rows read exactly the set `query` answers `recovery_required` for.
+/// Presentation only - listing must not mutate or materialize anything.
+#[test]
+fn recovery_entries_list_exactly_the_pending_associations() {
+    let clock = Arc::new(ManualClock::new());
+    let engine = Arc::new(FakeEngine::default());
+    let c = coordinator(engine.clone(), clock, 60_000);
+    assert!(c.recovery_entries().is_empty());
+    // A healthy commit associates immediately: never listed.
+    c.prepare(ALICE, "tx-ok", intent()).unwrap();
+    assert_eq!(
+        c.commit(ALICE, "tx-ok", true).unwrap().status,
+        HandoffStatus::Committed
+    );
+    assert!(c.recovery_entries().is_empty());
+    // Engine down: the commitment persists, association stays pending.
+    engine.set_down(true);
+    c.prepare(ALICE, "tx-lost", intent()).unwrap();
+    assert_eq!(
+        c.commit(ALICE, "tx-lost", true).unwrap().status,
+        HandoffStatus::RecoveryRequired
+    );
+    assert_eq!(engine.add_calls(), 1, "only the healthy commit Added");
+    let entries = c.recovery_entries();
+    assert_eq!(entries.len(), 1);
+    let e = &entries[0];
+    assert_eq!(e.tx, "tx-lost");
+    assert_eq!(e.caller, ALICE);
+    assert_eq!(e.url.as_deref(), Some("https://example.com/file.bin"));
+    assert_eq!(e.filename_hint.as_deref(), Some("file.bin"));
+    assert_eq!(e.size_hint, Some(65_536));
+    assert_eq!(e.committed_at_ms, T0);
+    // Listing is a pure read: the pending record is untouched.
+    assert_eq!(c.recovery_entries().len(), 1);
+    assert_eq!(
+        c.query(ALICE, "tx-lost").unwrap().status,
+        HandoffStatus::RecoveryRequired
+    );
+    // An aborted transaction is never a recovery row.
+    engine.set_down(false);
+    c.prepare(ALICE, "tx-ab", intent()).unwrap();
+    c.abort(ALICE, "tx-ab", true).unwrap();
+    let entries = c.recovery_entries();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].tx, "tx-lost");
+}

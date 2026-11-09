@@ -324,6 +324,7 @@ component RowCard inherits Rectangle {
                         : root.data.state == "completed" ? Theme.ok
                         : root.data.state == "downloading" ? Theme.accent-hi
                         : root.data.state == "paused" ? Theme.warn
+                        : root.data.state == "recovery-required" ? Theme.warn
                         : Theme.text-dim;
                     font-size: 11px;
                     font-weight: 500;

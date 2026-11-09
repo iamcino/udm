@@ -419,9 +419,11 @@ impl EnginePort for EngineAdapter {
     }
 }
 
-/// Coordinator configuration. `lease` is required: the freeze (§5)
-/// reserves its production value to the owner, so this library ships
-/// no default and never renews a deadline implicitly.
+/// Coordinator configuration. `lease` is required at this layer: the
+/// freeze (§5) reserved its production value to the owner, who set it
+/// to 60 s on 2026-11-09 - that default lives in `Settings`, and this
+/// struct still takes the value explicitly. Deadlines are never
+/// renewed implicitly.
 #[derive(Debug)]
 pub struct CoordinatorConfig {
     pub lease: Duration,
@@ -806,6 +808,57 @@ impl Coordinator {
     /// payload never carries a caller (freeze section 6).
     pub fn caller_allowed(&self, caller: &str) -> bool {
         self.allowed_callers.iter().any(|c| c == caller)
+    }
+
+    /// The transactions a user must be shown as needing recovery: the
+    /// durable commitment exists but its engine association has not
+    /// landed — exactly the set `query` answers `recovery_required`
+    /// for (any record with `association_pending` set). Owner decision
+    /// 2026-11-09: the GUI renders these as read-only rows in the task
+    /// list. Presentation only; this never mutates a record, never
+    /// starts a task, and never renews a deadline.
+    pub fn recovery_entries(&self) -> Vec<RecoveryEntry> {
+        let inner = self.inner.lock().expect("handoff lock poisoned");
+        inner
+            .records
+            .iter()
+            .filter(|rec| rec.association_pending)
+            .map(RecoveryEntry::of_record)
+            .collect()
+    }
+}
+
+/// One recovery-row presentation record (see
+/// [`Coordinator::recovery_entries`]). A flattened, read-only view of a
+/// handoff record — deliberately NOT an engine task: it carries no
+/// task state and no engine ID, because association has not landed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecoveryEntry {
+    pub tx: String,
+    pub caller: String,
+    pub url: Option<String>,
+    pub filename_hint: Option<String>,
+    pub size_hint: Option<u64>,
+    /// When the record last transitioned (the durable commitment time
+    /// for a lost commit), epoch milliseconds.
+    pub committed_at_ms: i64,
+    pub outcome: Option<String>,
+}
+
+impl RecoveryEntry {
+    fn of_record(rec: &HandoffRecord) -> RecoveryEntry {
+        RecoveryEntry {
+            tx: rec.tx.clone(),
+            caller: rec.caller.clone(),
+            url: rec.intent.as_ref().map(|i| i.url.clone()),
+            filename_hint: rec
+                .intent
+                .as_ref()
+                .and_then(|i| i.filename_hint.clone()),
+            size_hint: rec.intent.as_ref().and_then(|i| i.size_hint),
+            committed_at_ms: rec.transition_at_ms,
+            outcome: rec.outcome.clone(),
+        }
     }
 }
 

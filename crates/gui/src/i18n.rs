@@ -9,6 +9,7 @@ pub fn vi(key: &str) -> &str {
         "About & Privacy" => "Giới thiệu & riêng tư",
         "ACTIONS" => "THAO TÁC",
         "Active" => "Đang xử lý",
+        "Needs recovery" => "Cần khôi phục",
         "Add" => "Thêm",
         "Add Download" => "Thêm lượt tải",
         "Add paused (do not start now)" => "Thêm ở trạng thái tạm dừng",

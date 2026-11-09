@@ -1,9 +1,10 @@
 //! G5 slice 2: start the browser-handoff coordinator and its named pipe,
 //! when the owner has opted in. Two conditions, both required:
 //!
-//! * a lease is configured (`Settings.handoff_lease_secs`) - its
-//!   production value is the owner's open decision (freeze §5), so the
-//!   library ships no default and `None` means fully inert;
+//! * a lease is configured (`Settings.handoff_lease_secs`) - the
+//!   owner set the production value to 60 s on 2026-11-09 (freeze §5
+//!   closed), so fresh configs default to it; an explicitly stored
+//!   `None` means fully inert;
 //! * at least one browser caller is registered
 //!   (`<data>/handoff/callers.json`, written by `udm-host --register`).
 //!
@@ -20,30 +21,33 @@ use usagi::handoff::{
 };
 use usagi::paths::Paths;
 
-pub fn start(paths: &Paths, engine: Arc<Engine>) {
+/// Starts the coordinator when opted in and returns it, so the GUI
+/// can render recovery rows from the same authoritative instance
+/// (owner decision 2026-11-09). `None` = handoff fully inert.
+pub fn start(paths: &Paths, engine: Arc<Engine>) -> Option<Arc<Coordinator>> {
     let lease_secs = match engine.settings().handoff_lease_secs {
         Some(secs) if secs > 0 => secs,
         _ => {
             tracing::debug!("handoff: no lease configured; coordinator not started");
-            return;
+            return None;
         }
     };
     let callers = read_callers(paths);
     if callers.is_empty() {
         tracing::debug!("handoff: no registered browser callers; coordinator not started");
-        return;
+        return None;
     }
     let secret = generate_pairing_secret();
     let dir = paths.root.join("handoff");
     if let Err(e) = std::fs::create_dir_all(&dir) {
         tracing::warn!(error = %e, "handoff: cannot create the handoff directory");
-        return;
+        return None;
     }
     // The pairing secret is replaced on every start; the host re-reads
     // the file per connection, so this never strands a registered host.
     if let Err(e) = std::fs::write(dir.join("pairing.key"), format!("{secret}\n")) {
         tracing::warn!(error = %e, "handoff: cannot write the pairing key");
-        return;
+        return None;
     }
     let coordinator = match Coordinator::open(
         Box::new(FileStore::new(FileStore::journal_path(paths))),
@@ -57,9 +61,10 @@ pub fn start(paths: &Paths, engine: Arc<Engine>) {
         Ok(c) => Arc::new(c),
         Err(e) => {
             tracing::error!(error = %e, "handoff: coordinator failed to open");
-            return;
+            return None;
         }
     };
+    let gui_coordinator = coordinator.clone();
     tracing::info!(
         callers = callers.len(),
         lease_secs,
@@ -71,4 +76,5 @@ pub fn start(paths: &Paths, engine: Arc<Engine>) {
             tracing::error!(error = %e, "handoff: pipe server stopped");
         }
     });
+    Some(gui_coordinator)
 }
