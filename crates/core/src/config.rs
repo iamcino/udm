@@ -170,6 +170,19 @@ pub struct Settings {
     /// pipe additionally requires the disclosed registration (a callers
     /// list), which remains the user opt-in gate.
     pub handoff_lease_secs: Option<u64>,
+
+    // --- window lifecycle (G3) ---------------------------------------------
+    /// Closing the window hides it to the tray instead of exiting
+    /// (default on, per the settled G3 defaults). The tray menu's Exit
+    /// item always exits for real.
+    pub close_to_tray: bool,
+    /// Minimizing the window hides it to the tray (default off).
+    pub minimize_to_tray: bool,
+    /// Start with the main window hidden in the tray (default off).
+    pub start_minimized: bool,
+    /// Register the per-user HKCU Run entry so UDM starts at logon
+    /// (default off; disclosed opt-in, see `gui::startup`).
+    pub start_with_windows: bool,
 }
 
 impl Default for Settings {
@@ -202,6 +215,10 @@ impl Default for Settings {
             accent: "blue".to_string(),
             log_level: "info".to_string(),
             handoff_lease_secs: Some(60),
+            close_to_tray: true,
+            minimize_to_tray: false,
+            start_minimized: false,
+            start_with_windows: false,
         }
     }
 }
@@ -533,5 +550,35 @@ mod tests {
         assert_eq!(s.segments_per_task, 16);
         assert!(!s.http3_enabled);
         assert!(s.apply_pair("nope", "1").is_err());
+    }
+
+    #[test]
+    fn lifecycle_fields_round_trip_and_legacy_defaults() {
+        // Settled G3 defaults on a fresh config.
+        let d = Settings::default();
+        assert!(d.close_to_tray);
+        assert!(!d.minimize_to_tray);
+        assert!(!d.start_minimized);
+        assert!(!d.start_with_windows);
+        // Non-default values survive a JSON round trip.
+        let mut s = Settings::default();
+        s.close_to_tray = false;
+        s.minimize_to_tray = true;
+        s.start_minimized = true;
+        s.start_with_windows = true;
+        let json = serde_json::to_string(&s).unwrap();
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert!(!back.close_to_tray);
+        assert!(back.minimize_to_tray);
+        assert!(back.start_minimized);
+        assert!(back.start_with_windows);
+        // A legacy config without the lifecycle keys loads with defaults.
+        let legacy: Settings =
+            serde_json::from_str(r#"{"theme": "auto"}"#).unwrap();
+        assert!(legacy.close_to_tray);
+        assert!(!legacy.minimize_to_tray);
+        assert!(!legacy.start_minimized);
+        assert!(!legacy.start_with_windows);
+        assert_eq!(legacy.theme, "auto");
     }
 }

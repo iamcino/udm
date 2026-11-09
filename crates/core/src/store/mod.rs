@@ -83,6 +83,15 @@ pub struct Store {
     /// [`Store::fail_next_saves`], which integration tests use via the
     /// engine handle; it is never armed in production paths.
     fail_saves: std::sync::atomic::AtomicU32,
+    /// Phase-scoped fault injection for tests: while `true`, EVERY `save`
+    /// fails. Fixtures that need a whole phase of persistence failure
+    /// (arm -> act -> clear -> act) use [`Store::set_save_failure`]
+    /// instead of a huge `fail_next_saves` count: a countdown is consumed
+    /// by unrelated background saves, so how many failures remain at
+    /// clear time is unknowable and one can land in the cleared phase.
+    /// The switch has no quantity - a save fails if and only if it starts
+    /// while the switch is on. Never armed in production paths.
+    fail_all_saves: std::sync::atomic::AtomicBool,
     /// Test hook invoked once inside [`Store::save`], before the write, so a
     /// fixture can move a task's persist epoch while a saver is in the
     /// commit it must not leave as the last pair. Production leaves it empty.
@@ -143,6 +152,7 @@ impl Store {
             path,
             alt_svc_cache: Mutex::new(Default::default()),
             fail_saves: std::sync::atomic::AtomicU32::new(0),
+            fail_all_saves: std::sync::atomic::AtomicBool::new(false),
             save_observer: Mutex::new(SaveObserver::default()),
         };
         store.migrate()?;
@@ -252,6 +262,16 @@ impl Store {
             .store(count, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// Arm or clear phase-scoped save failure: while armed, every call
+    /// to [`Store::save`] fails. Exists for failure-injection fixtures
+    /// that exercise a whole phase of persistence failure; never called
+    /// by production code. See the `fail_all_saves` field note for why
+    /// this is a switch and not a count.
+    pub fn set_save_failure(&self, on: bool) {
+        self.fail_all_saves
+            .store(on, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// Arm a one-shot hook that runs inside the next [`Store::save`], before
     /// the database write. The hook is taken, so a retry of that save does
     /// not run it again. Production never calls this.
@@ -272,6 +292,14 @@ impl Store {
         segments: &[(u64, Vec<SegmentState>)],
         durable: bool,
     ) -> Result<()> {
+        if self
+            .fail_all_saves
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(Error::Storage(
+                "injected save failure (test fault)".into(),
+            ));
+        }
         let mut armed = self.fail_saves.load(std::sync::atomic::Ordering::SeqCst);
         while armed > 0 {
             match self.fail_saves.compare_exchange_weak(

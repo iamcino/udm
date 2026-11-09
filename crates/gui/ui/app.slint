@@ -109,6 +109,8 @@ import { DownloadsView } from "views/downloads.slint";
 import { AddView } from "views/add.slint";
 import { SettingsView } from "views/settings.slint";
 import { AboutView } from "views/about.slint";
+import { PopupWindow } from "popup.slint";
+export { PopupWindow }
 import { ScrollView, Palette } from "std-widgets.slint";
 
 export component AppWindow inherits Window {
@@ -130,14 +132,33 @@ export component AppWindow inherits Window {
     // 0 = downloads, 1 = add, 2 = settings, 3 = about
     in-out property <int> view: 0;
     in-out property <int> theme-index <=> Theme.mode;
+    // G3: theme preference as stored in Settings: 0 dark, 1 light, 2 auto
+    // (follow the OS). theme-index stays the resolved dark/light value.
+    in-out property <int> theme-pref: 0;
+    // G3 lifecycle settings (mirror of the SettingsView controls).
+    in-out property <bool> set-close-to-tray: true;
+    in-out property <bool> set-minimize-to-tray: false;
+    in-out property <bool> set-start-minimized: false;
+    // G3 startup option: the toggle mirrors the actual HKCU Run entry;
+    // the warning flags a Temp/Downloads executable location.
+    in-out property <bool> set-start-with-windows: false;
+    in-out property <bool> set-startup-location-warn: false;
+    callback show-popup;
     in-out property <int> accent-index <=> Theme.accent-index;
     in-out property <int> language-index <=> I18n.language;
     in-out property <ColorScheme> native-color-scheme <=> Palette.color-scheme;
     public function apply-native-theme() {
+        // theme-index is the resolved dark/light value; for the Auto
+        // preference the Rust side resolves it from the OS scheme (see
+        // state::os_prefers_dark) before invoking this function.
+        if (root.theme-pref != 2) {
+            root.theme-index = root.theme-pref;
+        }
         CinoTheme.dark = root.theme-index == 0;
         CinoTheme.accent = Theme.accents[min(max(root.accent-index, 0), 4)];
         Lang.english = root.language-index == 0;
-        root.native-color-scheme = root.theme-index == 1 ? ColorScheme.light : ColorScheme.dark;
+        root.native-color-scheme = root.theme-pref == 2 ? ColorScheme.unknown
+            : root.theme-index == 1 ? ColorScheme.light : ColorScheme.dark;
     }
     callback appearance-changed;
     public pure function translate(key: string) -> string { return I18n.tr(key); }
@@ -330,6 +351,13 @@ export component AppWindow inherits Window {
                         badge: root.status.failed-count > 0 ? root.status.failed-count + "" : "";
                         active: root.view == 0 && root.library == 3;
                         clicked => { root.view = 0; root.library = 3; }
+                    }
+                    NavItem {
+                        glyph: "\u{25bc}";
+                        label: I18n.tr("Active downloads…");
+                        badge: "";
+                        active: false;
+                        clicked => { root.show-popup(); }
                     }
 
                     SidebarCaption { label: I18n.tr("GENERAL"); }
@@ -532,6 +560,12 @@ export component AppWindow inherits Window {
                             height: 100%;
                             visible: root.view == 2;
                             theme-index <=> root.theme-index;
+                            theme-pref <=> root.theme-pref;
+                            close-to-tray <=> root.set-close-to-tray;
+                            minimize-to-tray <=> root.set-minimize-to-tray;
+                            start-minimized <=> root.set-start-minimized;
+                            start-with-windows <=> root.set-start-with-windows;
+                            startup-location-warn: root.set-startup-location-warn;
                             accent-index <=> root.accent-index;
                             language-index <=> root.language-index;
                             appearance-changed => { root.appearance-changed(); }

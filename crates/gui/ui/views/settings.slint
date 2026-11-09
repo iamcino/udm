@@ -23,6 +23,12 @@ export component SettingsView inherits Rectangle {
     callback saved;
     callback reset;
     in-out property <int> theme-index;
+    in-out property <int> theme-pref;
+    in-out property <bool> close-to-tray;
+    in-out property <bool> minimize-to-tray;
+    in-out property <bool> start-minimized;
+    in-out property <bool> start-with-windows;
+    in property <bool> startup-location-warn;
     in-out property <int> accent-index;
     in-out property <int> language-index;
     callback appearance-changed;
@@ -59,6 +65,49 @@ export component SettingsView inherits Rectangle {
                         language-changed(english) => { root.language-index = english ? 0 : 1; root.appearance-changed(); }
                     }
                     Text { text: I18n.tr("Applied immediately; saved locally."); color: Theme.text-faint; }
+                    VerticalLayout {
+                        width: 280px;
+                        spacing: 6px;
+                        Text { text: I18n.tr("Theme"); color: Theme.text-dim; font-size: 12px; }
+                        ComboBox {
+                            height: 30px;
+                            model: [I18n.tr("Dark"), I18n.tr("Light"), I18n.tr("Auto (follow system)")];
+                            current-index <=> root.theme-pref;
+                            selected => { root.appearance-changed(); }
+                        }
+                    }
+
+                    SectionTitle { label: I18n.tr("WINDOW"); }
+                    CheckBox {
+                        text: I18n.tr("Close window to the tray");
+                        checked <=> root.close-to-tray;
+                    }
+                    CheckBox {
+                        text: I18n.tr("Minimize window to the tray");
+                        checked <=> root.minimize-to-tray;
+                    }
+                    CheckBox {
+                        text: I18n.tr("Start minimized in the tray");
+                        checked <=> root.start-minimized;
+                    }
+                    CheckBox {
+                        text: I18n.tr("Start with Windows");
+                        checked <=> root.start-with-windows;
+                    }
+                    Text {
+                        width: min(root.width - 48px, 580px);
+                        text: I18n.tr("Runs UDM when you sign in to Windows. Stored only in your user account (HKCU Run); no administrator rights, no service. Remove it here or in Windows Settings > Apps > Startup.");
+                        color: Theme.text-faint;
+                        font-size: 11px;
+                        wrap: word-wrap;
+                    }
+                    if root.start-with-windows && root.startup-location-warn: Text {
+                        width: min(root.width - 48px, 580px);
+                        text: I18n.tr("UDM is running from Temp or Downloads. Startup will break if that folder is cleaned - consider a permanent folder.");
+                        color: Theme.warn;
+                        font-size: 11px;
+                        wrap: word-wrap;
+                    }
                     SectionTitle { label: I18n.tr("QUEUE"); }
                     HorizontalLayout {
                         spacing: 14px;

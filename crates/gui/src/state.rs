@@ -48,6 +48,19 @@ pub struct Gui {
     /// actually typed or browsed a folder; an untouched field or one the
     /// form pre-filled stays `false` and submits as `dest_dir: None`.
     pub add_dir_explicit: RefCell<bool>,
+    /// G3 tray summary throttle: when the summary was last pushed to the
+    /// tray, and the content key that was pushed (identical content is
+    /// not re-sent).
+    pub tray_summary_at: RefCell<Instant>,
+    pub tray_summary_key: RefCell<String>,
+    /// G3 minimise-to-tray watcher: true once the current minimised
+    /// episode has been converted into a tray hide, so the poll does not
+    /// repeat it until the window is restored and minimised again.
+    pub minimized_seen: RefCell<bool>,
+    /// G3 popup: the lazily created downloads popup window and whether it
+    /// is currently open. Refreshed only while open, from tray_poll.
+    pub popup: RefCell<Option<crate::PopupWindow>>,
+    pub popup_open: RefCell<bool>,
     /// G5-closing: the live handoff coordinator, when one is serving.
     /// Read-only here: the task list renders its recovery entries as
     /// rows (owner decision 2026-11-09); the GUI never mutates handoff
@@ -55,7 +68,7 @@ pub struct Gui {
     pub handoff: Option<Arc<Coordinator>>,
 }
 
-pub fn setup(ui: &AppWindow, engine: Arc<Engine>, handoff: Option<Arc<Coordinator>>) {
+pub fn setup(ui: &AppWindow, engine: Arc<Engine>, handoff: Option<Arc<Coordinator>>, start_hidden: bool) {
     ui.global::<crate::I18n>().on_translate(|key, language| {
         if language == 1 {
             crate::i18n::vi(key.as_str()).into()
@@ -82,11 +95,60 @@ pub fn setup(ui: &AppWindow, engine: Arc<Engine>, handoff: Option<Arc<Coordinato
         slow: RefCell::new(Instant::now() - Duration::from_millis(SLOW_REFRESH_MS)),
         toast_until: RefCell::new(Instant::now()),
         add_dir_explicit: RefCell::new(false),
+        tray_summary_at: RefCell::new(Instant::now() - Duration::from_secs(2)),
+        tray_summary_key: RefCell::new(String::new()),
+        minimized_seen: RefCell::new(false),
+        popup: RefCell::new(None),
+        popup_open: RefCell::new(false),
         handoff,
     });
 
     push_settings_to_ui(ui, &engine.settings());
     refresh(&gui);
+
+    // G3 lifecycle: the window close button hides to the tray when the
+    // setting is on and a tray exists; Exit in the tray menu always quits
+    // for real. Start-with-Windows launches pass --minimized, which (with
+    // the start_minimized setting composed into the Run entry by the
+    // startup module) starts the app hidden in the tray.
+    {
+        let g_close = gui.clone();
+        ui.window().on_close_requested(move || {
+            let settings = g_close.engine.settings();
+            if settings.close_to_tray && g_close.tray.borrow().is_some() {
+                if let Some(ui) = g_close.ui.upgrade() {
+                    let _ = ui.window().hide();
+                }
+                if let Some(tray) = g_close.tray.borrow_mut().as_mut() {
+                    tray.set_visible(false);
+                }
+                slint::CloseRequestResponse::HideWindow
+            } else {
+                slint::CloseRequestResponse::KeepWindowShown
+            }
+        });
+    }
+    if start_hidden {
+        let _ = ui.window().hide();
+        if let Some(tray) = gui.tray.borrow_mut().as_mut() {
+            tray.set_visible(false);
+        }
+        tracing::info!("started hidden in the tray (--minimized)");
+    }
+
+    // G3 C2: re-sync the HKCU Run entry from the stored setting on every
+    // start, so a portable copy moved to a new folder repairs its entry
+    // on the next launch. Failure only logs; it never blocks startup.
+    {
+        let s = engine.settings();
+        if let Err(e) = crate::startup::sync(s.start_with_windows, s.start_minimized) {
+            tracing::warn!(error = %e, "start-with-windows sync failed at startup");
+        }
+    }
+
+    // G3 C1: the sidebar popup choice.
+    let g = gui.clone();
+    ui.on_show_popup(move || toggle_popup(&g));
 
     let g = gui.clone();
     ui.on_appearance_changed(move || {
@@ -94,9 +156,10 @@ pub fn setup(ui: &AppWindow, engine: Arc<Engine>, handoff: Option<Arc<Coordinato
         ui.invoke_apply_native_theme();
         let mut settings = g.engine.settings();
         read_appearance(&ui, &mut settings);
-        if let Err(error) = g.engine.update_settings(settings) {
+        if let Err(error) = g.engine.update_settings(settings.clone()) {
             toast(&g, error.to_string(), true);
         }
+        resolve_auto_theme(&ui, &settings);
         refresh(&g);
     });
 
@@ -450,10 +513,29 @@ fn tray_poll(g: &Rc<Gui>) {
         Some(tray) => tray.drain(),
         None => return,
     };
+    // G3 minimise-to-tray: convert a minimised episode into a tray hide,
+    // once per episode (the watcher re-arms when the window is restored).
+    if g.engine.settings().minimize_to_tray {
+        if let Some(ui) = g.ui.upgrade() {
+            if ui.window().is_minimized() {
+                if !*g.minimized_seen.borrow() {
+                    *g.minimized_seen.borrow_mut() = true;
+                    let _ = ui.window().hide();
+                    ui.window().set_minimized(false);
+                    if let Some(tray) = g.tray.borrow_mut().as_mut() {
+                        tray.set_visible(false);
+                    }
+                }
+            } else {
+                *g.minimized_seen.borrow_mut() = false;
+            }
+        }
+    }
     for action in actions {
         tracing::info!(?action, "tray action handled");
         match action {
             TrayAction::Show => {
+                close_popup(g);
                 if let Some(ui) = g.ui.upgrade() {
                     let _ = ui.window().show();
                 }
@@ -461,6 +543,7 @@ fn tray_poll(g: &Rc<Gui>) {
                     tray.set_visible(true);
                 }
             }
+            TrayAction::ShowPopup => toggle_popup(g),
             TrayAction::ToggleShowHide => {
                 let visible = g
                     .tray
@@ -486,6 +569,211 @@ fn tray_poll(g: &Rc<Gui>) {
             }
         }
     }
+    update_tray_summary(g);
+    if *g.popup_open.borrow() {
+        refresh_popup(g);
+    }
+}
+
+// ---------------------------------------------------------------- popup
+
+/// The task rows the popup lists: the active states (queued, probing,
+/// downloading, verifying) plus paused tasks, whose Resume button is the
+/// popup's most useful per-row action. The tray summary's per-file lines
+/// use only the downloading subset (see update_tray_summary).
+fn active_task_rows(g: &Rc<Gui>) -> Vec<TaskRow> {
+    g.tasks
+        .iter()
+        .filter(|r| {
+            matches!(
+                r.state.as_str(),
+                "queued" | "probing" | "downloading" | "verifying" | "paused"
+            )
+        })
+        .collect()
+}
+
+fn show_main_window(g: &Rc<Gui>) {
+    if let Some(ui) = g.ui.upgrade() {
+        let _ = ui.window().show();
+    }
+    if let Some(tray) = g.tray.borrow_mut().as_mut() {
+        tray.set_visible(true);
+    }
+}
+
+fn toggle_popup(g: &Rc<Gui>) {
+    if *g.popup_open.borrow() {
+        close_popup(g);
+    } else {
+        open_popup(g);
+    }
+}
+
+fn open_popup(g: &Rc<Gui>) {
+    if g.popup.borrow().is_none() {
+        let Ok(pop) = crate::PopupWindow::new() else {
+            return;
+        };
+        let gw = Rc::downgrade(g);
+        pop.on_close_popup(move || {
+            if let Some(g) = gw.upgrade() {
+                close_popup(&g);
+            }
+        });
+        let gw = Rc::downgrade(g);
+        pop.on_open_main(move || {
+            if let Some(g) = gw.upgrade() {
+                close_popup(&g);
+                show_main_window(&g);
+            }
+        });
+        let gw = Rc::downgrade(g);
+        pop.on_pause_row(move |id| {
+            if let Some(g) = gw.upgrade() {
+                act(&g, || g.engine.pause(id as u64));
+            }
+        });
+        let gw = Rc::downgrade(g);
+        pop.on_resume_row(move |id| {
+            if let Some(g) = gw.upgrade() {
+                act(&g, || g.engine.resume(id as u64));
+            }
+        });
+        *g.popup.borrow_mut() = Some(pop);
+    }
+    refresh_popup(g);
+    if let Some(pop) = g.popup.borrow().as_ref() {
+        // Show first: an unrealised window reports a zero size, which
+        // would anchor the popup almost entirely off-screen.
+        let _ = pop.show();
+        let size = pop.window().size();
+        let (x, y) = crate::tray::work_area_bottom_right(size.width as i32, size.height as i32);
+        pop.window()
+            .set_position(slint::PhysicalPosition::new(x, y));
+        pop.invoke_grab_focus();
+    }
+    *g.popup_open.borrow_mut() = true;
+}
+
+fn close_popup(g: &Rc<Gui>) {
+    if let Some(pop) = g.popup.borrow().as_ref() {
+        let _ = pop.hide();
+    }
+    *g.popup_open.borrow_mut() = false;
+}
+
+/// Rebuild the popup model from the shared snapshot. Runs only while the
+/// popup is open, inside the existing 150 ms poll - no separate timer,
+/// no extra engine queries beyond the totals the status bar already
+/// reads.
+fn refresh_popup(g: &Rc<Gui>) {
+    let Some(ui) = g.ui.upgrade() else { return };
+    let vi = ui.get_language_index() == 1;
+    let totals = g.engine.totals();
+    let rows = active_task_rows(g);
+    let extra = rows.len().saturating_sub(5);
+    let borrowed = g.popup.borrow();
+    let Some(pop) = borrowed.as_ref() else {
+        return;
+    };
+    pop.set_total_text(SharedString::from(totals_line(vi, &totals)));
+    pop.set_open_label(SharedString::from(if vi { "Mở UDM" } else { "Open UDM" }));
+    pop.set_empty_text(SharedString::from(if vi {
+        "Không có tải đang chạy"
+    } else {
+        "No active downloads"
+    }));
+    pop.set_more_text(SharedString::from(if extra > 0 {
+        if vi {
+            format!("v\u{e0} {extra} n\u{1eefa}a")
+        } else {
+            format!("and {extra} more")
+        }
+    } else {
+        String::new()
+    }));
+    let model = Rc::new(VecModel::from(rows.into_iter().take(5).collect::<Vec<_>>()));
+    pop.set_rows(ModelRc::from(model));
+}
+
+/// G3 B1: compose the tray summary from the current totals and task rows
+/// and push it to the tray, throttled to about one update per second and
+/// skipped entirely when the content is unchanged.
+fn update_tray_summary(g: &Rc<Gui>) {
+    if g.tray.borrow().is_none() {
+        return;
+    }
+    let Some(ui) = g.ui.upgrade() else { return };
+    let vi = ui.get_language_index() == 1;
+    let totals = g.engine.totals();
+    let total_line = totals_line(vi, &totals);
+    let mut files: Vec<String> = Vec::new();
+    for row in g.tasks.iter() {
+        if files.len() >= 3 {
+            break;
+        }
+        if row.state.as_str() == "downloading" {
+            files.push(format!(
+                "{} \u{b7} {}",
+                elide_middle(row.name.as_str(), 36),
+                row.speed_text
+            ));
+        }
+    }
+    let mut key = total_line.clone();
+    for f in &files {
+        key.push('\n');
+        key.push_str(f);
+    }
+    if key == *g.tray_summary_key.borrow() {
+        return;
+    }
+    if g.tray_summary_at.borrow().elapsed() < Duration::from_millis(900) {
+        return;
+    }
+    *g.tray_summary_key.borrow_mut() = key;
+    *g.tray_summary_at.borrow_mut() = Instant::now();
+    let tooltip = if totals.active > 0 {
+        Some(total_line.as_str())
+    } else {
+        None
+    };
+    if let Some(tray) = g.tray.borrow_mut().as_mut() {
+        tray.set_summary(&total_line, &files, tooltip);
+    }
+}
+
+/// The one-line downloads summary shared by the tray menu, the tray
+/// tooltip and the popup header.
+fn totals_line(vi: bool, totals: &usagi::engine::Totals) -> String {
+    let speed = util::human_speed(totals.active_speed);
+    let speed = if vi { speed.replace('.', ",") } else { speed };
+    if totals.active > 0 {
+        if vi {
+            format!("{} \u{0111}ang t\u{1ea3}i \u{b7} {}", totals.active, speed)
+        } else {
+            format!("{} downloading \u{b7} {}", totals.active, speed)
+        }
+    } else if vi {
+        "Kh\u{f4}ng c\u{f3} t\u{1ea3}i \u{0111}ang ch\u{1ea1}y".to_string()
+    } else {
+        "No active downloads".to_string()
+    }
+}
+
+/// Truncate the middle of a long file name for the tray menu, keeping the
+/// start and the extension end readable.
+fn elide_middle(name: &str, max_chars: usize) -> String {
+    let count = name.chars().count();
+    if count <= max_chars {
+        return name.to_string();
+    }
+    let head = max_chars / 2;
+    let tail = max_chars - head - 1;
+    let start: String = name.chars().take(head).collect();
+    let end: String = name.chars().skip(count - tail).collect();
+    format!("{start}\u{2026}{end}")
 }
 
 fn act(g: &Rc<Gui>, f: impl FnOnce() -> usagi::error::Result<()>) {
@@ -632,6 +920,9 @@ fn refresh(g: &Rc<Gui>) {
     // --- slow stuff: db stats + alt-svc cache
     if g.slow.borrow().elapsed() >= Duration::from_millis(SLOW_REFRESH_MS) {
         *g.slow.borrow_mut() = Instant::now();
+        // G3: while the theme preference is Auto, re-resolving on the slow
+        // tick makes the UI follow OS dark/light flips within seconds.
+        resolve_auto_theme(&ui, &g.engine.settings());
         {
             let dl = g.engine.settings().download_dir();
             let (free, total) = disk_stats(&dl);
@@ -1219,6 +1510,10 @@ fn save_settings(g: &Rc<Gui>) {
     s.use_system_proxy = ui.get_set_proxy();
     s.verify_checksums = ui.get_set_verify();
     s.auto_categorize = ui.get_set_auto_categorize();
+    s.close_to_tray = ui.get_set_close_to_tray();
+    s.minimize_to_tray = ui.get_set_minimize_to_tray();
+    s.start_minimized = ui.get_set_start_minimized();
+    s.start_with_windows = ui.get_set_start_with_windows();
     s.user_agent = ui.get_set_user_agent().to_string();
     s.log_level = match ui.get_set_log_index() {
         0 => "off".into(),
@@ -1230,18 +1525,77 @@ fn save_settings(g: &Rc<Gui>) {
     };
     s.sanitize();
     match g.engine.update_settings(s.clone()) {
-        Ok(()) => toast(g, "settings saved".into(), false),
+        Ok(()) => {
+            // G3 C2: the Run entry follows the saved toggle immediately.
+            match crate::startup::sync(s.start_with_windows, s.start_minimized) {
+                Ok(()) => toast(g, "settings saved".into(), false),
+                Err(e) => toast(g, e, true),
+            }
+        }
         Err(e) => toast(g, e.to_string(), true),
     }
     push_settings_to_ui(&ui, &s);
     ui.set_http3_available(g.engine.net().http3_available());
 }
 
+/// OS dark-mode preference for the Auto theme (Windows: the per-user
+/// AppsUseLightTheme registry value; the app reads it, never writes it).
+/// Falls back to dark, the product default, when it cannot be read.
+#[cfg(windows)]
+fn os_prefers_dark() -> bool {
+    use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ,
+        REG_DWORD,
+    };
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+    unsafe {
+        let mut key: HKEY = 0;
+        let sub = wide("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize");
+        if RegOpenKeyExW(HKEY_CURRENT_USER, sub.as_ptr(), 0, KEY_READ, &mut key) != ERROR_SUCCESS {
+            return true;
+        }
+        let name = wide("AppsUseLightTheme");
+        let mut data: u32 = 0;
+        let mut ty: u32 = 0;
+        let mut len: u32 = std::mem::size_of::<u32>() as u32;
+        let rc = RegQueryValueExW(
+            key,
+            name.as_ptr(),
+            std::ptr::null_mut(),
+            &mut ty,
+            &mut data as *mut u32 as *mut u8,
+            &mut len,
+        );
+        RegCloseKey(key);
+        if rc != ERROR_SUCCESS || ty != REG_DWORD {
+            return true;
+        }
+        data == 0
+    }
+}
+
+#[cfg(not(windows))]
+fn os_prefers_dark() -> bool {
+    true
+}
+
+/// Resolve the Auto theme preference into theme-index from the OS scheme
+/// and re-apply. No-op for explicit dark/light preferences.
+fn resolve_auto_theme(ui: &AppWindow, settings: &Settings) {
+    if settings.theme == "auto" {
+        ui.set_theme_index(if os_prefers_dark() { 0 } else { 1 });
+        ui.invoke_apply_native_theme();
+    }
+}
+
 fn read_appearance(ui: &AppWindow, settings: &mut Settings) {
-    settings.theme = if ui.get_theme_index() == 1 {
-        "light"
-    } else {
-        "dark"
+    settings.theme = match ui.get_theme_pref() {
+        1 => "light",
+        2 => "auto",
+        _ => "dark",
     }
     .into();
     settings.language = if ui.get_language_index() == 1 {
@@ -1257,7 +1611,15 @@ fn read_appearance(ui: &AppWindow, settings: &mut Settings) {
 }
 
 pub fn push_settings_to_ui(ui: &AppWindow, s: &Settings) {
+    ui.set_theme_pref(match s.theme.as_str() {
+        "light" => 1,
+        "auto" => 2,
+        _ => 0,
+    });
     ui.set_theme_index(if s.theme == "light" { 1 } else { 0 });
+    if s.theme == "auto" {
+        ui.set_theme_index(if os_prefers_dark() { 0 } else { 1 });
+    }
     ui.set_language_index(if s.language == "vi" { 1 } else { 0 });
     ui.set_accent_index(
         ["blue", "green", "orange", "pink", "purple"]
@@ -1284,6 +1646,13 @@ pub fn push_settings_to_ui(ui: &AppWindow, s: &Settings) {
     ui.set_set_proxy(s.use_system_proxy);
     ui.set_set_verify(s.verify_checksums);
     ui.set_set_auto_categorize(s.auto_categorize);
+    ui.set_set_close_to_tray(s.close_to_tray);
+    ui.set_set_minimize_to_tray(s.minimize_to_tray);
+    ui.set_set_start_minimized(s.start_minimized);
+    // G3 C2: the startup toggle mirrors the registry as it actually is,
+    // and the location warning follows the running executable's folder.
+    ui.set_set_start_with_windows(crate::startup::is_enabled());
+    ui.set_set_startup_location_warn(crate::startup::exe_in_temp_or_downloads());
     ui.set_set_user_agent(SharedString::from(s.user_agent.clone()));
     ui.set_set_log_index(match s.log_level.as_str() {
         "off" => 0,

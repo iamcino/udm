@@ -289,7 +289,7 @@ fn failed_route_lock_persist_cannot_be_bypassed_by_retry() {
         .unwrap();
     // Arm AFTER the enqueue persists: the fault targets the route-lock
     // write (and everything after it), not the add itself.
-    engine.store().fail_next_saves(10_000);
+    engine.store().set_save_failure(true);
     engine.resume(id).unwrap();
     let task = wait_terminal(&engine, id);
     assert_eq!(task.state, TaskState::Failed, "error: {:?}", task.error);
@@ -314,7 +314,7 @@ fn failed_route_lock_persist_cannot_be_bypassed_by_retry() {
         "a partial was claimed despite the failed lock"
     );
     // Fault cleared: the same task now locks durably and completes.
-    engine.store().fail_next_saves(0);
+    engine.store().set_save_failure(false);
     let task = retry_and_wait(&engine, id);
     assert_eq!(task.state, TaskState::Completed, "error: {:?}", task.error);
     let landed = root.join("Music").join("song.mp3");
@@ -432,7 +432,7 @@ fn failed_save_keeps_original_name_and_route_unpublished() {
                 .start_paused(true),
         )
         .unwrap();
-    engine.store().fail_next_saves(10_000);
+    engine.store().set_save_failure(true);
     engine.resume(id).unwrap();
     let task = wait_terminal(&engine, id);
     assert_eq!(task.state, TaskState::Failed, "error: {:?}", task.error);
@@ -463,7 +463,7 @@ fn failed_save_keeps_original_name_and_route_unpublished() {
     // Fault cleared: the retry classifies the ORIGINAL name (`.tar.gz` ->
     // Archives), applies the collision suffix inside that folder only,
     // and completes. The pre-existing file is untouched.
-    engine.store().fail_next_saves(0);
+    engine.store().set_save_failure(false);
     let task = retry_and_wait(&engine, id);
     assert_eq!(task.state, TaskState::Completed, "error: {:?}", task.error);
     let landed = PathBuf::from(&task.final_path);

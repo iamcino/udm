@@ -16,6 +16,7 @@
 
 mod handoff_boot;
 mod i18n;
+mod startup;
 mod state;
 mod tray;
 
@@ -111,7 +112,11 @@ fn main() {
         });
     }
 
-    state::setup(&ui, engine.clone(), handoff);
+    // G3: the Start-with-Windows entry appends --minimized when the
+    // start_minimized setting is on; the app then starts hidden in the
+    // tray (see state::setup). A normal launch shows the window as usual.
+    let start_hidden = std::env::args().any(|a| a == "--minimized");
+    state::setup(&ui, engine.clone(), handoff, start_hidden);
     tracing::info!("entering event loop");
 
     let result = ui.run();

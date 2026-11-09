@@ -1,0 +1,146 @@
+// G3 part C1: the active-downloads popup. A borderless secondary window
+// owned by state.rs; it opens ONLY from explicit choices (the tray menu
+// item or the sidebar item in the main window), never from a tray icon
+// click, and it closes on Escape, on focus loss, or when the main
+// window is raised. While open it is refreshed from the same 150 ms GUI
+// poll as everything else; closed means no updates and no timers.
+
+import { Theme } from "theme.slint";
+import { TaskRow } from "model.slint";
+import { ActionButton, ProgressBar } from "widgets.slint";
+
+export component PopupWindow inherits Window {
+    title: "UDM";
+    no-frame: true;
+    always-on-top: true;
+    width: 348px;
+    height: 336px;
+    background: Theme.bg;
+
+    in property <[TaskRow]> rows;
+    in property <string> total-text;
+    in property <string> more-text;
+    // Strings arrive as properties from Rust: the I18n global's translate
+    // callback is registered on the main window's instance only, so
+    // I18n.tr() in this window would return empty text.
+    in property <string> open-label;
+    in property <string> empty-text;
+    callback open-main;
+    callback close-popup;
+    callback pause-row(float);
+    callback resume-row(float);
+
+    public function grab-focus() {
+        fs.focus();
+    }
+
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        background: Theme.bg;
+        border-width: 1px;
+        border-color: Theme.border;
+        border-radius: 8px;
+
+        fs := FocusScope {
+            width: 100%;
+            height: 100%;
+            key-pressed(event) => {
+                if (event.text == Key.Escape) {
+                    root.close-popup();
+                    return accept;
+                }
+                return reject;
+            }
+            changed has-focus => {
+                if (!self.has-focus) {
+                    root.close-popup();
+                }
+            }
+
+            VerticalLayout {
+                padding: 10px;
+                spacing: 8px;
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        horizontal-stretch: 1;
+                        text: root.total-text;
+                        color: Theme.text;
+                        font-size: 13px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    ActionButton {
+                        label: "\u{00d7}";
+                        compact: true;
+                        clicked => { root.close-popup(); }
+                    }
+                }
+
+                Rectangle { height: 1px; background: Theme.border; }
+
+                VerticalLayout {
+                    spacing: 6px;
+                    vertical-stretch: 1;
+                    for row in root.rows: HorizontalLayout {
+                        spacing: 8px;
+                        height: 40px;
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            spacing: 3px;
+                            Text {
+                                text: row.name;
+                                color: Theme.text;
+                                font-size: 12px;
+                                overflow: elide;
+                            }
+                            ProgressBar {
+                                fraction: max(row.percent, 0);
+                                failed: row.state == "failed";
+                                done: row.state == "completed";
+                            }
+                        }
+                        Text {
+                            text: row.speed-text;
+                            color: Theme.text-dim;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                            width: 74px;
+                            horizontal-alignment: right;
+                        }
+                        if row.can-pause: ActionButton {
+                            label: "\u{275a}\u{275a}";
+                            compact: true;
+                            clicked => { root.pause-row(row.id); }
+                        }
+                        if row.can-resume: ActionButton {
+                            label: "\u{25b6}";
+                            compact: true;
+                            clicked => { root.resume-row(row.id); }
+                        }
+                    }
+                    if root.rows.length == 0: Text {
+                        text: root.empty-text;
+                        color: Theme.text-faint;
+                        font-size: 12px;
+                    }
+                }
+
+                if root.more-text != "": Text {
+                    text: root.more-text;
+                    color: Theme.text-faint;
+                    font-size: 11px;
+                }
+
+                ActionButton {
+                    label: root.open-label;
+                    primary: true;
+                    clicked => { root.open-main(); }
+                }
+            }
+        }
+    }
+}

@@ -32,7 +32,7 @@ url = { workspace = true }
 # Free-space readout for the sidebar storage widget (already in the lock file
 # as transitive dependencies; used only for one FFI call each).
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.52", features = ["Win32_Storage_FileSystem", "Win32_Foundation"] }
+windows-sys = { version = "0.52", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_System_Registry", "Win32_UI_WindowsAndMessaging"] }
 # System tray (Phase 2, src/tray.rs). tray-icon pulls muda for the menu.
 # image is used only to decode the embedded tray PNG into RGBA.
 tray-icon = "0.21"
