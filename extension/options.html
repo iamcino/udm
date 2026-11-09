@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>UDM Handoff - Options</title>
+<style>
+  body { font: 14px/1.5 system-ui, sans-serif; margin: 24px auto; max-width: 560px; padding: 0 16px; }
+  h1 { font-size: 18px; }
+  h2 { font-size: 14px; margin-top: 28px; }
+  label.row { display: flex; gap: 8px; align-items: center; cursor: pointer; }
+  .hint { opacity: .75; font-size: 12.5px; }
+  textarea { width: 100%; min-height: 110px; font-family: ui-monospace, monospace; }
+  code, pre { font-family: ui-monospace, monospace; }
+  pre { background: #8882; padding: 10px 12px; border-radius: 6px; overflow-x: auto; }
+  button { margin-top: 12px; padding: 6px 14px; }
+  #saved { margin-left: 10px; opacity: 0; transition: opacity .2s; }
+</style>
+</head>
+<body>
+  <h1 id="title">UDM Handoff</h1>
+
+  <label class="row">
+    <input type="checkbox" id="enabled">
+    <span id="enabledLabel">Auto-capture downloads</span>
+  </label>
+  <p class="hint" id="enabledHint"></p>
+
+  <h2 id="exclusionsLabel">Exclusions (one per line)</h2>
+  <textarea id="exclusions" spellcheck="false"></textarea>
+  <p class="hint" id="exclusionsHint"></p>
+
+  <div>
+    <button id="save">Save</button><span id="saved">Saved.</span>
+  </div>
+
+  <h2 id="registrationLabel">Registration</h2>
+  <p class="hint" id="registrationHint"></p>
+  <pre id="registrationCmd"></pre>
+
+  <script src="strings.js"></script>
+  <script src="options.js"></script>
+</body>
+</html>
