@@ -1,6 +1,6 @@
 use std::{io::Write, net::TcpListener, thread, time::Duration};
 use sha2::Digest;
-use udm_core::{config::Settings, engine::{AddRequest, EngineBuilder}, hash::ExpectedHash, paths::Paths};
+use usagi::{config::Settings, engine::{AddRequest, EngineBuilder}, hash::ExpectedHash, paths::Paths};
 
 #[test]
 fn e2e_download_with_checksum_verification() {
@@ -60,7 +60,7 @@ fn e2e_download_with_checksum_verification() {
     loop {
         let task = engine.task(id).unwrap();
         if task.state.is_terminal() {
-            assert_eq!(task.state, udm_core::store::TaskState::Completed);
+            assert_eq!(task.state, usagi::store::TaskState::Completed);
             let downloaded = std::fs::read(&task.final_path).unwrap();
             assert_eq!(downloaded.len(), payload.len());
             assert_eq!(downloaded, payload);
@@ -160,7 +160,7 @@ fn active_requests_are_independent_of_finished_segments() {
     loop {
         let task = engine.task(id).unwrap();
         if task.state.is_terminal() {
-            assert_eq!(task.state, udm_core::TaskState::Completed, "{:?}", task.error);
+            assert_eq!(task.state, usagi::TaskState::Completed, "{:?}", task.error);
             assert_eq!((task.segments_done, task.segments_total, task.active_requests), (8, 8, 0));
             assert_eq!(std::fs::read(task.final_path).unwrap(), vec![b'B'; 524288]);
             break;

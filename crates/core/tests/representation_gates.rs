@@ -13,10 +13,10 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use sha2::Digest;
-use udm_core::store::{
+use usagi::store::{
     RepresentationBound, SegmentState, Store, TaskRecord, TaskState, OPEN_ENDED, SCHEMA_VERSION,
 };
-use udm_core::{AddRequest, Engine, EngineBuilder, Paths, Settings, TaskSnapshot, TransportPref};
+use usagi::{AddRequest, Engine, EngineBuilder, Paths, Settings, TaskSnapshot, TransportPref};
 
 use common::dev_tls::HarnessCa;
 

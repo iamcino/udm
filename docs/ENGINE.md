@@ -1,7 +1,7 @@
 # Universal Download Manager (UDM) — Core Engine
 
 The core engine will be named **Usagi** after the engine safety upgrade.
-This document describes the current `udm-core` implementation. The upgrade
+This document describes the current `usagi` implementation. The upgrade
 contract is tracked separately while development is in progress.
 
 How a download actually happens, from `Engine::add` to the renamed final

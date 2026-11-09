@@ -26,8 +26,8 @@
 mod reg;
 
 use serde_json::{json, Value};
-use udm_core::handoff_pipe::{pipe_name, read_frame, write_frame, PipeClient};
-use udm_core::Paths;
+use usagi::handoff_pipe::{pipe_name, read_frame, write_frame, PipeClient};
+use usagi::Paths;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -44,7 +44,7 @@ fn log(paths: &Paths, line: &str) {
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
-    let stamp = udm_core::util::now_millis();
+    let stamp = usagi::util::now_millis();
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)

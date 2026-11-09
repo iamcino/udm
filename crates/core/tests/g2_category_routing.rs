@@ -13,11 +13,11 @@ use std::thread;
 use std::time::Duration;
 
 use sha2::Digest;
-use udm_core::category;
-use udm_core::config::Settings;
-use udm_core::engine::{AddRequest, Engine, EngineBuilder};
-use udm_core::paths::Paths;
-use udm_core::store::TaskState;
+use usagi::category;
+use usagi::config::Settings;
+use usagi::engine::{AddRequest, Engine, EngineBuilder};
+use usagi::paths::Paths;
+use usagi::store::TaskState;
 
 fn make_engine(tmp: &Path, auto: bool, categories: Option<Vec<category::CategoryRule>>) -> Engine {
     make_engine_with(tmp, auto, categories, None)
@@ -27,7 +27,7 @@ fn make_engine_with(
     tmp: &Path,
     auto: bool,
     categories: Option<Vec<category::CategoryRule>>,
-    conflict: Option<udm_core::config::ConflictPolicy>,
+    conflict: Option<usagi::config::ConflictPolicy>,
 ) -> Engine {
     let paths = Paths {
         root: tmp.into(),
@@ -103,7 +103,7 @@ fn serve(payload: Vec<u8>, cd_filename: Option<String>, requests: usize) -> u16 
     port
 }
 
-fn wait_terminal(engine: &Engine, id: u64) -> udm_core::TaskSnapshot {
+fn wait_terminal(engine: &Engine, id: u64) -> usagi::TaskSnapshot {
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     let mut events = String::new();
     loop {
@@ -124,7 +124,7 @@ fn wait_terminal(engine: &Engine, id: u64) -> udm_core::TaskSnapshot {
     }
 }
 
-fn retry_and_wait(engine: &Engine, id: u64) -> udm_core::TaskSnapshot {
+fn retry_and_wait(engine: &Engine, id: u64) -> usagi::TaskSnapshot {
     // retry() enqueues a command. The previous Failed snapshot remains visible
     // until the supervisor processes it. Observe that command's Queued event
     // before accepting another terminal snapshot, even if the new run finishes
@@ -135,7 +135,7 @@ fn retry_and_wait(engine: &Engine, id: u64) -> udm_core::TaskSnapshot {
     loop {
         if engine.drain_events(256).iter().any(|event| matches!(
             event,
-            udm_core::Event::TaskStateChanged { id: event_id, state: TaskState::Queued }
+            usagi::Event::TaskStateChanged { id: event_id, state: TaskState::Queued }
                 if *event_id == id
         )) {
             return wait_terminal(engine, id);
@@ -250,7 +250,7 @@ fn settings_change_after_enqueue_does_not_reroute() {
 }
 
 /// Poll until `cond` holds for the task snapshot (or panic at the deadline).
-fn wait_until(engine: &Engine, id: u64, what: &str, cond: impl Fn(&udm_core::TaskSnapshot) -> bool) {
+fn wait_until(engine: &Engine, id: u64, what: &str, cond: impl Fn(&usagi::TaskSnapshot) -> bool) {
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     loop {
         engine.drain_events(64);
@@ -360,7 +360,7 @@ fn cancel_does_not_clear_a_locked_route() {
     assert!(
         !matches!(
             stored.route,
-            udm_core::RouteState::Legacy | udm_core::RouteState::Pending { .. }
+            usagi::RouteState::Legacy | usagi::RouteState::Pending { .. }
         ),
         "cancel cleared the routing metadata: {:?}",
         stored.route
@@ -499,7 +499,7 @@ fn lock_conflict_under_fail_policy_is_a_routing_error() {
         dir.path(),
         true,
         None,
-        Some(udm_core::config::ConflictPolicy::Fail),
+        Some(usagi::config::ConflictPolicy::Fail),
     );
     let payload = vec![0x99u8; 4096];
     let port = serve(payload, None, 8);

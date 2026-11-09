@@ -13,12 +13,12 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 
-use udm_core::engine::Engine;
-use udm_core::handoff::{
+use usagi::engine::Engine;
+use usagi::handoff::{
     generate_pairing_secret, read_callers, Coordinator, CoordinatorConfig,
     EngineAdapter, FileStore, SystemClock,
 };
-use udm_core::paths::Paths;
+use usagi::paths::Paths;
 
 pub fn start(paths: &Paths, engine: Arc<Engine>) {
     let lease_secs = match engine.settings().handoff_lease_secs {
@@ -67,7 +67,7 @@ pub fn start(paths: &Paths, engine: Arc<Engine>) {
     );
     std::thread::spawn(move || {
         let stop = Arc::new(AtomicBool::new(false));
-        if let Err(e) = udm_core::handoff_pipe::serve(stop, coordinator, secret) {
+        if let Err(e) = usagi::handoff_pipe::serve(stop, coordinator, secret) {
             tracing::error!(error = %e, "handoff: pipe server stopped");
         }
     });

@@ -28,7 +28,7 @@
 //! On non-Windows platforms only the framing and dispatch code compiles;
 //! the server entry points return an error (UDM ships for Windows).
 //!
-//! Unsafe code: `udm-core` denies `unsafe` crate-wide. The single scoped
+//! Unsafe code: `usagi` denies `unsafe` crate-wide. The single scoped
 //! exception is `windows_impl` below - the Win32 named-pipe and SID
 //! surface has no safe std equivalent (std cannot create a named pipe).
 //! All unsafe is confined to that module; raw handles are wrapped in

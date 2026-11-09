@@ -9,13 +9,13 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use udm_core::error::{Error, Result};
-use udm_core::handoff::{
+use usagi::error::{Error, Result};
+use usagi::handoff::{
     BrowserDisposition, Coordinator, CoordinatorConfig, EngineAdapter, EnginePort, FileStore,
     HandoffClock, HandoffIntent, HandoffRecord, HandoffState, HandoffStatus, MemoryStore,
 };
-use udm_core::store::SCHEMA_VERSION;
-use udm_core::{EngineBuilder, Paths, Settings};
+use usagi::store::SCHEMA_VERSION;
+use usagi::{EngineBuilder, Paths, Settings};
 
 const ALICE: &str = "chrome:alice-ext";
 const BOB: &str = "firefox:bob-ext";
@@ -440,7 +440,7 @@ fn fingerprint_is_stable_and_sensitive_to_every_field() {
 
 #[test]
 fn legacy_task_record_json_has_no_marker() {
-    let record = udm_core::store::TaskRecord::new(
+    let record = usagi::store::TaskRecord::new(
         7,
         "https://example.com/x.bin",
         Path::new("/tmp"),
@@ -452,7 +452,7 @@ fn legacy_task_record_json_has_no_marker() {
         .unwrap()
         .remove("handoff_tx")
         .expect("serialized record carries the marker field");
-    let back: udm_core::store::TaskRecord = serde_json::from_value(value).unwrap();
+    let back: usagi::store::TaskRecord = serde_json::from_value(value).unwrap();
     assert_eq!(back.handoff_tx, None);
 }
 
@@ -483,7 +483,7 @@ fn engine_marker_round_trip() {
             .build()
             .unwrap(),
     );
-    let clock: Arc<dyn HandoffClock> = Arc::new(udm_core::handoff::SystemClock);
+    let clock: Arc<dyn HandoffClock> = Arc::new(usagi::handoff::SystemClock);
     let c = Coordinator::open(
         Box::new(MemoryStore::new()),
         Arc::new(EngineAdapter::new(engine.clone())),

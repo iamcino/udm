@@ -17,7 +17,7 @@
 //! the sidecar when it names that browser.
 
 use serde_json::{json, Value};
-use udm_core::Paths;
+use usagi::Paths;
 
 pub struct BrowserSpec {
     pub browser: &'static str,
@@ -73,7 +73,7 @@ fn callers_path(paths: &Paths) -> std::path::PathBuf {
 }
 
 fn read_callers(paths: &Paths) -> Vec<String> {
-    udm_core::handoff::read_callers(paths)
+    usagi::handoff::read_callers(paths)
 }
 
 fn write_callers(paths: &Paths, callers: &[String]) -> std::io::Result<()> {

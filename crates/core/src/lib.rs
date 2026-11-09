@@ -1,4 +1,4 @@
-//! # udm-core
+//! # usagi
 //!
 //! The download engine behind `udm`: HTTP/1.1, HTTP/2 and HTTP/3 (QUIC)
 //! transports, segmented transfers with resume, checksum verification and

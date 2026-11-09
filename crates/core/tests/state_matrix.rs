@@ -16,7 +16,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use udm_core::{
+use usagi::{
     engine::{
         oracle_owns_attempt, watch_resumes, AddRequest, Engine, EngineBuilder, Event, LogLevel,
         OracleExit, OracleStop,
@@ -153,7 +153,7 @@ fn serve(
 }
 
 fn engine(root: &std::path::Path, idle: bool) -> Engine {
-    let paths = udm_core::paths::Paths {
+    let paths = usagi::paths::Paths {
         root: root.into(),
         db_file: root.join("test.redb"),
         log_file: root.join("logs/test.log"),

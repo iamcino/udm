@@ -17,20 +17,20 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use udm_core::config::{Settings, TransportPref};
-use udm_core::engine::{watch_resumes, Engine, EngineBuilder, Event, LogLevel, TaskSnapshot};
-use udm_core::error::Result;
-use udm_core::hash::ExpectedHash;
-use udm_core::net::stack::NetStack;
-use udm_core::net::{tls, MemAltSvc};
-use udm_core::paths::Paths;
-use udm_core::store::{Store, TaskState};
-use udm_core::util;
+use usagi::config::{Settings, TransportPref};
+use usagi::engine::{watch_resumes, Engine, EngineBuilder, Event, LogLevel, TaskSnapshot};
+use usagi::error::Result;
+use usagi::hash::ExpectedHash;
+use usagi::net::stack::NetStack;
+use usagi::net::{tls, MemAltSvc};
+use usagi::paths::Paths;
+use usagi::store::{Store, TaskState};
+use usagi::util;
 
 #[derive(Parser)]
 #[command(
     name = "udm-cli",
-    version = udm_core::VERSION,
+    version = usagi::VERSION,
     about = "Download manager engine: HTTP/1.1, HTTP/2 and HTTP/3 (QUIC). No telemetry, no administrator rights.",
     long_about = None
 )]
@@ -212,7 +212,7 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
     init_logging(&cli.log);
     if cli.portable {
-        std::env::set_var(udm_core::paths::PORTABLE_ENV, "1");
+        std::env::set_var(usagi::paths::PORTABLE_ENV, "1");
     }
     if cli.no_learning {
         std::env::set_var("UDM_NO_LEARNING", "1");
@@ -262,7 +262,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
 
 async fn cmd_get(cli: &Cli, args: GetArgs) -> Result<ExitCode> {
     if args.out.is_some() && args.urls.len() != 1 {
-        return Err(udm_core::Error::Other(
+        return Err(usagi::Error::Other(
             "--out can only be used with exactly one URL".into(),
         ));
     }
@@ -273,7 +273,7 @@ async fn cmd_get(cli: &Cli, args: GetArgs) -> Result<ExitCode> {
     let engine = build_engine(cli, false)?;
     let mut ids = Vec::new();
     for url in &args.urls {
-        let mut request = udm_core::AddRequest::new(url.clone());
+        let mut request = usagi::AddRequest::new(url.clone());
         if let Some(dir) = &args.dir {
             request = request.dest_dir(dir.clone());
         }
@@ -377,7 +377,7 @@ async fn cmd_probe(cli: &Cli, args: ProbeArgs) -> Result<ExitCode> {
 
 async fn cmd_import(cli: &Cli, args: ImportArgs) -> Result<ExitCode> {
     let content = std::fs::read_to_string(&args.file)
-        .map_err(|e| udm_core::Error::io(args.file.clone(), e))?;
+        .map_err(|e| usagi::Error::io(args.file.clone(), e))?;
     let urls: Vec<String> = content
         .lines()
         .map(|l| l.trim())
@@ -386,7 +386,7 @@ async fn cmd_import(cli: &Cli, args: ImportArgs) -> Result<ExitCode> {
         .filter(|l| !l.is_empty())
         .collect();
     if urls.is_empty() {
-        return Err(udm_core::Error::Other(format!(
+        return Err(usagi::Error::Other(format!(
             "{} contains no URLs",
             util::display_path(&args.file)
         )));
@@ -487,7 +487,7 @@ fn simple(
     verb: &str,
 ) -> Result<ExitCode> {
     if ids.is_empty() {
-        return Err(udm_core::Error::Other("no task ids given".into()));
+        return Err(usagi::Error::Other("no task ids given".into()));
     }
     let engine = build_engine(cli, true)?;
     for id in ids {
@@ -510,7 +510,7 @@ fn cmd_settings(cli: &Cli, args: SettingsArgs) -> Result<ExitCode> {
     }
     for pair in &args.pairs {
         let (key, value) = pair.split_once('=').ok_or_else(|| {
-            udm_core::Error::Other(format!("`{pair}` is not a key=value pair"))
+            usagi::Error::Other(format!("`{pair}` is not a key=value pair"))
         })?;
         settings.apply_pair(key, value)?;
         store.save_settings(&settings)?;
@@ -530,9 +530,9 @@ fn cmd_settings(cli: &Cli, args: SettingsArgs) -> Result<ExitCode> {
 
 fn cmd_doctor(cli: &Cli) -> Result<ExitCode> {
     let paths = resolve_paths(cli)?;
-    println!("udm {}", udm_core::VERSION);
+    println!("udm {}", usagi::VERSION);
     println!("  built with:        Rust {}", rustc_version());
-    println!("  debug build:       {}", udm_core::IS_DEBUG);
+    println!("  debug build:       {}", usagi::IS_DEBUG);
     println!();
     println!("storage (no administrator rights are used anywhere):");
     for line in paths.describe().lines() {
@@ -604,7 +604,7 @@ fn cmd_doctor(cli: &Cli) -> Result<ExitCode> {
     println!("  telemetry:         none (no analytics, no crash reports, no update pings)");
     println!(
         "  outbound hosts:    only the ones you enter{}",
-        if udm_core::TELEMETRY_ENDPOINTS.is_empty() {
+        if usagi::TELEMETRY_ENDPOINTS.is_empty() {
             ""
         } else {
             " (!)"

@@ -21,8 +21,8 @@ mod tray;
 
 use std::sync::Arc;
 
-use udm_core::engine::EngineBuilder;
-use udm_core::paths::Paths;
+use usagi::engine::EngineBuilder;
+use usagi::paths::Paths;
 
 slint::include_modules!();
 
@@ -59,7 +59,7 @@ fn main() {
     let handoff_paths = paths.clone();
     let engine = match EngineBuilder::new().paths(paths).build() {
         Ok(e) => Arc::new(e),
-        Err(udm_core::error::Error::DatabaseLocked(p)) => {
+        Err(usagi::error::Error::DatabaseLocked(p)) => {
             tracing::error!(path = %p.display(), "another udm instance holds the database");
             eprintln!(
                 "udm is already running (the database at {} is locked).",

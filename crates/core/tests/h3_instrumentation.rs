@@ -14,9 +14,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use udm_core::net::h3::{H3Pool, H3StableIds};
-use udm_core::net::{EngineConnections, ProtocolGauge, RequestSpec};
-use udm_core::{AddRequest, Engine, EngineBuilder, Paths, Settings, TaskState, TransportPref};
+use usagi::net::h3::{H3Pool, H3StableIds};
+use usagi::net::{EngineConnections, ProtocolGauge, RequestSpec};
+use usagi::{AddRequest, Engine, EngineBuilder, Paths, Settings, TaskState, TransportPref};
 
 use common::dev_tls::{HarnessCa, HARNESS_MARKER};
 
@@ -911,7 +911,7 @@ async fn join_fetches(pool: &Arc<H3Pool>, url: &str, n: usize) -> Result<Vec<usi
 async fn accepted_response(
     pool: &H3Pool,
     url: &str,
-) -> Result<udm_core::net::h3::H3Response, String> {
+) -> Result<usagi::net::h3::H3Response, String> {
     let response =
         tokio::time::timeout(Duration::from_secs(8), pool.request(&RequestSpec::get(url)))
             .await
@@ -926,7 +926,7 @@ async fn accepted_response(
 /// Poll the body once. `Pending` means the quinn recv half is inside h3-quinn's
 /// read future. The future is then dropped, which is the cancel shape, and
 /// that drop does not restore the half.
-fn park_pending_chunk(response: &mut udm_core::net::h3::H3Response) -> Result<(), String> {
+fn park_pending_chunk(response: &mut usagi::net::h3::H3Response) -> Result<(), String> {
     let mut chunk = std::pin::pin!(response.chunk());
     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
     match chunk.as_mut().poll(&mut cx) {

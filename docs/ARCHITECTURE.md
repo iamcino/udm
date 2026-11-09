@@ -1,7 +1,7 @@
 # Universal Download Manager (UDM) — Architecture
 
 **Usagi** is the name of UDM's core engine after the engine safety upgrade.
-The current implementation is packaged as `udm-core` under `crates/core`.
+The current implementation is packaged as `usagi` under `crates/core`.
 The desktop application and CLI remain `udm` and `udm-cli`.
 
 How the system is put together. Companion documents: `DESIGN.md` (product &
@@ -13,7 +13,7 @@ and shipping), `OPERATIONS.md` (running it), `REFERENCES.md` (specs & deps).
 ```
 udm/
 ├── crates/
-│   ├── core/   udm-core  — the whole product minus pixels (13,215 lines)
+│   ├── core/   usagi  — the whole product minus pixels (13,215 lines)
 │   │   ├── engine/   mod.rs (queue, API, persistence) · task.rs (one
 │   │   │             download's state machine) · speed.rs (EWMA meter)
 │   │   ├── net/      stack.rs (transport selection, segmented transfer)
@@ -152,7 +152,7 @@ dependency, without which the process dies before `main`).
 
 ## 7. Error strategy
 
-One `udm_core::error::Error` enum; the GUI maps failures to toasts and
+One `usagi::error::Error` enum; the GUI maps failures to toasts and
 row error text, the CLI to stderr + exit codes (1 general, 2 DB locked).
 Task failures never kill the engine: each task is `JoinHandle`-supervised,
 its error is persisted to the record, and `retry` re-queues from the last

@@ -1,7 +1,7 @@
 // Regression tests for engine data integrity bugs identified in review-2026-11-04.md.
 // All tests assert CORRECT, expected file content and recovery behavior.
 use std::{io::{Read, Write}, net::TcpListener, path::Path, thread, time::{Duration, Instant}};
-use udm_core::{config::Settings, engine::{AddRequest, Engine, EngineBuilder}, paths::Paths,
+use usagi::{config::Settings, engine::{AddRequest, Engine, EngineBuilder}, paths::Paths,
     store::{RepresentationBound, Store, TaskRecord, TaskState, SegmentState}};
 
 fn engine(root: &Path) -> Engine {
@@ -14,7 +14,7 @@ fn engine(root: &Path) -> Engine {
     EngineBuilder::new().paths(paths).settings(settings).build().unwrap()
 }
 
-fn wait(engine: &Engine, id: u64) -> udm_core::engine::TaskSnapshot {
+fn wait(engine: &Engine, id: u64) -> usagi::engine::TaskSnapshot {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         let task = engine.task(id).unwrap();

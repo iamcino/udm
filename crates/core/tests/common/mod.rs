@@ -1,4 +1,4 @@
-//! Fixtures compiled only into `udm-core` integration-test binaries.
+//! Fixtures compiled only into `usagi` integration-test binaries.
 //!
 //! Nothing here is part of the library `udm` and `udm-cli` link.
 

@@ -73,7 +73,7 @@ tempfile = "3.27"
 # slint / slint-build / rfd / embed-resource are declared by crates/gui itself
 # (version-pinned there); they are not shared with the other members.
 
-udm-core = { path = "crates/core", version = "0.1.0" }
+usagi = { path = "crates/core", version = "0.1.0" }
 
 # The CI/sandbox boxes are memory-starved; debug info is what makes rustc
 # balloon. Release builds are unaffected.

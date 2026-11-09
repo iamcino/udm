@@ -695,7 +695,7 @@ async fn wait_for_body_release(mut release: tokio::sync::watch::Receiver<bool>) 
 fn install_provider() {
     // `tls::install_default_provider` is the engine's installer. Calling it
     // does not add this CA to any production config.
-    let _ = udm_core::net::tls::install_default_provider();
+    let _ = usagi::net::tls::install_default_provider();
 }
 
 async fn serve_one<IO>(tls: &mut tokio_rustls::server::TlsStream<IO>) -> Result<(), String>

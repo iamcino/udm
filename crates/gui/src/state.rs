@@ -12,11 +12,11 @@ use std::time::{Duration, Instant};
 
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel, Weak};
 
-use udm_core::config::{ConflictPolicy, Settings, TransportPref};
-use udm_core::engine::{AddRequest, Engine, Event, TaskSnapshot};
-use udm_core::hash::ExpectedHash;
-use udm_core::store::records::TaskState;
-use udm_core::util;
+use usagi::config::{ConflictPolicy, Settings, TransportPref};
+use usagi::engine::{AddRequest, Engine, Event, TaskSnapshot};
+use usagi::hash::ExpectedHash;
+use usagi::store::records::TaskState;
+use usagi::util;
 
 use crate::{AppWindow, EndpointRow, StatusInfo, TaskDetail, TaskRow};
 
@@ -481,7 +481,7 @@ fn tray_poll(g: &Rc<Gui>) {
     }
 }
 
-fn act(g: &Rc<Gui>, f: impl FnOnce() -> udm_core::error::Result<()>) {
+fn act(g: &Rc<Gui>, f: impl FnOnce() -> usagi::error::Result<()>) {
     match f() {
         Ok(()) => {}
         Err(e) => toast(g, e.to_string(), true),
@@ -695,9 +695,9 @@ fn short_hash(h: &str) -> String {
 /// the snapshot does not carry those fields.
 fn detail_from(s: &TaskSnapshot, vietnamese: bool) -> TaskDetail {
     let (_, transport_label) = match s.transport {
-        Some(udm_core::store::records::TransportKind::Http3) => ("H3", "HTTP/3 (QUIC)"),
-        Some(udm_core::store::records::TransportKind::Http2) => ("H2", "HTTP/2"),
-        Some(udm_core::store::records::TransportKind::Http11) => ("H1", "HTTP/1.1"),
+        Some(usagi::store::records::TransportKind::Http3) => ("H3", "HTTP/3 (QUIC)"),
+        Some(usagi::store::records::TransportKind::Http2) => ("H2", "HTTP/2"),
+        Some(usagi::store::records::TransportKind::Http11) => ("H1", "HTTP/1.1"),
         _ => ("?", ""),
     };
     let percent = if s.state == TaskState::Completed {
@@ -846,9 +846,9 @@ fn detail_from(s: &TaskSnapshot, vietnamese: bool) -> TaskDetail {
 fn row_from(s: &TaskSnapshot, vietnamese: bool, selected: bool) -> TaskRow {
     let downloading = s.state == TaskState::Downloading;
     let (transport, transport_label) = match s.transport {
-        Some(udm_core::store::records::TransportKind::Http3) => ("H3", "HTTP/3 (QUIC)"),
-        Some(udm_core::store::records::TransportKind::Http2) => ("H2", "HTTP/2"),
-        Some(udm_core::store::records::TransportKind::Http11) => ("H1", "HTTP/1.1"),
+        Some(usagi::store::records::TransportKind::Http3) => ("H3", "HTTP/3 (QUIC)"),
+        Some(usagi::store::records::TransportKind::Http2) => ("H2", "HTTP/2"),
+        Some(usagi::store::records::TransportKind::Http11) => ("H1", "HTTP/1.1"),
         _ => ("?", ""),
     };
     let speed = if s.verify_bps > 0.0 {
@@ -1102,7 +1102,7 @@ fn update_add_preview(g: &Rc<Gui>) {
         .ok()
         .and_then(|u| util::filename_from_url(&u))
         .and_then(|name| {
-            udm_core::category::preview_dest(
+            usagi::category::preview_dest(
                 &settings.download_dir(),
                 Some(&name),
                 &settings.category_rules(),

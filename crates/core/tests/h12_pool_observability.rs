@@ -431,7 +431,7 @@ async fn join_samples(
 }
 
 fn h1_client(dials: Arc<AtomicUsize>, idle: Option<Duration>) -> Result<reqwest::Client, String> {
-    let _ = udm_core::net::tls::install_default_provider();
+    let _ = usagi::net::tls::install_default_provider();
     let mut builder = reqwest::Client::builder()
         .no_proxy()
         .pool_max_idle_per_host(8)
@@ -448,7 +448,7 @@ fn h2_client(
     dials: Arc<AtomicUsize>,
     idle: Option<Duration>,
 ) -> Result<reqwest::Client, String> {
-    let _ = udm_core::net::tls::install_default_provider();
+    let _ = usagi::net::tls::install_default_provider();
     let cert = reqwest::Certificate::from_der(ca.ca_der()).map_err(|e| format!("ca der: {e}"))?;
     let mut builder = reqwest::Client::builder()
         .no_proxy()

@@ -142,7 +142,7 @@ pub fn vi(key: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::vi;
-    use udm_core::store::records::TaskState;
+    use usagi::store::records::TaskState;
 
     #[test]
     fn every_engine_state_label_has_a_vietnamese_translation() {

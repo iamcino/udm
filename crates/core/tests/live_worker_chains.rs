@@ -10,11 +10,11 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use udm_core::engine::WorkerFault;
-use udm_core::store::{
+use usagi::engine::WorkerFault;
+use usagi::store::{
     RepresentationBound, SegmentState, Store, TaskRecord, TaskState, SCHEMA_VERSION,
 };
-use udm_core::{AddRequest, Engine, EngineBuilder, Paths, Settings, TaskSnapshot, TransportPref};
+use usagi::{AddRequest, Engine, EngineBuilder, Paths, Settings, TaskSnapshot, TransportPref};
 
 fn paths(root: &Path) -> Paths {
     Paths {

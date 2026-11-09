@@ -13,9 +13,9 @@ use std::time::Duration;
 
 use rustls::pki_types::ServerName;
 use tokio::net::TcpStream;
-use udm_core::net::http12::Http12Client;
-use udm_core::net::stack::{NetSettings, RequestSpec};
-use udm_core::Settings;
+use usagi::net::http12::Http12Client;
+use usagi::net::stack::{NetSettings, RequestSpec};
+use usagi::Settings;
 
 use common::dev_tls::{HarnessCa, HARNESS_MARKER};
 
@@ -63,7 +63,7 @@ async fn production_client_rejects_harness_ca_and_harness_client_accepts_it() ->
     // `From<reqwest::Error>` keeps Display only. reqwest's Display omits the
     // rustls source, so the certificate wording is read from the same
     // `use_rustls_tls` stack and from `tls::client_config`.
-    if !matches!(err, udm_core::Error::Connect(_)) {
+    if !matches!(err, usagi::Error::Connect(_)) {
         return Err(format!(
             "expected Http12Client to fail the handshake, got: {err}"
         ));
@@ -106,7 +106,7 @@ async fn rustls_platform_failure(url: &str) -> Result<String, String> {
 
 /// `tls::client_config` is the OS-root builder behind the HTTP/3 client.
 async fn native_roots_failure(addr: SocketAddr) -> Result<String, String> {
-    let config = udm_core::net::tls::client_config(&[b"http/1.1"])
+    let config = usagi::net::tls::client_config(&[b"http/1.1"])
         .map_err(|e| format!("client_config: {e}"))?;
     let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
     let tcp = TcpStream::connect(addr)

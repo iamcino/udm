@@ -4,7 +4,7 @@
 
 The application is **Universal Download Manager (UDM)**, with desktop binary
 `udm` and command-line binary `udm-cli`. Its upgraded core engine will be named
-**Usagi**. The current core package is `udm-core`.
+**Usagi**. The core package is `usagi`.
 
 A download manager for Windows 11 (and Linux) written in Rust, with a Slint
 GUI and a [redb](https://github.com/cberner/redb) database. It speaks
@@ -136,7 +136,7 @@ and the operating-system trust store (`rustls-native-certs`).
 ## Verifying the privacy claims
 
 ```bash
-cargo test -p udm-core --test no_telemetry   # Cargo.lock + source tripwires
+cargo test -p usagi --test no_telemetry   # Cargo.lock + source tripwires
 cargo deny check                               # licence/advisory/telemetry bans
 ```
 

@@ -12,7 +12,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use udm_core::{
+use usagi::{
     config::Settings,
     engine::{AddRequest, Engine, EngineBuilder},
     paths::Paths,

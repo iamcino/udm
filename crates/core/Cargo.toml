@@ -1,10 +1,10 @@
 [package]
-name = "udm-core"
+name = "usagi"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "udm download engine: HTTP/1.1+2 and HTTP/3 (QUIC) transports, segmented transfers, resume, checksums, redb persistence"
+description = "Usagi download engine: HTTP/1.1+2 and HTTP/3 (QUIC) transports, segmented transfers, resume, checksums, redb persistence"
 keywords = ["download", "http3", "quic", "downloader"]
 categories = ["network-programming"]
 

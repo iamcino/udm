@@ -10,7 +10,7 @@ name = "udm-host"
 path = "src/main.rs"
 
 [dependencies]
-udm-core = { path = "../core" }
+usagi = { path = "../core" }
 serde_json = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]

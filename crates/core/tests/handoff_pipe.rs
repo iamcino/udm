@@ -8,12 +8,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use udm_core::error::Result;
-use udm_core::handoff::{
+use usagi::error::Result;
+use usagi::handoff::{
     Coordinator, CoordinatorConfig, EnginePort, HandoffClock, HandoffIntent,
     MemoryStore,
 };
-use udm_core::handoff_pipe::{pipe_name, serve, PipeClient};
+use usagi::handoff_pipe::{pipe_name, serve, PipeClient};
 
 const ALICE: &str = "chrome:alice-ext";
 const BOB: &str = "firefox:bob-ext";

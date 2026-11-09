@@ -10,7 +10,7 @@ name = "udm-cli"
 path = "src/main.rs"
 
 [dependencies]
-udm-core = { workspace = true }
+usagi = { workspace = true }
 clap = { workspace = true }
 humantime = { workspace = true }
 tokio = { workspace = true }

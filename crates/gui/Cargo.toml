@@ -10,7 +10,7 @@ name = "udm"
 path = "src/main.rs"
 
 [dependencies]
-udm-core = { path = "../core" }
+usagi = { path = "../core" }
 slint = { version = "=1.18.1", default-features = false, features = [
     "std",
     "compat-1-18",
@@ -26,7 +26,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "ansi"] }
 
 # URL parsing for display-name fallbacks (already in the lock file as a
-# transitive dependency of udm-core).
+# transitive dependency of usagi).
 url = { workspace = true }
 
 # Free-space readout for the sidebar storage widget (already in the lock file
