@@ -29,3 +29,8 @@ Cargo.lock.bak
 /review-artifacts/*
 !/review-artifacts/*.md
 
+
+# Code signing key material (never commit; the public .cer lives in docs/signing)
+/.signing/
+*.pfx
+*.p12

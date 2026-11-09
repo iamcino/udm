@@ -15,7 +15,12 @@ param(
     # Use the checked-in crates/gui/src/slint_generated.rs instead of compiling
     # the .slint sources at build time (saves ~2 GB of RAM at the cost of one
     # manual regeneration step - see packaging/regenerate-slint.sh).
-    [switch]$NoSlintCompile
+    [switch]$NoSlintCompile,
+    # Sign udm.exe, udm-cli.exe and the installer with the pinned UDM certificate
+    # (tools\signing\sign.ps1) before they are packaged: the certificate in
+    # CurrentUser\My, or -PfxPath with UDM_SIGN_PFX_PASSWORD set.
+    [switch]$Sign,
+    [string]$PfxPath
 )
 
 $ErrorActionPreference = "Stop"
@@ -47,12 +52,27 @@ Copy-Item (Join-Path $root "docs\PRIVACY.md") (Join-Path $dist "PRIVACY.md") -Fo
 Copy-Item (Join-Path $root "crates\gui\vendor\cino-ui\LICENSE") (Join-Path $dist "CINO-UI-LICENSE.txt") -Force
 Copy-Item (Join-Path $root "crates\gui\vendor\cino-ui\ui\fonts\OFL.txt") (Join-Path $dist "BE-VIETNAM-PRO-OFL.txt") -Force
 
+function Sign-File($file) {
+    $signArgs = @{ Path = $file; ProjectName = 'UDM' }
+    if ($PfxPath) { $signArgs.PfxPath = $PfxPath }
+    & (Join-Path $root "tools\signing\sign.ps1") @signArgs
+}
+if ($Sign) {
+    Write-Host "==> signing executables"
+    Sign-File (Join-Path $dist "udm.exe")
+    Sign-File (Join-Path $dist "udm-cli.exe")
+}
+
 if (-not $SkipInstaller) {
     Write-Host "==> makensis"
     Push-Location (Join-Path $root "packaging\windows")
     makensis /V2 /DVERSION=$version installer.nsi
     Pop-Location
     if ($LASTEXITCODE -ne 0) { throw "makensis failed" }
+    if ($Sign) {
+        Write-Host "==> signing installer"
+        Sign-File (Join-Path $dist "udm-$version-setup.exe")
+    }
 }
 
 Write-Host "==> portable zip"
