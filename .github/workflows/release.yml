@@ -1,0 +1,37 @@
+# Publish a UDM release on GitHub with the same files as the GitLab release.
+#
+# Releases are built and signed once, by the GitLab release job (tools/release-gitlab.ps1).
+# When the release tag reaches this repository (tools/publish-gitlab-snapshot.ps1 -Push mirrors
+# GitLab's v* tags), this workflow downloads that GitLab release, checks the hashes and the pinned
+# UDM signature, and creates the GitHub release with identical files (tools/release-github.ps1).
+# It can also be started by hand for an existing tag.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, for example v0.1.0"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  mirror:
+    name: Publish the GitLab release on GitHub
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - name: Mirror GitLab release
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = if ('${{ github.event.inputs.tag }}') { '${{ github.event.inputs.tag }}' } else { '${{ github.ref_name }}' }
+          .\tools\release-github.ps1 -Tag $tag -WaitMinutes 30

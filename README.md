@@ -14,9 +14,9 @@ UDM splits large files into concurrent transfers, keeps recoverable progress on 
 ![Rust](https://img.shields.io/badge/Rust-stable-000000?logo=rust)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-green)](LICENSE)
 
-### ⬇ Download: [installer](https://gitlab.com/cino-group/udm/-/releases/permalink/latest/downloads/udm-setup.exe) · [portable zip](https://gitlab.com/cino-group/udm/-/releases/permalink/latest/downloads/udm-portable.zip)
+### ⬇ Download the installer: [from GitHub](https://github.com/iamcino/udm/releases/latest) · [from GitLab](https://gitlab.com/cino-group/udm/-/releases/permalink/latest/downloads/udm-setup.exe)
 
-[All releases](https://gitlab.com/cino-group/udm/-/releases) · [What's new](CHANGELOG.md) · [Report a bug](https://gitlab.com/cino-group/udm/-/issues)
+Releases: [GitHub](https://github.com/iamcino/udm/releases) · [GitLab](https://gitlab.com/cino-group/udm/-/releases) · [What's new](CHANGELOG.md) · [Report a bug](https://github.com/iamcino/udm/issues)
 
 </div>
 
@@ -24,7 +24,7 @@ UDM splits large files into concurrent transfers, keeps recoverable progress on 
 
 ## Up and running in a minute
 
-1. **Download** `udm-<version>-setup.exe` [from GitLab](https://gitlab.com/cino-group/udm/-/releases/permalink/latest/downloads/udm-setup.exe) and run it. It installs for your Windows user only, so there is no administrator prompt.
+1. **Download** `udm-<version>-setup.exe` [from GitHub](https://github.com/iamcino/udm/releases/latest) or [from GitLab](https://gitlab.com/cino-group/udm/-/releases/permalink/latest/downloads/udm-setup.exe) and run it. It installs for your Windows user only, so there is no administrator prompt.
 2. **Paste a link.** Copy a direct HTTP or HTTPS file link, paste it into the toolbar and press Enter.
 3. **Watch it go.** The list shows progress, speed, state and the protocol in use. Pause, resume, or open the finished file from its row.
 
@@ -134,8 +134,8 @@ tray before using the CLI on its data.
 ## Updates
 
 UDM does not check for updates on its own; this version makes no background
-connections. New versions are published on the
-[releases page](https://gitlab.com/cino-group/udm/-/releases). Install the new
+connections. New versions are published on
+[GitHub](https://github.com/iamcino/udm/releases) and [GitLab](https://gitlab.com/cino-group/udm/-/releases). Install the new
 version over the old one; your settings, history and downloads are kept.
 
 ## FAQ
@@ -169,7 +169,7 @@ than a commercial one, so Windows may show "Windows protected your PC" or
 "Unknown publisher" the first time. Click **More info › Run anyway**. To be sure
 your download is genuine:
 
-- **Download only** from the [official releases page](https://gitlab.com/cino-group/udm/-/releases).
+- **Download only** from the official release pages on [GitHub](https://github.com/iamcino/udm/releases) or [GitLab](https://gitlab.com/cino-group/udm/-/releases).
 - **Check the signature:** open PowerShell in the file's folder and run
   `(Get-AuthenticodeSignature .\udm.exe).SignerCertificate.Thumbprint`.
   It must print `9FEE47A048EB37ABD97751E89DD750F75A38C5D4`

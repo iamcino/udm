@@ -3,7 +3,6 @@ name: CI
 on:
   push:
     branches: [main, master]
-    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
@@ -17,9 +16,6 @@ jobs:
   # ------------------------------------------------------------------ tests
   test:
     name: Tests + compile checks (Linux)
-    # Skipped while the repo is private (no Actions minutes); runs again
-    # automatically once the repo is public. Local/VM gates remain required.
-    if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -35,9 +31,6 @@ jobs:
   # ------------------------------------------------- Slint source compile
   slint-compile:
     name: Slint source compile check (Linux)
-    # Skipped while the repo is private (no Actions minutes); runs again
-    # automatically once the repo is public. Local/VM gates remain required.
-    if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -53,9 +46,6 @@ jobs:
   # ------------------------------------------------- native Windows build
   windows-msvc:
     name: Windows build + installer (MSVC)
-    # Skipped while the repo is private (no Actions minutes); runs again
-    # automatically once the repo is public. Local/VM gates remain required.
-    if: ${{ !github.event.repository.private }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -77,9 +67,6 @@ jobs:
   # --------------------------------------------- cross-build from Linux
   windows-gnu:
     name: Windows cross-build (GNU, from Linux)
-    # Skipped while the repo is private (no Actions minutes); runs again
-    # automatically once the repo is public. Local/VM gates remain required.
-    if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -98,22 +85,3 @@ jobs:
           name: udm-windows-x64-gnu
           path: dist/
 
-  # -------------------------------------------- publish on tag push (v*)
-  release:
-    name: Publish GitHub Release
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [test, slint-compile, windows-msvc, windows-gnu]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            artifacts/udm-windows-x64-msvc/udm-*-setup.exe
-            artifacts/udm-windows-x64-msvc/udm-*-portable.zip
-            artifacts/udm-windows-x64-gnu/udm-*-portable.zip
-          generate_release_notes: true

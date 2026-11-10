@@ -17,7 +17,12 @@
 
   The commit is built in this repository with a throwaway index (your checkout and index are
   not touched), handed to the GitLab working copy (-Snapshot, a clone of cino-group/udm) and
-  fast-forwarded there. Nothing is pushed unless you pass -Push.
+  fast-forwarded there. Nothing is pushed unless you pass -Push, which pushes GitLab main and
+  then mirrors GitLab main and its v* tags to the public GitHub repository (the 'github' remote
+  of the working copy), so both sites always carry identical commits.
+
+  The private repository is github.com/iamcino/udm-private; the public one is
+  github.com/iamcino/udm. Never push the private history to either public site.
 
 .EXAMPLE
   .\tools\publish-gitlab-snapshot.ps1               # build the snapshot of main, show it, do not push
@@ -34,6 +39,8 @@ param(
     [string]$Snapshot = 'C:\work\udm-gitlab',
     # the fetch-only remote in -Repo that points at GitLab
     [string]$GitLabRemote = 'gitlab',
+    # the remote in -Snapshot that points at the public GitHub mirror (iamcino/udm)
+    [string]$GitHubRemote = 'github',
     [string]$Message,
     [switch]$Push
 )
@@ -55,6 +62,23 @@ $fixed = @('AGENTS.md', 'AGENT_START_HERE.md', 'dev-log.md', 'note_for_agents.md
     'PRIVATE_DOCS_REMOVE_BEFORE_PUBLIC.md', 'review-artifacts')
 # a second net over the final tree: names that must never reach GitLab
 $forbidden = '(?i)(^|/)(AGENTS?\.md|AGENT_START_HERE\.md|note_for_agents?\.md|dev-log\.md|PRIVATE_DOCS[^/]*)$|^review-artifacts/|(^|/)\.env(\.|$)|\.(pfx|p12|pem|key|redb)$|(^|/)\.signing/'
+
+# The public GitHub repository is an exact mirror of GitLab: same commits, same v* tags.
+# Release tags are created on GitLab by the release job, so running with -Push after a GitLab
+# release also carries the new tag over (which starts the GitHub release workflow).
+function Sync-GitHub {
+    $remotes = @(RunGit -C $Snapshot remote)
+    if ($remotes -notcontains $GitHubRemote) {
+        Write-Host "No '$GitHubRemote' remote in $Snapshot; GitHub not synced." -ForegroundColor Yellow
+        return
+    }
+    Step 'Mirroring GitLab main and release tags to GitHub'
+    RunGit -C $Snapshot fetch --quiet --tags origin | Out-Null
+    # never force: GitHub main must be an ancestor of GitLab main
+    RunGit -C $Snapshot push $GitHubRemote origin/main:refs/heads/main
+    RunGit -C $Snapshot push $GitHubRemote 'refs/tags/v*:refs/tags/v*'
+    Write-Host "GitHub mirrors GitLab main at $((RunGit -C $Snapshot rev-parse origin/main).Trim())"
+}
 
 # ---------------------------------------------------------------- source
 Step "Source $Ref"
@@ -115,6 +139,7 @@ Write-Host "$($files.Count) files, none private"
 
 if ($tree -eq (RunGit -C $Repo rev-parse "$base^{tree}").Trim()) {
     Write-Host "`nGitLab main already has exactly this tree. Nothing to publish." -ForegroundColor Yellow
+    if ($Push) { Sync-GitHub }
     return
 }
 
@@ -152,6 +177,7 @@ if ($Push) {
     Step 'Pushing GitLab main'
     RunGit -C $Snapshot push origin main
     Write-Host "Done: https://gitlab.com/cino-group/udm/-/commit/$new"
+    Sync-GitHub
 } else {
-    Write-Host "`nNot pushed. Check it, then run:  git -C $Snapshot push origin main" -ForegroundColor Yellow
+    Write-Host "`nNot pushed. Check it, then run this script again with -Push" -ForegroundColor Yellow
 }

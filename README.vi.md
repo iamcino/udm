@@ -14,9 +14,9 @@ UDM chia tệp lớn thành các luồng tải đồng thời, lưu tiến độ
 ![Rust](https://img.shields.io/badge/Rust-stable-000000?logo=rust)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-green)](LICENSE)
 
-### ⬇ Tải về: [bộ cài](https://gitlab.com/cino-group/udm/-/releases/permalink/latest/downloads/udm-setup.exe) · [bản portable](https://gitlab.com/cino-group/udm/-/releases/permalink/latest/downloads/udm-portable.zip)
+### ⬇ Tải bộ cài: [từ GitHub](https://github.com/iamcino/udm/releases/latest) · [từ GitLab](https://gitlab.com/cino-group/udm/-/releases/permalink/latest/downloads/udm-setup.exe)
 
-[Tất cả phiên bản](https://gitlab.com/cino-group/udm/-/releases) · [Có gì mới](CHANGELOG.vi.md) · [Báo lỗi](https://gitlab.com/cino-group/udm/-/issues)
+Phát hành: [GitHub](https://github.com/iamcino/udm/releases) · [GitLab](https://gitlab.com/cino-group/udm/-/releases) · [Có gì mới](CHANGELOG.vi.md) · [Báo lỗi](https://github.com/iamcino/udm/issues)
 
 </div>
 
@@ -24,7 +24,7 @@ UDM chia tệp lớn thành các luồng tải đồng thời, lưu tiến độ
 
 ## Dùng ngay trong một phút
 
-1. **Tải** `udm-<phiên bản>-setup.exe` [từ GitLab](https://gitlab.com/cino-group/udm/-/releases/permalink/latest/downloads/udm-setup.exe) và chạy. Bộ cài chỉ cài cho tài khoản Windows của bạn nên không hỏi quyền quản trị.
+1. **Tải** `udm-<phiên bản>-setup.exe` [từ GitHub](https://github.com/iamcino/udm/releases/latest) hoặc [từ GitLab](https://gitlab.com/cino-group/udm/-/releases/permalink/latest/downloads/udm-setup.exe) và chạy. Bộ cài chỉ cài cho tài khoản Windows của bạn nên không hỏi quyền quản trị.
 2. **Dán liên kết.** Sao chép liên kết HTTP hoặc HTTPS trực tiếp đến tệp, dán vào thanh công cụ rồi nhấn Enter.
 3. **Theo dõi.** Danh sách hiển thị tiến độ, tốc độ, trạng thái và giao thức đang dùng. Tạm dừng, tiếp tục hoặc mở tệp đã tải xong ngay trên từng dòng.
 
@@ -130,7 +130,7 @@ khi dùng CLI trên dữ liệu đó.
 ## Cập nhật
 
 UDM không tự kiểm tra cập nhật; phiên bản này không có kết nối nền nào. Phiên bản
-mới được đăng ở [trang phát hành](https://gitlab.com/cino-group/udm/-/releases).
+mới được đăng trên [GitHub](https://github.com/iamcino/udm/releases) và [GitLab](https://gitlab.com/cino-group/udm/-/releases).
 Cài bản mới đè lên bản cũ; cài đặt, lịch sử và tệp tải về vẫn được giữ.
 
 ## Hỏi đáp
@@ -163,7 +163,7 @@ Các bản phát hành UDM có chữ ký số, nhưng bằng chứng chỉ riên
 phải chứng chỉ thương mại, nên lần đầu Windows có thể hiện "Windows protected your
 PC" hoặc "Unknown publisher". Bấm **More info › Run anyway**. Để chắc bản tải là thật:
 
-- **Chỉ tải** từ [trang phát hành chính thức](https://gitlab.com/cino-group/udm/-/releases).
+- **Chỉ tải** từ trang phát hành chính thức trên [GitHub](https://github.com/iamcino/udm/releases) hoặc [GitLab](https://gitlab.com/cino-group/udm/-/releases).
 - **Kiểm tra chữ ký:** mở PowerShell trong thư mục chứa tệp và chạy
   `(Get-AuthenticodeSignature .\udm.exe).SignerCertificate.Thumbprint`.
   Kết quả phải là `9FEE47A048EB37ABD97751E89DD750F75A38C5D4`

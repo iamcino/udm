@@ -173,13 +173,25 @@ is installed. It is not invoked by the current CI workflow.
 
 ## CI and publication
 
-[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) defines Linux tests,
-a Slint source check, Windows MSVC packaging, a GNU cross-build and a release
-job. The four verification/build jobs skip private repositories. The release
-job requires those jobs and a `v*` tag; it has no separate private-repository
-condition. Skipped prerequisite jobs prevent the normal release path there.
+UDM is published on GitLab ([cino-group/udm](https://gitlab.com/cino-group/udm))
+and GitHub ([iamcino/udm](https://github.com/iamcino/udm)); both carry the same
+commits and tags.
 
-The workflow describes automation, not release approval. It neither packages
+- [`.gitlab-ci.yml`](../.gitlab-ci.yml) runs the tests and a packaged build on
+  every push. Its manual `release` job runs `tools/release-gitlab.ps1`, which
+  builds, signs (pinned certificate `docs/signing/UDM-codesign.cer`), packages
+  and publishes the GitLab release and creates the `v<version>` tag.
+- [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs Linux tests, a
+  Slint source check, Windows MSVC packaging and a GNU cross-build.
+  [`release.yml`](../.github/workflows/release.yml) runs when a `v*` tag reaches
+  GitHub: `tools/release-github.ps1` downloads the GitLab release, checks the
+  hashes and signatures, and publishes the same files on GitHub.
+
+A release is: publish the source snapshot (`tools/publish-gitlab-snapshot.ps1
+-Push`, which also mirrors GitLab to GitHub), run the GitLab `release` job, then
+run the snapshot script with `-Push` again to carry the new tag to GitHub.
+
+The workflows describe automation, not release approval. It neither packages
 the browser integration nor implements an authenticated app updater. No
 updater is built by any command in this guide.
 
