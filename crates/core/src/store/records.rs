@@ -157,6 +157,40 @@ pub enum TransportKind {
     Unknown,
 }
 
+/// Protocol history admitted in this run. Additive schema-2 field: old records
+/// default to Unknown and old readers ignore it. The legacy scalar is None for
+/// Mixed, never the last protocol to win a race.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TransportSummary {
+    #[default]
+    Unknown,
+    Single(TransportKind),
+    Mixed(Vec<TransportKind>),
+}
+
+impl TransportSummary {
+    pub(crate) fn observe(&mut self, protocol: TransportKind) {
+        if protocol == TransportKind::Unknown {
+            return;
+        }
+        match self {
+            Self::Unknown => *self = Self::Single(protocol),
+            Self::Single(previous) if *previous != protocol => {
+                *self = Self::Mixed(vec![*previous, protocol])
+            }
+            Self::Mixed(protocols) if !protocols.contains(&protocol) => protocols.push(protocol),
+            _ => {}
+        }
+    }
+    pub(crate) fn legacy(&self) -> Option<TransportKind> {
+        match self {
+            Self::Single(protocol) => Some(*protocol),
+            _ => None,
+        }
+    }
+}
+
 impl TransportKind {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -216,6 +250,14 @@ pub struct SegmentState {
     pub done: u64,
     /// The server closed the stream after the last byte of this segment.
     pub finished: bool,
+    /// Additive schema-2 lease identity. Omitting zero preserves legacy
+    /// checkpoint fingerprints; nonzero epochs are committed with coverage.
+    #[serde(default, skip_serializing_if = "zero_epoch")]
+    pub allocation_epoch: u64,
+}
+
+fn zero_epoch(epoch: &u64) -> bool {
+    *epoch == 0
 }
 
 impl SegmentState {
@@ -226,6 +268,7 @@ impl SegmentState {
             end,
             done: 0,
             finished: false,
+            allocation_epoch: 0,
         }
     }
 
@@ -358,6 +401,8 @@ pub struct TaskRecord {
 
     /// Transport that is currently/last delivering bytes.
     pub transport: Option<TransportKind>,
+    #[serde(default)]
+    pub transport_summary: TransportSummary,
     /// Per-task transport override.
     pub transport_pref: TransportPref,
 
@@ -410,6 +455,7 @@ impl TaskRecord {
             representation_bound: None,
             handoff_tx: None,
             transport: None,
+            transport_summary: TransportSummary::Unknown,
             transport_pref: TransportPref::Auto,
             note: String::new(),
             segments_planned: 1,
@@ -603,5 +649,53 @@ mod tests {
             again.representation_bound.unwrap().header_scope,
             HEADER_SCOPE_NONE
         );
+    }
+}
+
+#[cfg(test)]
+mod transport_summary_compatibility {
+    use super::*;
+    #[test]
+    fn schema2_summary_is_additive_and_mixed_never_claims_last_protocol() {
+        let zero = SegmentState::new(0, 0, 7);
+        assert_eq!(
+            serde_json::to_string(&zero).unwrap(),
+            "{\"index\":0,\"start\":0,\"end\":7,\"done\":0,\"finished\":false}"
+        );
+        let mut leased = zero;
+        leased.allocation_epoch = 3;
+        let decoded: SegmentState =
+            serde_json::from_slice(&serde_json::to_vec(&leased).unwrap()).unwrap();
+        assert_eq!(decoded.allocation_epoch, 3);
+        let record = TaskRecord::new(1, "https://example.test/a", Path::new("."), None);
+        let mut legacy = serde_json::to_value(&record).unwrap();
+        legacy.as_object_mut().unwrap().remove("transport_summary");
+        let decoded: TaskRecord = serde_json::from_value(legacy).unwrap();
+        assert_eq!(decoded.transport_summary, TransportSummary::Unknown);
+        let mut summary = TransportSummary::Unknown;
+        summary.observe(TransportKind::Http2);
+        summary.observe(TransportKind::Http2);
+        assert_eq!(summary, TransportSummary::Single(TransportKind::Http2));
+        summary.observe(TransportKind::Http11);
+        summary.observe(TransportKind::Http2);
+        assert_eq!(
+            summary,
+            TransportSummary::Mixed(vec![TransportKind::Http2, TransportKind::Http11])
+        );
+        assert_eq!(summary.legacy(), None);
+        let mut record = decoded;
+        record.transport_summary = summary.clone();
+        record.transport = None;
+        let decoded: TaskRecord =
+            serde_json::from_slice(&serde_json::to_vec(&record).unwrap()).unwrap();
+        assert_eq!(decoded.transport_summary, summary);
+        assert_eq!(decoded.transport, None);
+        // Older scalar consumers still decode their field and ignore the additive one.
+        #[derive(Deserialize)]
+        struct Scalar {
+            transport: Option<TransportKind>,
+        }
+        let old: Scalar = serde_json::from_value(serde_json::to_value(record).unwrap()).unwrap();
+        assert_eq!(old.transport, None);
     }
 }

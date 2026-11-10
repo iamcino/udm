@@ -7,11 +7,14 @@ pub enum ProofPoint {
     AfterWriteBeforeSync,
     AfterSyncBeforeTransaction,
     TransactionCommittedBeforeAcknowledgment,
+    AfterBodyBeforeFlush,
+    BeforeReclaim,
 }
 
 #[derive(Debug)]
 pub struct ProofBarrier {
     pub point: ProofPoint,
+    pub(crate) segment: Option<usize>,
     state: Mutex<(bool, bool, u64)>,
     changed: Condvar,
     release: tokio::sync::watch::Sender<bool>,
@@ -20,10 +23,18 @@ impl ProofBarrier {
     pub fn new(point: ProofPoint) -> Arc<Self> {
         Arc::new(Self {
             point,
+            segment: None,
             state: Mutex::new((false, false, 0)),
             changed: Condvar::new(),
             release: tokio::sync::watch::channel(false).0,
         })
+    }
+    pub fn for_segment(point: ProofPoint, segment: usize) -> Arc<Self> {
+        let mut gate = Self::new(point);
+        if let Some(inner) = Arc::get_mut(&mut gate) {
+            inner.segment = Some(segment);
+        }
+        gate
     }
     pub fn entered(&self) -> bool {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).0

@@ -20,7 +20,7 @@ use crate::error::{Error, Result};
 use crate::net::altsvc::{origin_key, AltSvcEntry, AltSvcStore};
 use crate::net::gauge::{EngineConnections, ProtocolGauge};
 use crate::net::h3::{H3Pool, H3Response};
-use crate::net::http12::Http12Client;
+use crate::net::http12::{Family, Http12Client};
 use crate::net::{self};
 use crate::store::records::TransportKind;
 use crate::util;
@@ -58,6 +58,8 @@ impl NetSettings {
 /// One HTTP request description (used for both transports).
 #[derive(Clone, Debug)]
 pub struct RequestSpec {
+    /// Frozen, independently built Http12 route. Dispatch precedes H3.
+    pub family_route: Option<FamilyRoute>,
     pub url: String,
     pub method: Method,
     /// `(start, end_inclusive)`; `None` end means "to the end of the file".
@@ -70,6 +72,7 @@ pub struct RequestSpec {
 impl RequestSpec {
     pub fn get(url: &str) -> Self {
         RequestSpec {
+            family_route: None,
             url: url.to_string(),
             method: Method::GET,
             range: None,
@@ -100,7 +103,21 @@ impl RequestSpec {
             .push((name.to_string(), value.to_string()));
         self
     }
+
+    pub(crate) fn with_family_route(mut self, route: Option<FamilyRoute>) -> Self {
+        self.family_route = route;
+        self
+    }
 }
+
+#[derive(Clone, Debug)]
+pub struct FamilyRoute {
+    pub family: Family,
+    client: Http12Client,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct FamilyPaths(pub [FamilyRoute; 2]);
 
 /// What a probe learned about a URL.
 #[derive(Clone, Debug)]
@@ -270,6 +287,7 @@ impl Opened {
 
 struct Inner {
     http: RwLock<Http12Client>,
+    test_roots: RwLock<Vec<Vec<u8>>>,
     h3: RwLock<Option<Arc<H3Pool>>>,
     alt_svc: Arc<dyn AltSvcStore>,
     settings: RwLock<NetSettings>,
@@ -358,6 +376,7 @@ impl NetStack {
         Ok(NetStack {
             inner: Arc::new(Inner {
                 http: RwLock::new(http),
+                test_roots: RwLock::new(Vec::new()),
                 h3: RwLock::new(h3),
                 alt_svc,
                 settings: RwLock::new(net_settings),
@@ -399,7 +418,27 @@ impl NetStack {
         self.inner
             .http
             .write()
-            .install_extra_root_der(&settings, der)
+            .install_extra_root_der(&settings, der)?;
+        *self.inner.test_roots.write() = vec![der.to_vec()];
+        Ok(())
+    }
+
+    pub(crate) fn family_paths(&self) -> Result<FamilyPaths> {
+        let settings = self.settings();
+        let roots = self.inner.test_roots.read();
+        let roots: Vec<_> = roots.iter().map(Vec::as_slice).collect();
+        // Two builds, hence two connectors and pools. Clones below retain only
+        // their own family's configuration throughout this task attempt.
+        Ok(FamilyPaths([
+            FamilyRoute {
+                family: Family::V4,
+                client: Http12Client::family(&settings, &roots, Family::V4)?,
+            },
+            FamilyRoute {
+                family: Family::V6,
+                client: Http12Client::family(&settings, &roots, Family::V6)?,
+            },
+        ]))
     }
 
     /// Hold the next tail flush until [`TailFlushGate::release`].
@@ -440,6 +479,7 @@ impl NetStack {
     pub fn update_settings(&self, settings: &Settings) -> Result<()> {
         let next = NetSettings::from_settings(settings);
         self.inner.http.write().rebuild(&next)?;
+        self.inner.test_roots.write().clear();
         {
             let mut slot = self.inner.h3.write();
             if next.http3_enabled && slot.is_none() {
@@ -672,6 +712,7 @@ impl NetStack {
             segment,
             range: spec.range,
             preference: pref,
+            requested_family: spec.family_route.as_ref().map(|r| r.family),
             outcome: OpenOutcome::Pending,
             failure: None,
             open_to_headers: None,
@@ -688,6 +729,11 @@ impl NetStack {
     /// Open a byte range for transfer.
     pub async fn open(&self, spec: &RequestSpec, pref: TransportPref) -> Result<Opened> {
         let parsed = validate(&spec.url)?;
+        if let Some(route) = &spec.family_route {
+            // In particular, IPv6 never enters generic H3-first selection.
+            let response = route.client.send(spec).await?;
+            return Ok(opened_from_http12(response));
+        }
         let effective = self.effective_pref(pref);
 
         if let Some(entry) = self.h3_target(&parsed, effective) {
@@ -717,28 +763,8 @@ impl NetStack {
     async fn open_http12(&self, spec: &RequestSpec) -> Result<Opened> {
         let client = self.inner.http.read().clone();
         let response = client.send(spec).await?;
-        let remote_addr = response.remote_addr();
-        let status = response.status().as_u16();
-        let headers = response.headers().clone();
-        let final_url = response.url().to_string();
-        let transport = net::transport_from_version(response.version());
-        self.learn_alt_svc_headers(&headers, &final_url);
-
-        let body = if (200..300).contains(&status) {
-            Body::H12(Box::pin(response.bytes_stream()))
-        } else {
-            drop(response);
-            Body::Empty
-        };
-
-        Ok(Opened {
-            remote_addr,
-            status,
-            headers,
-            transport,
-            final_url,
-            body,
-        })
+        self.learn_alt_svc_headers(response.headers(), response.url().as_str());
+        Ok(opened_from_http12(response))
     }
 
     // ---------------------------------------------------------------- h3 plumbing
@@ -750,7 +776,6 @@ impl NetStack {
             .clone()
             .ok_or_else(|| Error::Http3("the QUIC stack is disabled in settings".to_string()))
     }
-
     fn effective_pref(&self, pref: TransportPref) -> TransportPref {
         let settings = self.inner.settings.read();
         if !settings.http3_enabled {
@@ -892,6 +917,27 @@ fn rewrite_for_h3(mut spec: RequestSpec, entry: &AltSvcEntry) -> RequestSpec {
         }
     }
     spec
+}
+
+fn opened_from_http12(response: reqwest::Response) -> Opened {
+    let remote_addr = response.remote_addr();
+    let status = response.status().as_u16();
+    let headers = response.headers().clone();
+    let final_url = response.url().to_string();
+    let transport = net::transport_from_version(response.version());
+    let body = if (200..300).contains(&status) {
+        Body::H12(Box::pin(response.bytes_stream()))
+    } else {
+        Body::Empty
+    };
+    Opened {
+        remote_addr,
+        status,
+        headers,
+        transport,
+        final_url,
+        body,
+    }
 }
 
 fn opened_from_h3(mut response: H3Response, final_url: String) -> Opened {

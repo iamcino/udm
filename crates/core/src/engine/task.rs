@@ -20,6 +20,7 @@ use crate::config::{ConflictPolicy, Settings, TransportPref};
 use crate::engine::{stop_reason, Event, LogLevel, SharedState, TaskCell};
 use crate::error::{Error, Result};
 use crate::hash;
+use crate::net::stack::{FamilyPaths, FamilyRoute};
 use crate::net::stack::{Opened, ProbeInfo, RequestSpec};
 use crate::store::records::{RouteState, SegmentState, TaskState, OPEN_ENDED};
 use crate::util;
@@ -35,6 +36,9 @@ pub(super) struct RunCtx {
 /// Everything a segment worker needs, computed once per attempt.
 #[derive(Clone, Debug)]
 struct Plan {
+    family_paths: Option<FamilyPaths>,
+    route: Option<FamilyRoute>,
+    allocation_epoch: u64,
     request_url: String,
     part_path: PathBuf,
     final_path: PathBuf,
@@ -89,13 +93,20 @@ pub(super) async fn run(ctx: Arc<RunCtx>, id: u64, token: CancellationToken) {
     if attempt == 0 {
         cell.record.write().started_at = Some(util::now_millis());
     }
+    cell.record.write().transport_summary = crate::store::records::TransportSummary::Unknown;
+    cell.uses_family_paths.store(false, Ordering::Release);
 
     loop {
         if token.is_cancelled() {
             stopped(&ctx, &cell);
             return;
         }
-        let result = execute(&ctx, &cell, &token).await;
+        let mut result = execute(&ctx, &cell, &token).await;
+        if let Some((generation, error)) = cell.storage_failure.lock().take() {
+            if generation == ctx.generation {
+                result = Err(Error::Storage(error));
+            }
+        }
         // A superseded run publishes nothing: no state, error or retry. Its
         // coverage and finalize writes were already refused by the fences.
         if let Err(stale) = cell.fence(ctx.generation) {
@@ -142,7 +153,10 @@ pub(super) async fn run(ctx: Arc<RunCtx>, id: u64, token: CancellationToken) {
                 // are definitive. Pause or shutdown must not drop them:
                 // publication step 5 wins over step 6. Cancel still wins
                 // inside `publish_exit`.
-                let definitive = e.is_fatal() || next_attempt > ctx.settings.max_retries;
+                let storage_failure = ctx.settings.dual_stack_paths
+                    && matches!(e, Error::Io(_) | Error::IoPath { .. } | Error::Storage(_));
+                let definitive =
+                    storage_failure || e.is_fatal() || next_attempt > ctx.settings.max_retries;
                 if definitive {
                     attempt = next_attempt;
                     cell.record.write().attempts = attempt;
@@ -300,7 +314,10 @@ fn apply_probe_hints(ctx: &Arc<RunCtx>, cell: &Arc<TaskCell>, probe: &ProbeInfo)
     let mut filename_resolved = false;
     {
         let mut record = cell.record.write();
-        record.transport = Some(probe.transport);
+        record.transport = match record.transport_summary {
+            crate::store::records::TransportSummary::Unknown => Some(probe.transport),
+            _ => record.transport_summary.legacy(),
+        };
         record.accept_ranges = probe.accept_ranges;
         record.last_modified = probe.last_modified.clone();
         record.content_type = probe.content_type.clone();
@@ -603,6 +620,9 @@ async fn build_plan(ctx: &Arc<RunCtx>, cell: &Arc<TaskCell>, probe: &ProbeInfo) 
 
     let bound = cell.record.read().representation_bound.clone();
     Ok(Plan {
+        family_paths: None,
+        route: None,
+        allocation_epoch: 0,
         request_url: probe.final_url.clone(),
         part_path,
         final_path,
@@ -627,13 +647,116 @@ async fn transfer(
     plan: &Plan,
     token: &CancellationToken,
 ) -> Result<Outcome> {
+    let mut plan = plan.clone();
+    let epochs = cell
+        .segments
+        .read()
+        .iter()
+        .map(|s| s.allocation_epoch)
+        .collect();
+    *cell.allocation_epochs.lock() = epochs;
+    if ctx.settings.dual_stack_paths {
+        let settings = ctx.state.net.settings();
+        let http12_only = !settings.http3_enabled
+            || plan.pref == TransportPref::NoHttp3
+            || (plan.pref == TransportPref::Auto
+                && settings.default_pref == TransportPref::NoHttp3);
+        let eligible = !ctx.settings.use_system_proxy
+            && !settings.use_system_proxy
+            && http12_only
+            && plan.pref != TransportPref::Http3Only
+            && plan.bound.is_some()
+            && plan.total.is_some();
+        if eligible {
+            let paths = ctx.state.net.family_paths()?;
+            // Conditional small range probes admit no coverage. All headers,
+            // bound and actual peers are checked before any writer is granted.
+            let mut admitted = true;
+            for route in &paths.0 {
+                let spec = RequestSpec::get(&plan.request_url)
+                    .with_range(0, Some(0))
+                    .with_if_range(plan.if_range.clone())
+                    .with_family_route(Some(route.clone()));
+                let response = tokio::select! {
+                    _ = token.cancelled() => return Ok(Outcome::Stopped),
+                    result = ctx.state.net.open(&spec, TransportPref::NoHttp3) => result,
+                };
+                match response {
+                    Ok(mut opened) => {
+                        if !crate::net::content_coding_is_identity(
+                            crate::net::content_encoding(&opened.headers).as_deref(),
+                        ) {
+                            return Err(Error::UnsupportedCoding);
+                        }
+                        validate_response(&opened, &plan, 0, 0)?;
+                        let mut probe_plan = plan.clone();
+                        confirm_segment_representation(ctx, cell, &mut probe_plan, &opened)?;
+                        let mut bytes = 0;
+                        loop {
+                            let chunk = tokio::select! {
+                                _ = token.cancelled() => return Ok(Outcome::Stopped),
+                                result = tokio::time::timeout(settings.stall_timeout, opened.body.chunk()) => result.map_err(|_| Error::Stall { secs: settings.stall_timeout.as_secs() })??,
+                            };
+                            let Some(chunk) = chunk else {
+                                break;
+                            };
+                            bytes += chunk.len();
+                            cell.lanes.probe_received(chunk.len() as u64);
+                            if bytes > 1 {
+                                return Err(Error::InvalidResponse(
+                                    "excess family probe body".into(),
+                                ));
+                            }
+                        }
+                        if bytes != 1 {
+                            return Err(Error::InvalidResponse("short family probe body".into()));
+                        }
+                        cell.fence(ctx.generation)?;
+                        opened.body.abort();
+                    }
+                    Err(e)
+                        if matches!(
+                            e,
+                            Error::Connect(_) | Error::Dns(_) | Error::Timeout { .. }
+                        ) =>
+                    {
+                        ctx.state.log(
+                            LogLevel::Info,
+                            format!("#{} family paths ineligible: {e}", cell.id),
+                        );
+                        admitted = false;
+                        break;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            if admitted {
+                plan.family_paths = Some(paths);
+            }
+        } else {
+            ctx.state.log(
+                LogLevel::Info,
+                format!(
+                    "#{} family paths ineligible: proxy, H3 policy or unbound representation",
+                    cell.id
+                ),
+            );
+        }
+    }
+    if plan.family_paths.is_some() {
+        cell.uses_family_paths.store(true, Ordering::Release);
+        return transfer_families(ctx, cell, &plan, token).await;
+    }
+    let plan = &plan;
     let count = cell.segments.read().len();
     let mut set: JoinSet<Result<()>> = JoinSet::new();
     for index in 0..count {
+        let mut attempt = plan.clone();
+        attempt.allocation_epoch = cell.allocation_epochs.lock()[index];
         set.spawn(run_segment(
             ctx.clone(),
             cell.clone(),
-            plan.clone(),
+            attempt,
             token.clone(),
             index,
         ));
@@ -672,12 +795,127 @@ async fn transfer(
     Err(err)
 }
 
+/// One scheduler owns all leases. A family has at most one worker; a failed
+/// range is queued to the surviving family only after join and checkpoint read.
+async fn transfer_families(
+    ctx: &Arc<RunCtx>,
+    cell: &Arc<TaskCell>,
+    plan: &Plan,
+    token: &CancellationToken,
+) -> Result<Outcome> {
+    use std::collections::VecDeque;
+    let paths = plan
+        .family_paths
+        .as_ref()
+        .ok_or_else(|| Error::Other("missing family paths".into()))?;
+    let count = cell.segments.read().len();
+    let mut queue: VecDeque<_> = (0..count).collect();
+    let mut busy = [false; 2];
+    let mut alive = [true; 2];
+    let mut set = JoinSet::new();
+    let drain = token.child_token();
+    let mut failure = None;
+    loop {
+        for family in 0..2 {
+            if alive[family] && !busy[family] && failure.is_none() && !token.is_cancelled() {
+                if let Some(index) = queue.pop_front() {
+                    let mut attempt = plan.clone();
+                    attempt.route = Some(paths.0[family].clone());
+                    attempt.allocation_epoch = cell.allocation_epochs.lock()[index];
+                    cell.lanes.allocation(
+                        ctx.generation,
+                        index,
+                        attempt.allocation_epoch,
+                        "grant",
+                        cell.segments.read()[index].done,
+                    );
+                    let ctx = ctx.clone();
+                    let cell = cell.clone();
+                    let token = drain.clone();
+                    busy[family] = true;
+                    set.spawn(async move {
+                        (
+                            family,
+                            index,
+                            run_segment(ctx, cell, attempt, token, index).await,
+                        )
+                    });
+                }
+            }
+        }
+        let Some(joined) = set.join_next().await else {
+            break;
+        };
+        match joined {
+            Ok((family, index, result)) => {
+                busy[family] = false;
+                let epoch = cell.allocation_epochs.lock()[index];
+                let done = cell.segments.read()[index].done;
+                cell.lanes
+                    .allocation(ctx.generation, index, epoch, "joined", done);
+                if let Err(error) = result {
+                    // Storage and representation failures are never route loss.
+                    let route_loss = matches!(
+                        error,
+                        Error::Connect(_)
+                            | Error::Dns(_)
+                            | Error::Timeout { .. }
+                            | Error::Stall { .. }
+                            | Error::Http3(_)
+                    );
+                    if route_loss && alive[1 - family] && failure.is_none() && !token.is_cancelled()
+                    {
+                        alive[family] = false;
+                        if let Some(gate) =
+                            cell.proof_gate(crate::engine::proof::ProofPoint::BeforeReclaim)
+                        {
+                            gate.wait_async(index as u64).await;
+                        }
+                        match ctx.state.reclaim_range(cell, ctx.generation, index) {
+                            Ok(_) => queue.push_front(index),
+                            Err(e) => failure = Some(e),
+                        }
+                    } else if failure.is_none() {
+                        failure = Some(error);
+                    }
+                }
+            }
+            Err(e) => failure = Some(Error::Other(format!("family worker panicked: {e}"))),
+        }
+        if failure.is_some() {
+            drain.cancel();
+        }
+    }
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    if token.is_cancelled() {
+        return Ok(Outcome::Stopped);
+    }
+    if !queue.is_empty() || !cell.segments.read().iter().all(SegmentState::is_done) {
+        return Err(Error::Other("family ranges incomplete".into()));
+    }
+    // All writers drained. Only this synced, committed snapshot can authorize
+    // completion, including the withheld last bytes.
+    ctx.state.persist_owned(cell, true, Some(ctx.generation))?;
+    Ok(Outcome::Finished)
+}
+
 enum SegmentOut {
     Plain(tokio::io::BufWriter<tokio::fs::File>),
     Fault(tokio::io::BufWriter<FaultFile>),
 }
 
 impl SegmentOut {
+    async fn drain(self) -> std::io::Result<()> {
+        // Never retry a BufWriter flush after a storage error: that could
+        // publish bytes the failing write never accepted. Discard the volatile
+        // buffer, but await any Tokio File operation already submitted.
+        match self {
+            Self::Plain(file) => file.into_inner().flush().await,
+            Self::Fault(file) => file.into_inner().inner.flush().await,
+        }
+    }
     async fn seek_start(&mut self, offset: u64) -> std::io::Result<()> {
         match self {
             Self::Plain(file) => file
@@ -828,7 +1066,7 @@ async fn run_segment(
     // classified instead of treated as success.
     let locally_complete = length.is_some_and(|len| len == 0 || done >= len);
     if locally_complete && plan_bound_matches(&cell, &plan) {
-        return mark_finished(&ctx, &cell, index);
+        return mark_finished_epoch(&ctx, &cell, index, plan.allocation_epoch);
     }
 
     let opened_file = tokio::fs::OpenOptions::new()
@@ -849,6 +1087,7 @@ async fn run_segment(
         )),
     };
 
+    let result = async {
     let offset = start + done;
     file.seek_start(offset)
         .await
@@ -856,7 +1095,8 @@ async fn run_segment(
 
     let spec = RequestSpec::get(&plan.request_url)
         .with_range(offset, if end == OPEN_ENDED { None } else { Some(end) })
-        .with_if_range(plan.if_range.clone());
+        .with_if_range(plan.if_range.clone())
+        .with_family_route(plan.route.clone());
 
     // Revocation (pause/cancel/remove/shutdown) must not wait for connect or
     // response headers. Dropping an unopened request touches no file.
@@ -900,7 +1140,8 @@ async fn run_segment(
     // Record which transport is actually delivering this task's bytes.
     {
         let mut record = cell.record.write();
-        record.transport = Some(opened.transport);
+        record.transport_summary.observe(opened.transport);
+        record.transport = record.transport_summary.legacy();
     }
 
     let stall = Duration::from_secs(ctx.settings.stall_timeout_secs);
@@ -910,7 +1151,7 @@ async fn run_segment(
     // EOF is the network terminal. Cancel is too, but it must not be mistaken
     // for a body the caller still has to flush before dropping in-use.
     let mut network_eof = false;
-    const MAX_UNFLUSHED_BYTES: usize = 1024 * 1024;
+    let max_unflushed_bytes = ctx.settings.write_buffer_bytes.clamp(1, 1024 * 1024);
 
     loop {
         if token.is_cancelled() {
@@ -952,13 +1193,15 @@ async fn run_segment(
         // Narrow defense: a superseded run writes no further bytes. Overlap is
         // already excluded by drain-before-regrant (`running`).
         cell.fence(ctx.generation)?;
-        if let Some(gate) = cell.proof_gate(crate::engine::proof::ProofPoint::BeforeWrite) {
+        if let Some(gate) = cell.proof_gate(crate::engine::proof::ProofPoint::BeforeWrite)
+            .filter(|g| g.segment.is_none_or(|s| s == index)) {
             gate.wait_async(to_write.len() as u64).await;
             if token.is_cancelled() {
                 return Ok(());
             }
         }
         cell.fence(ctx.generation)?;
+        cell.allocation_fence(index, plan.allocation_epoch)?;
         file.write_all(to_write)
             .await
             .map_err(|e| Error::io(plan.part_path.clone(), e))?;
@@ -970,13 +1213,13 @@ async fn run_segment(
 
         // Periodically flush buffer down to disk so resume milestones advance safely
         // without incurring disk flush overhead on every chunk.
-        if buffered_bytes >= MAX_UNFLUSHED_BYTES {
+        if buffered_bytes >= max_unflushed_bytes {
             file.flush_out()
                 .await
                 .map_err(|e| Error::io(plan.part_path.clone(), e))?;
             flushed += buffered_bytes as u64;
             buffered_bytes = 0;
-            note_flushed_progress(&ctx, &cell, index, flushed, length)?;
+            note_flushed_progress(&ctx, &cell, index, flushed, length, plan.allocation_epoch)?;
         }
     }
 
@@ -984,6 +1227,10 @@ async fn run_segment(
     // `ActiveRequest` guard, which stays alive across that flush. Cancel
     // takes the same drop, so in-use does not wait out `stall` or the write.
     opened.body.end_network();
+    if let Some(gate) = cell.proof_gate(crate::engine::proof::ProofPoint::AfterBodyBeforeFlush)
+        .filter(|g| g.segment.is_none_or(|s| s == index)) {
+        gate.wait_async(flushed + buffered_bytes as u64).await;
+    }
     if network_eof && !token.is_cancelled() {
         if let Some(gate) = ctx.state.net.tail_flush_gate() {
             tokio::select! {
@@ -1000,10 +1247,10 @@ async fn run_segment(
             .await
             .map_err(|e| Error::io(plan.part_path.clone(), e))?;
         flushed += buffered_bytes as u64;
-        note_flushed_progress(&ctx, &cell, index, flushed, length)?;
+        note_flushed_progress(&ctx, &cell, index, flushed, length, plan.allocation_epoch)?;
     }
 
-    drop(file);
+    // The outer owner drains this handle on every exit, including network errors.
     // Already ended on EOF and on cancel. A path that left the body open
     // still ends it before `ActiveRequest` drops.
     opened.body.end_network();
@@ -1023,7 +1270,7 @@ async fn run_segment(
         return Err(Error::RemoteChanged);
     }
     match length {
-        Some(len) if flushed == len => mark_finished(&ctx, &cell, index),
+        Some(len) if flushed == len => mark_finished_epoch(&ctx, &cell, index, plan.allocation_epoch),
         Some(len) if flushed < len => Err(Error::Other(format!(
             "segment {index} ended early ({flushed} of {len} bytes)",
         ))),
@@ -1032,9 +1279,16 @@ async fn run_segment(
         ))),
         None => {
             // Open-ended: the server closed the stream, so this is the whole file.
-            mark_finished(&ctx, &cell, index)
+            mark_finished_epoch(&ctx, &cell, index, plan.allocation_epoch)
         }
     }
+    }.await;
+    // Complete even already-submitted Tokio file operations on every exit.
+    // A joined failed worker must leave no write racing its replacement.
+    file.drain()
+        .await
+        .map_err(|e| Error::io(plan.part_path.clone(), e))?;
+    result
 }
 
 /// Validate the supported single-range response before any bytes reach the file.
@@ -1109,10 +1363,16 @@ fn validate_response(opened: &Opened, plan: &Plan, offset: u64, end: u64) -> Res
     }
 }
 
+#[cfg(test)]
 fn mark_finished(ctx: &RunCtx, cell: &Arc<TaskCell>, index: usize) -> Result<()> {
+    mark_finished_epoch(ctx, cell, index, 0)
+}
+
+fn mark_finished_epoch(ctx: &RunCtx, cell: &Arc<TaskCell>, index: usize, epoch: u64) -> Result<()> {
     let _record = cell.record.read();
     let mut segments = cell.segments.write();
     cell.fence(ctx.generation)?;
+    cell.allocation_fence(index, epoch)?;
     if let Some(seg) = segments.get_mut(index) {
         if let Some(len) = seg.len() {
             seg.done = len;
@@ -1181,10 +1441,12 @@ fn note_flushed_progress(
     index: usize,
     flushed: u64,
     length: Option<u64>,
+    epoch: u64,
 ) -> Result<()> {
     let _record = cell.record.read();
     let mut segments = cell.segments.write();
     cell.fence(ctx.generation)?;
+    cell.allocation_fence(index, epoch)?;
     if let Some(segment) = segments.get_mut(index) {
         // Withhold the final byte from resume checkpoints until EOF is
         // validated, even when the last buffer was already flushed.

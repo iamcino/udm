@@ -18,6 +18,7 @@ pub struct OpenObservation {
     pub segment: usize,
     pub range: Option<(u64, Option<u64>)>,
     pub preference: TransportPref,
+    pub requested_family: Option<crate::net::http12::Family>,
     pub outcome: OpenOutcome,
     pub failure: Option<&'static str>,
     pub open_to_headers: Option<Duration>,
@@ -39,6 +40,17 @@ pub struct OpenEvidence {
     pub observations: Vec<OpenObservation>,
     pub pending: usize,
     pub dropped: u64,
+    pub allocations: Vec<AllocationObservation>,
+    pub probe_bytes: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct AllocationObservation {
+    pub generation: u64,
+    pub segment: usize,
+    pub epoch: u64,
+    pub action: &'static str,
+    pub done: u64,
 }
 
 #[derive(Debug, Default)]
@@ -46,6 +58,8 @@ struct State {
     pending: usize,
     dropped: u64,
     completed: VecDeque<OpenObservation>,
+    allocations: VecDeque<AllocationObservation>,
+    probe_bytes: u64,
 }
 
 /// Owned by one task. Completed attempts are bounded; overflow invalidates proof.
@@ -59,7 +73,35 @@ impl LaneTable {
             observations: state.completed.iter().cloned().collect(),
             pending: state.pending,
             dropped: state.dropped,
+            allocations: state.allocations.iter().cloned().collect(),
+            probe_bytes: state.probe_bytes,
         }
+    }
+
+    pub(crate) fn probe_received(&self, bytes: u64) {
+        self.0.lock().probe_bytes += bytes;
+    }
+
+    pub(crate) fn allocation(
+        &self,
+        generation: u64,
+        segment: usize,
+        epoch: u64,
+        action: &'static str,
+        done: u64,
+    ) {
+        let mut state = self.0.lock();
+        if state.allocations.len() == 256 {
+            state.allocations.pop_front();
+            state.dropped += 1;
+        }
+        state.allocations.push_back(AllocationObservation {
+            generation,
+            segment,
+            epoch,
+            action,
+            done,
+        });
     }
 
     pub(crate) fn begin(self: &Arc<Self>, row: OpenObservation) -> OpenAttempt {
@@ -132,6 +174,7 @@ mod tests {
             segment,
             range: Some((0, Some(7))),
             preference: TransportPref::Auto,
+            requested_family: None,
             outcome: OpenOutcome::Pending,
             failure: None,
             open_to_headers: None,

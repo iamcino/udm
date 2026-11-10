@@ -56,6 +56,9 @@ fn plan_for(
     bound: Option<RepresentationBound>,
 ) -> Plan {
     Plan {
+        family_paths: None,
+        route: None,
+        allocation_epoch: 0,
         request_url: url.to_string(),
         part_path: part.clone(),
         final_path: part,
@@ -470,5 +473,69 @@ fn persist_epoch_retry_does_not_commit_the_pre_clear_pair() {
         segments.is_empty(),
         "cleared progress was not the last commit"
     );
+    engine.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn s1_stale_allocation_refuses_file_and_both_coverage_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let (engine, id) = paused_engine(dir.path());
+    let cell = engine.state.cell(id).unwrap();
+    arm_segment(&engine, id, 0, 7, false);
+    *cell.allocation_epochs.lock() = vec![1];
+    let ctx = ctx_for(&engine);
+    assert!(matches!(
+        note_flushed_progress(&ctx, &cell, 0, 4, Some(8), 0),
+        Err(Error::Cancelled)
+    ));
+    assert!(matches!(
+        mark_finished_epoch(&ctx, &cell, 0, 0),
+        Err(Error::Cancelled)
+    ));
+    let (url, server) = serve_once(http(
+        "206 Partial Content",
+        "Content-Range: bytes 0-7/8",
+        "abcdefgh",
+    ));
+    let part = cell.record.read().part_path();
+    let before = std::fs::read(&part).unwrap();
+    let plan = plan_for(&url, part.clone(), Some(8), None);
+    assert!(matches!(
+        run_segment(ctx.clone(), cell.clone(), plan, CancellationToken::new(), 0).await,
+        Err(Error::Cancelled)
+    ));
+    server.join().unwrap();
+    assert_eq!(std::fs::read(part).unwrap(), before);
+    assert_eq!(cell.segments.read()[0].done, 0);
+    assert!(!cell.segments.read()[0].finished);
+    note_flushed_progress(&ctx, &cell, 0, 4, Some(8), 1).unwrap();
+    assert_eq!(cell.segments.read()[0].done, 4);
+    engine.shutdown();
+}
+
+#[test]
+fn s1_unsupported_bound_method_is_not_writable() {
+    let dir = tempfile::tempdir().unwrap();
+    let (engine, id) = paused_engine(dir.path());
+    let cell = engine.state.cell(id).unwrap();
+    let mut plan = plan_for(
+        "https://example.test/a",
+        cell.record.read().part_path(),
+        Some(8),
+        None,
+    );
+    plan.method_get = false;
+    let opened = Opened {
+        remote_addr: None,
+        status: 206,
+        headers: Default::default(),
+        transport: crate::store::TransportKind::Http2,
+        final_url: plan.request_url.clone(),
+        body: crate::net::stack::Body::Empty,
+    };
+    assert!(matches!(
+        confirm_segment_representation(&ctx_for(&engine), &cell, &mut plan, &opened),
+        Err(Error::InvalidResponse(_))
+    ));
     engine.shutdown();
 }

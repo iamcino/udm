@@ -118,6 +118,8 @@ pub struct Settings {
     pub transport_pref: TransportPref,
     /// Enable the QUIC/HTTP3 stack at all.
     pub http3_enabled: bool,
+    /// Opt-in direct Http12 family paths; inactive while H3 is eligible (S2).
+    pub dual_stack_paths: bool,
     /// Remember `Alt-Svc: h3` advertisements and reuse them.
     pub learn_alt_svc: bool,
     /// Seconds a cached `Alt-Svc` entry stays usable at most.
@@ -196,6 +198,7 @@ impl Default for Settings {
             categories: None,
             transport_pref: TransportPref::Auto,
             http3_enabled: true,
+            dual_stack_paths: false,
             learn_alt_svc: true,
             alt_svc_max_age_secs: 24 * 3600,
             use_system_proxy: true,
@@ -364,6 +367,10 @@ impl Settings {
                     "auto_categorize" => self.auto_categorize = b,
                     _ => unreachable!(),
                 }
+            }
+            "dual_stack_paths" => {
+                self.dual_stack_paths = parse_bool(value)
+                    .ok_or_else(|| Error::Other(format!("`{value}` is not true/false")))?;
             }
             "categories" => {
                 // The whole rule set as JSON (same shape as stored). It is

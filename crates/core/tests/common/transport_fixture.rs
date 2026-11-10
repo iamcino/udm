@@ -43,12 +43,16 @@ pub struct Event {
 pub struct Barrier {
     release: watch::Sender<u8>,
     pub events: Arc<Mutex<Vec<Event>>>,
+    pub fault: Arc<Mutex<Option<&'static str>>>,
+    pub at_bytes: Arc<AtomicU64>,
 }
 impl Barrier {
     fn new() -> Self {
         Self {
             release: watch::channel(3).0,
             events: Arc::default(),
+            fault: Arc::default(),
+            at_bytes: Arc::new(AtomicU64::new(1024)),
         }
     }
     pub fn hold(&self) {
@@ -58,9 +62,13 @@ impl Barrier {
         self.release.send_replace(stage);
     }
     async fn arrive(&self, mut event: Event, stage: u8, bytes: usize) {
+        let small_probe = event.range.as_deref() == Some("bytes=0-0");
         event.stage = stage;
         event.bytes = bytes;
         self.events.lock().unwrap().push(event);
+        if small_probe {
+            return;
+        }
         let mut receiver = self.release.subscribe();
         tokio::time::timeout(Duration::from_secs(30), async {
             while *receiver.borrow_and_update() < stage {
@@ -179,10 +187,89 @@ impl Fixture {
                         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
                         while let Some(Ok((request, mut respond))) = conn.accept().await {
                             let request = request.map(|_| ());
-                            let (headers, body) = response(&request);
+                            let (mut headers, mut body) = response(&request);
+                            match *gate.fault.lock().unwrap() {
+                                Some("no-validator") => {
+                                    headers.headers_mut().remove("etag");
+                                }
+                                Some("weak-bound") => {
+                                    headers
+                                        .headers_mut()
+                                        .insert("etag", "W/\"fixed\"".parse().unwrap());
+                                }
+                                Some("vary-bound") => {
+                                    headers
+                                        .headers_mut()
+                                        .insert("vary", "Cookie".parse().unwrap());
+                                }
+                                _ => {}
+                            }
+                            let small = request
+                                .headers()
+                                .get("range")
+                                .is_some_and(|r| r == "bytes=0-0");
+                            if !small && request.method() != http::Method::HEAD {
+                                match *gate.fault.lock().unwrap() {
+                                    Some("etag") => {
+                                        headers
+                                            .headers_mut()
+                                            .insert("etag", "\"changed\"".parse().unwrap());
+                                    }
+                                    Some("weak") => {
+                                        headers
+                                            .headers_mut()
+                                            .insert("etag", "W/\"fixed\"".parse().unwrap());
+                                    }
+                                    Some("missing") => {
+                                        headers.headers_mut().remove("etag");
+                                    }
+                                    Some("total") => {
+                                        headers.headers_mut().insert(
+                                            "content-range",
+                                            format!("bytes 0-0/{}", SIZE + 1).parse().unwrap(),
+                                        );
+                                    }
+                                    Some("interval") => {
+                                        headers.headers_mut().insert(
+                                            "content-range",
+                                            format!("bytes 1-1/{SIZE}").parse().unwrap(),
+                                        );
+                                    }
+                                    Some("short") => {
+                                        body = body.slice(..body.len() / 2);
+                                    }
+                                    Some("excess") => {
+                                        let mut b = body.to_vec();
+                                        b.push(42);
+                                        body = b.into();
+                                    }
+                                    Some("200") => {
+                                        *headers.status_mut() = http::StatusCode::OK;
+                                    }
+                                    Some("416") => {
+                                        *headers.status_mut() =
+                                            http::StatusCode::RANGE_NOT_SATISFIABLE;
+                                    }
+                                    Some("coding") => {
+                                        headers
+                                            .headers_mut()
+                                            .insert("content-encoding", "gzip".parse().unwrap());
+                                    }
+                                    Some("vary") => {
+                                        headers
+                                            .headers_mut()
+                                            .insert("vary", "Cookie".parse().unwrap());
+                                    }
+                                    _ => {}
+                                }
+                            }
                             let evidence = event(&request, id, family, "h2");
                             let head = request.method() == http::Method::HEAD;
                             let mut send = respond.send_response(headers, head).unwrap();
+                            let goaway = !small && *gate.fault.lock().unwrap() == Some("goaway");
+                            if goaway {
+                                conn.graceful_shutdown();
+                            }
                             if head {
                                 continue;
                             }
@@ -202,9 +289,15 @@ impl Fixture {
                                     if end == offset {
                                         continue;
                                     }
-                                    send.send_data(body.slice(offset..end), false).unwrap();
+                                    if send.send_data(body.slice(offset..end), false).is_err() {
+                                        return;
+                                    }
                                     offset = end;
-                                    if offset == 1024 {
+                                    if goaway && offset >= 1024 {
+                                        send.send_reset(h2::Reason::CANCEL);
+                                        return;
+                                    }
+                                    if offset == gate.at_bytes.load(Ordering::Relaxed) as usize {
                                         gate.arrive(evidence.clone(), 2, offset).await;
                                     }
                                 }
@@ -296,8 +389,12 @@ impl Fixture {
             "src/engine/proof.rs",
             "src/net/stack.rs",
             "src/net/lane.rs",
+            "src/net/http12.rs",
+            "src/config.rs",
+            "src/store/records.rs",
             "src/net/h3.rs",
             "tests/transport_proof_a.rs",
+            "tests/transport_s1.rs",
             "tests/common/transport_fixture.rs",
         ]
         .into_iter()
@@ -312,7 +409,7 @@ impl Fixture {
             "a":self.v4,"aaaa":self.v6,"h3_v4":self.h3,"ranges":RANGES,
             "certificate_sha256":hex::encode(Sha256::digest(self.ca.ca_der())),
             "failure_schedule":"headers,1024 bytes,body complete; explicit release",
-            "source_base":"1c04ec6","source_head":String::from_utf8_lossy(&source.stdout).trim(),"source_files":source_hashes,"binary_sha256":hex::encode(Sha256::digest(std::fs::read(std::env::current_exe().unwrap()).unwrap()))})
+            "source_base":"08b2607","source_head":String::from_utf8_lossy(&source.stdout).trim(),"source_files":source_hashes,"binary_sha256":hex::encode(Sha256::digest(std::fs::read(std::env::current_exe().unwrap()).unwrap()))})
     }
 }
 impl Drop for Fixture {

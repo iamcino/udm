@@ -132,24 +132,8 @@ macro_rules! deferred {
     };
 }
 deferred!(
-    a1_not_run,
-    "NOT RUN: S1 two pinned engine paths and S2 mixed route not authorized"
-);
-deferred!(
-    a2_not_run,
-    "NOT RUN: S1 joined per-range family reclaim not authorized"
-);
-deferred!(
-    a3_not_run,
-    "NOT RUN: cross-path validator mismatch requires S1; existing representation suite retained"
-);
-deferred!(
-    a4_not_run,
-    "NOT RUN: cross-path range/body faults require S1; existing representation suite retained"
-);
-deferred!(
-    a5_not_run,
-    "NOT RUN: multipath admission requires S1; coding gates remain covered by existing suite"
+    a1_s2_mixed_not_run,
+    "NOT RUN: S2 mixed H3 route; S1 Http12 pair covered in transport_s1.rs"
 );
 deferred!(
     a6_not_run,
@@ -162,18 +146,6 @@ deferred!(
 deferred!(
     a8_not_run,
     "NOT RUN: S2 logical Alt-Svc cache key and frozen epoch not authorized"
-);
-deferred!(
-    a9_not_run,
-    "NOT RUN: S1 range allocation epochs and surviving sibling not authorized"
-);
-deferred!(
-    a10_not_run,
-    "NOT RUN: S1 multipath commit/reclaim crash barriers not authorized"
-);
-deferred!(
-    a11_not_run,
-    "NOT RUN: S1 family pin and eligibility policy not authorized"
 );
 deferred!(
     a12_probe_not_pass_case,

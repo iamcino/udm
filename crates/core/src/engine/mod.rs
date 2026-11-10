@@ -121,6 +121,7 @@ pub struct TaskSnapshot {
     pub active_requests: u32,
     pub error: Option<String>,
     pub transport: Option<TransportKind>,
+    pub transport_summary: crate::store::records::TransportSummary,
     pub created_at: i64,
     pub started_at: Option<i64>,
     pub finished_at: Option<i64>,
@@ -234,6 +235,10 @@ pub(crate) struct TaskCell {
     pub received: AtomicU64,
     pub(super) active_requests: AtomicU32,
     pub(super) lanes: Arc<crate::net::lane::LaneTable>,
+    /// Scheduler-owned per-range leases. Changed only after the old worker joins.
+    pub(super) allocation_epochs: Mutex<Vec<u64>>,
+    pub(super) storage_failure: Mutex<Option<(u64, String)>>,
+    pub(super) uses_family_paths: AtomicBool,
     proof_barrier: Mutex<Option<Arc<proof::ProofBarrier>>>,
     /// Runtime run generation (Usagi PR 3). `spawn_task` advances it once per
     /// granted run, and only after the previous run has drained (`running`).
@@ -299,6 +304,9 @@ impl TaskCell {
             received: AtomicU64::new(received),
             active_requests: AtomicU32::new(0),
             lanes: Arc::new(crate::net::lane::LaneTable::default()),
+            allocation_epochs: Mutex::new(Vec::new()),
+            storage_failure: Mutex::new(None),
+            uses_family_paths: AtomicBool::new(false),
             proof_barrier: Mutex::new(None),
             generation: AtomicU64::new(0),
             persist_epoch: AtomicU64::new(0),
@@ -325,6 +333,21 @@ impl TaskCell {
                 stale: generation,
                 current,
             })
+        }
+    }
+
+    pub(super) fn allocation_fence(&self, index: usize, epoch: u64) -> Result<()> {
+        if self
+            .allocation_epochs
+            .lock()
+            .get(index)
+            .copied()
+            .unwrap_or(0)
+            == epoch
+        {
+            Ok(())
+        } else {
+            Err(Error::Cancelled)
         }
     }
 
@@ -389,6 +412,7 @@ impl TaskCell {
             active_requests: self.active_requests.load(Ordering::Relaxed),
             error: record.error.clone(),
             transport: record.transport,
+            transport_summary: record.transport_summary.clone(),
             created_at: record.created_at,
             started_at: record.started_at,
             finished_at: record.finished_at,
@@ -615,6 +639,52 @@ impl SharedState {
         self.save_locked(&[cell], durable, generation)
     }
 
+    /// Called only after this range's writer has joined. The persistence mutex
+    /// prevents a concurrent save from re-publishing its uncommitted cursor.
+    /// The DB receipt, never live progress, is the handoff source.
+    pub(super) fn reclaim_range(
+        &self,
+        cell: &TaskCell,
+        generation: u64,
+        index: usize,
+    ) -> Result<u64> {
+        let _persistence = self.persistence.lock();
+        let stored = self
+            .store
+            .get_task(cell.id)?
+            .ok_or(Error::NotFound(cell.id))?;
+        let committed = self.store.get_segments(cell.id)?;
+        let record = cell.record.read();
+        let mut segments = cell.segments.write();
+        cell.fence(generation)?;
+        if stored.representation_bound != record.representation_bound {
+            return Err(Error::RemoteChanged);
+        }
+        let range = segments
+            .get_mut(index)
+            .ok_or_else(|| Error::Other("missing reclaimed range".into()))?;
+        let prefix = committed.get(index).filter(|s| {
+            stored.progress_checkpoint.is_some() && s.start == range.start && s.end == range.end
+        });
+        range.done = prefix.map_or(0, |s| s.done);
+        range.finished = prefix.is_some_and(|s| s.finished);
+        let mut epochs = cell.allocation_epochs.lock();
+        epochs[index] += 1;
+        let epoch = epochs[index];
+        range.allocation_epoch = epoch;
+        cell.lanes.allocation(
+            generation,
+            index,
+            epoch,
+            "reclaim-committed-prefix",
+            range.done,
+        );
+        cell.received
+            .store(segments.iter().map(|s| s.done).sum(), Ordering::Relaxed);
+        cell.bump_persist_epoch();
+        Ok(epoch)
+    }
+
     fn prepare_checkpoint(
         &self,
         cell: &TaskCell,
@@ -788,6 +858,20 @@ impl SharedState {
                     snap.cell.dirty.store(true, Ordering::Relaxed);
                 }
                 return Err(error);
+            }
+            for snap in &ready {
+                let epochs = snap.cell.allocation_epochs.lock();
+                for (index, range) in snap.segments.iter().enumerate() {
+                    if !epochs.is_empty() {
+                        snap.cell.lanes.allocation(
+                            snap.cell.generation.load(Ordering::Acquire),
+                            index,
+                            epochs.get(index).copied().unwrap_or(0),
+                            "checkpoint-committed",
+                            range.done,
+                        );
+                    }
+                }
             }
             for (snap, record) in ready.iter().zip(&records) {
                 if record.progress_checkpoint.is_some() {
@@ -982,6 +1066,21 @@ impl SharedState {
             }
             Err(e) => {
                 tracing::warn!("progress flush failed: {e}");
+                // A failed checkpoint is storage failure, not a dead route.
+                // S1 must drain both writers before publishing that error.
+                self.stop_family_writers_for_storage(&refs, &e);
+            }
+        }
+    }
+
+    fn stop_family_writers_for_storage(&self, cells: &[&TaskCell], error: &Error) {
+        for cell in cells {
+            if cell.uses_family_paths.load(Ordering::Acquire)
+                && cell.running.load(Ordering::Acquire)
+            {
+                *cell.storage_failure.lock() =
+                    Some((cell.generation.load(Ordering::Acquire), error.short()));
+                cell.token().cancel();
             }
         }
     }
@@ -993,6 +1092,7 @@ impl SharedState {
         let refs: Vec<&TaskCell> = cells.iter().map(|cell| cell.as_ref()).collect();
         if let Err(e) = self.save_locked(&refs, true, None) {
             tracing::error!("final flush failed: {e}");
+            self.stop_family_writers_for_storage(&refs, &e);
         }
     }
 }
