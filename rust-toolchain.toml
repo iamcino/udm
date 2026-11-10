@@ -5,4 +5,4 @@ components = ["rustfmt", "clippy"]
 #   rustup target add x86_64-pc-windows-msvc
 # Cross-compiling from Linux:
 #   rustup target add x86_64-pc-windows-gnu
-targets = []
+targets = ["x86_64-pc-windows-gnu"]
