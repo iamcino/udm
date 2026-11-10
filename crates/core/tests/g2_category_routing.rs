@@ -133,14 +133,19 @@ fn retry_and_wait(engine: &Engine, id: u64) -> usagi::TaskSnapshot {
     engine.retry(id).unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     loop {
-        if engine.drain_events(256).iter().any(|event| matches!(
-            event,
-            usagi::Event::TaskStateChanged { id: event_id, state: TaskState::Queued }
-                if *event_id == id
-        )) {
+        if engine.drain_events(256).iter().any(|event| {
+            matches!(
+                event,
+                usagi::Event::TaskStateChanged { id: event_id, state: TaskState::Queued }
+                    if *event_id == id
+            )
+        }) {
             return wait_terminal(engine, id);
         }
-        assert!(std::time::Instant::now() < deadline, "retry command was not acknowledged for {id}");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "retry command was not acknowledged for {id}"
+        );
         thread::sleep(Duration::from_millis(5));
     }
 }
@@ -160,7 +165,9 @@ fn content_disposition_wins_and_routes_by_category() {
     // URL says .bin; Content-Disposition says .mp3 -> Music wins.
     let port = serve(payload.clone(), Some("song.mp3".into()), 6);
     let id = engine
-        .add(AddRequest::new(format!("http://127.0.0.1:{port}/payload.bin")))
+        .add(AddRequest::new(format!(
+            "http://127.0.0.1:{port}/payload.bin"
+        )))
         .unwrap();
     let task = wait_terminal(&engine, id);
     assert_eq!(task.state, TaskState::Completed, "error: {:?}", task.error);
@@ -196,10 +203,7 @@ fn explicit_destination_equal_to_default_bypasses_routing() {
     let payload = vec![0x22u8; 8192];
     let port = serve(payload.clone(), None, 6);
     let id = engine
-        .add(
-            AddRequest::new(format!("http://127.0.0.1:{port}/song.mp3"))
-                .dest_dir(root.clone()),
-        )
+        .add(AddRequest::new(format!("http://127.0.0.1:{port}/song.mp3")).dest_dir(root.clone()))
         .unwrap();
     let task = wait_terminal(&engine, id);
     assert_eq!(task.state, TaskState::Completed, "error: {:?}", task.error);
@@ -217,10 +221,7 @@ fn settings_change_after_enqueue_does_not_reroute() {
     let port = serve(payload.clone(), None, 6);
     // Enqueue paused: the snapshot freezes here.
     let id = engine
-        .add(
-            AddRequest::new(format!("http://127.0.0.1:{port}/song.mp3"))
-                .start_paused(true),
-        )
+        .add(AddRequest::new(format!("http://127.0.0.1:{port}/song.mp3")).start_paused(true))
         .unwrap();
     // Owner turns auto off AND replaces the rules entirely.
     let mut settings = engine.settings();
@@ -244,7 +245,10 @@ fn settings_change_after_enqueue_does_not_reroute() {
     assert_eq!(task.state, TaskState::Completed, "error: {:?}", task.error);
     let root = dir.path().join("downloads");
     // The enqueue-time snapshot (default rules -> Music) wins.
-    assert_eq!(PathBuf::from(&task.final_path), root.join("Music").join("song.mp3"));
+    assert_eq!(
+        PathBuf::from(&task.final_path),
+        root.join("Music").join("song.mp3")
+    );
     assert!(!root.join("AudioX").exists());
     engine.shutdown();
 }
@@ -282,10 +286,7 @@ fn failed_route_lock_persist_cannot_be_bypassed_by_retry() {
     // number of engine saves is an implementation detail, so over-arm and
     // clear the fault explicitly between phases.
     let id = engine
-        .add(
-            AddRequest::new(format!("http://127.0.0.1:{port}/song.mp3"))
-                .start_paused(true),
-        )
+        .add(AddRequest::new(format!("http://127.0.0.1:{port}/song.mp3")).start_paused(true))
         .unwrap();
     // Arm AFTER the enqueue persists: the fault targets the route-lock
     // write (and everything after it), not the add itself.
@@ -427,10 +428,7 @@ fn failed_save_keeps_original_name_and_route_unpublished() {
     let payload = vec![0x88u8; 8192];
     let port = serve(payload.clone(), None, 64);
     let id = engine
-        .add(
-            AddRequest::new(format!("http://127.0.0.1:{port}/archive.tar.gz"))
-                .start_paused(true),
-        )
+        .add(AddRequest::new(format!("http://127.0.0.1:{port}/archive.tar.gz")).start_paused(true))
         .unwrap();
     engine.store().set_save_failure(true);
     engine.resume(id).unwrap();

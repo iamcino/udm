@@ -98,7 +98,9 @@ fn gets(requests: &[String]) -> Vec<String> {
 
 fn read_headers(stream: &mut TcpStream) -> String {
     stream.set_nonblocking(false).unwrap();
-    stream.set_read_timeout(Some(Duration::from_secs(8))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(8)))
+        .unwrap();
     stream.set_nodelay(true).unwrap();
     let mut request = Vec::new();
     while !request.ends_with(b"\r\n\r\n") {
@@ -150,7 +152,10 @@ fn identity(request: &str, body: &[u8], etag: &str, extra: &str) -> Vec<u8> {
     if spec.is_empty() {
         return reply(
             "200 OK",
-            &format!("Accept-Ranges: bytes\r\nETag: {etag}\r\n{extra}Content-Length: {}", body.len()),
+            &format!(
+                "Accept-Ranges: bytes\r\nETag: {etag}\r\n{extra}Content-Length: {}",
+                body.len()
+            ),
             body,
         );
     }
@@ -325,15 +330,23 @@ fn plant(root: &Path, seed: Planted) -> u64 {
             .create(true)
             .open(record.part_path())
             .unwrap();
-        let len = seed.total.unwrap_or(seed.done).max(seed.done).max(seed.prefix.len() as u64);
+        let len = seed
+            .total
+            .unwrap_or(seed.done)
+            .max(seed.done)
+            .max(seed.prefix.len() as u64);
         file.set_len(len).unwrap();
         file.write_all(&seed.prefix).unwrap();
         file.sync_all().unwrap();
         if seed.done > 0 {
-            record.prepare_progress_checkpoint(&segments, &file).unwrap();
+            record
+                .prepare_progress_checkpoint(&segments, &file)
+                .unwrap();
         }
     }
-    store.save(std::slice::from_ref(&record), &[(id, segments)], true).unwrap();
+    store
+        .save(std::slice::from_ref(&record), &[(id, segments)], true)
+        .unwrap();
     id
 }
 
@@ -377,7 +390,11 @@ fn unbound_accept_ranges_plans_one_segment_and_one_worker() {
     let file = std::fs::read(&task.final_path).unwrap();
     assert_eq!(sha256(&file), sha256(&vec![0x5Au8; 8 * 64 * 1024]));
     let gets = gets(&server.requests());
-    assert_eq!(gets.len(), 1, "unbound Accept-Ranges started more than one worker: {gets:?}");
+    assert_eq!(
+        gets.len(),
+        1,
+        "unbound Accept-Ranges started more than one worker: {gets:?}"
+    );
     assert!(
         gets[0].to_ascii_lowercase().contains("range: bytes=0-"),
         "the single worker did not cover the file from offset 0: {}",
@@ -394,7 +411,11 @@ fn unbound_accept_ranges_plans_one_segment_and_one_worker() {
 fn weak_etag_and_last_modified_are_not_if_range() {
     let dir = tempfile::tempdir().unwrap();
     let body = vec![0x11u8; 2 * 64 * 1024];
-    let server = spawn_body(body.clone(), "W/\"abc\"", "Last-Modified: Wed, 21 Oct 2015 07:28:00 GMT");
+    let server = spawn_body(
+        body.clone(),
+        "W/\"abc\"",
+        "Last-Modified: Wed, 21 Oct 2015 07:28:00 GMT",
+    );
     let (engine, id) = download(dir.path(), &server.url("weak.bin"), "weak.bin");
     let task = wait_terminal(&engine, id, 10);
     assert_eq!(task.state, TaskState::Completed, "{:?}", task.error);
@@ -402,7 +423,11 @@ fn weak_etag_and_last_modified_are_not_if_range() {
     let gets = gets(&server.requests());
     assert_eq!(gets.len(), 1, "{gets:?}");
     let lower = gets[0].to_ascii_lowercase();
-    assert!(!lower.contains("if-range"), "weak tag or Last-Modified was sent as If-Range: {}", gets[0]);
+    assert!(
+        !lower.contains("if-range"),
+        "weak tag or Last-Modified was sent as If-Range: {}",
+        gets[0]
+    );
     assert!(!gets[0].contains("Wed, 21 Oct 2015"));
     let stored = engine.store().get_task(id).unwrap().unwrap();
     assert!(stored.representation_bound.is_none());
@@ -421,7 +446,10 @@ fn vary_user_agent_does_not_bind() {
     assert_eq!(std::fs::read(&task.final_path).unwrap(), body);
     assert_eq!(gets(&server.requests()).len(), 1);
     let stored = engine.store().get_task(id).unwrap().unwrap();
-    assert!(stored.representation_bound.is_none(), "Vary: User-Agent published a bound");
+    assert!(
+        stored.representation_bound.is_none(),
+        "Vary: User-Agent published a bound"
+    );
     assert_eq!(stored.segments_planned, 1);
     let seen = server.requests();
     let get = &gets(&seen)[0];
@@ -456,11 +484,17 @@ fn gzip_on_the_segment_response_is_terminal() {
     assert!(error.contains("encoded the body"), "{error}");
     assert_eq!(task.received, 0);
     let stored = engine.store().get_task(id).unwrap().unwrap();
-    assert_eq!(stored.representation_restarts, 0, "coding must not spend the restart budget");
+    assert_eq!(
+        stored.representation_restarts, 0,
+        "coding must not spend the restart budget"
+    );
     let part = stored.part_path();
     if part.exists() {
         let bytes = std::fs::read(&part).unwrap();
-        assert!(!bytes.windows(8).any(|window| window == b"GZIPBODY"), "gzip body was written");
+        assert!(
+            !bytes.windows(8).any(|window| window == b"GZIPBODY"),
+            "gzip body was written"
+        );
     }
     engine.shutdown();
 }
@@ -495,7 +529,10 @@ fn none_to_some_before_any_flushed_byte_upgrades() {
     assert_eq!(task.state, TaskState::Completed, "{:?}", task.error);
     assert_eq!(std::fs::read(&task.final_path).unwrap(), b"upgrade-me");
     let stored = engine.store().get_task(id).unwrap().unwrap();
-    assert_eq!(stored.representation_restarts, 0, "the initial upgrade must not restart");
+    assert_eq!(
+        stored.representation_restarts, 0,
+        "the initial upgrade must not restart"
+    );
     let bound = stored.representation_bound.expect("a strong tag binds");
     assert_eq!(bound.total_size, Some(b"upgrade-me".len() as u64));
     assert_eq!(bound.strong_etag, "\"v\"");
@@ -542,7 +579,11 @@ fn none_to_some_after_a_flushed_byte_restarts() {
 fn legacy_none_restarts_from_zero_despite_a_stored_etag() {
     let dir = tempfile::tempdir().unwrap();
     let body = b"brand-new".to_vec();
-    let server = spawn_body(body.clone(), "\"stored\"", "Last-Modified: Wed, 21 Oct 2015 07:28:00 GMT");
+    let server = spawn_body(
+        body.clone(),
+        "\"stored\"",
+        "Last-Modified: Wed, 21 Oct 2015 07:28:00 GMT",
+    );
     let url = server.url("legacy.bin");
     let mut seed = Planted::paused(&url);
     seed.total = Some(body.len() as u64);
@@ -556,9 +597,16 @@ fn legacy_none_restarts_from_zero_despite_a_stored_etag() {
     engine.resume(id).unwrap();
     let task = wait_terminal(&engine, id, 10);
     assert_eq!(task.state, TaskState::Completed, "{:?}", task.error);
-    assert_eq!(std::fs::read(&task.final_path).unwrap(), body, "legacy progress was appended");
+    assert_eq!(
+        std::fs::read(&task.final_path).unwrap(),
+        body,
+        "legacy progress was appended"
+    );
     let stored = engine.store().get_task(id).unwrap().unwrap();
-    assert_eq!(stored.representation_restarts, 0, "legacy discard is not the mismatch budget");
+    assert_eq!(
+        stored.representation_restarts, 0,
+        "legacy discard is not the mismatch budget"
+    );
     let seen = server.requests();
     let ranges: Vec<_> = gets(&seen)
         .iter()
@@ -575,7 +623,11 @@ fn legacy_none_restarts_from_zero_despite_a_stored_etag() {
 fn bound_partial_resumes_only_the_flushed_range() {
     let dir = tempfile::tempdir().unwrap();
     let body = b"01234567".to_vec();
-    let server = spawn_body(body.clone(), "\"v\"", "Content-Type: application/octet-stream");
+    let server = spawn_body(
+        body.clone(),
+        "\"v\"",
+        "Content-Type: application/octet-stream",
+    );
     let url = server.url("resume.bin");
     let mut seed = Planted::paused(&url);
     seed.total = Some(8);
@@ -597,7 +649,10 @@ fn bound_partial_resumes_only_the_flushed_range() {
     assert_eq!(stored.representation_restarts, 0);
     assert_eq!(stored.representation_bound.unwrap().strong_etag, "\"v\"");
     let get = gets(&server.requests());
-    let ranged = get.iter().find(|request| header(request, "range").is_some()).expect("range");
+    let ranged = get
+        .iter()
+        .find(|request| header(request, "range").is_some())
+        .expect("range");
     assert_eq!(header(ranged, "range"), Some("bytes=4-7"));
     assert_eq!(header(ranged, "if-range"), Some("\"v\""));
     assert!(!ranged.to_ascii_lowercase().contains("if-range: wed"));
@@ -637,11 +692,25 @@ fn http_200_at_a_nonzero_offset_writes_nothing() {
     let error = task.error.unwrap_or_default();
     assert!(error.contains("ignored the Range"), "{error}");
     let stored = engine.store().get_task(id).unwrap().unwrap();
-    assert_eq!(stored.representation_restarts, 1, "200 at a non-zero offset is not a second restart");
+    assert_eq!(
+        stored.representation_restarts, 1,
+        "200 at a non-zero offset is not a second restart"
+    );
     let part = std::fs::read(stored.part_path()).unwrap();
-    assert_eq!(&part[..4], &[0x11; 4], "the 200 body was written at the old offset");
-    assert!(part[4..].iter().all(|byte| *byte == 0), "the 200 body was appended");
-    assert_eq!(gets(&server.requests()).len(), 1, "the spent budget restarted anyway");
+    assert_eq!(
+        &part[..4],
+        &[0x11; 4],
+        "the 200 body was written at the old offset"
+    );
+    assert!(
+        part[4..].iter().all(|byte| *byte == 0),
+        "the 200 body was appended"
+    );
+    assert_eq!(
+        gets(&server.requests()).len(),
+        1,
+        "the spent budget restarted anyway"
+    );
     engine.shutdown();
 }
 
@@ -727,7 +796,11 @@ fn cancel_after_flushed_bytes_resumes_and_matches_hash() {
         if task.received >= 16 {
             break;
         }
-        assert!(Instant::now() < deadline, "cancel fixture never flushed 16 bytes ({})", task.state.as_str());
+        assert!(
+            Instant::now() < deadline,
+            "cancel fixture never flushed 16 bytes ({})",
+            task.state.as_str()
+        );
         std::thread::sleep(Duration::from_millis(10));
     }
     engine.cancel(id).unwrap();
@@ -736,7 +809,9 @@ fn cancel_after_flushed_bytes_resumes_and_matches_hash() {
         let task = engine.task(id).unwrap();
         let segments = engine.store().get_segments(id).unwrap();
         if task.state == TaskState::Canceled
-            && segments.first().is_some_and(|segment| segment.done == 16 && !segment.finished)
+            && segments
+                .first()
+                .is_some_and(|segment| segment.done == 16 && !segment.finished)
         {
             break;
         }
@@ -827,12 +902,18 @@ fn second_mismatch_fails_without_another_restart() {
     let task = wait_terminal(&engine, id, 10);
     assert_eq!(task.state, TaskState::Failed, "{:?}", task.error);
     let stored = engine.store().get_task(id).unwrap().unwrap();
-    assert_eq!(stored.representation_restarts, 1, "the second mismatch must not spend another restart");
+    assert_eq!(
+        stored.representation_restarts, 1,
+        "the second mismatch must not spend another restart"
+    );
     assert_eq!(
         stored.representation_bound.as_ref().unwrap().strong_etag,
         "\"v1\""
     );
-    assert!(gets(&server.requests()).is_empty(), "the failed mismatch still downloaded");
+    assert!(
+        gets(&server.requests()).is_empty(),
+        "the failed mismatch still downloaded"
+    );
     let part = std::fs::read(stored.part_path()).unwrap();
     assert_eq!(&part[..4], &[0x11; 4]);
     engine.shutdown();
@@ -857,7 +938,11 @@ fn quote_only_etag_difference_is_a_mismatch() {
     engine.resume(id).unwrap();
     let task = wait_terminal(&engine, id, 10);
     assert_eq!(task.state, TaskState::Completed, "{:?}", task.error);
-    assert_eq!(std::fs::read(&task.final_path).unwrap(), body, "quote-only tags were treated as the same validator");
+    assert_eq!(
+        std::fs::read(&task.final_path).unwrap(),
+        body,
+        "quote-only tags were treated as the same validator"
+    );
     let stored = engine.store().get_task(id).unwrap().unwrap();
     assert_eq!(stored.representation_restarts, 1);
     assert_eq!(stored.representation_bound.unwrap().strong_etag, "abc");
@@ -886,8 +971,15 @@ fn query_in_the_final_url_is_part_of_the_bound() {
     assert_eq!(task.state, TaskState::Completed, "{:?}", task.error);
     assert_eq!(std::fs::read(&task.final_path).unwrap(), body);
     let stored = engine.store().get_task(id).unwrap().unwrap();
-    assert_eq!(stored.representation_restarts, 1, "a different query was treated as the same representation");
-    assert!(stored.representation_bound.unwrap().final_url.contains("token=secret"));
+    assert_eq!(
+        stored.representation_restarts, 1,
+        "a different query was treated as the same representation"
+    );
+    assert!(stored
+        .representation_bound
+        .unwrap()
+        .final_url
+        .contains("token=secret"));
     engine.shutdown();
 }
 
@@ -905,16 +997,28 @@ fn resume_does_not_zero_representation_restarts_and_retry_does() {
     let engine = start(root, false);
     engine.resume(id).unwrap();
     let stored = wait_budget(&engine, id, 5, 1);
-    assert_eq!(stored.representation_restarts, 1, "resume zeroed the representation budget");
-    assert_eq!(stored.attempts, 5, "resume reset the network attempt counter");
+    assert_eq!(
+        stored.representation_restarts, 1,
+        "resume zeroed the representation budget"
+    );
+    assert_eq!(
+        stored.attempts, 5,
+        "resume reset the network attempt counter"
+    );
     engine.shutdown();
     drop(engine);
 
     let engine = start(root, false);
     engine.retry(id).unwrap();
     let stored = wait_budget(&engine, id, 1, 0);
-    assert_eq!(stored.representation_restarts, 0, "retry must zero the representation budget");
-    assert_eq!(stored.attempts, 1, "retry zeroes attempts in the same write, then the failed run records one");
+    assert_eq!(
+        stored.representation_restarts, 0,
+        "retry must zero the representation budget"
+    );
+    assert_eq!(
+        stored.attempts, 1,
+        "retry zeroes attempts in the same write, then the failed run records one"
+    );
     engine.shutdown();
 }
 
@@ -923,7 +1027,9 @@ fn wait_budget(engine: &Engine, id: u64, attempts: u32, restarts: u32) -> TaskRe
     loop {
         let task = engine.task(id).unwrap();
         let stored = engine.store().get_task(id).unwrap().unwrap();
-        if task.state == TaskState::Failed && stored.attempts == attempts && stored.representation_restarts == restarts
+        if task.state == TaskState::Failed
+            && stored.attempts == attempts
+            && stored.representation_restarts == restarts
         {
             return stored;
         }
@@ -960,7 +1066,8 @@ fn h3_fallback_keeps_the_bound_and_the_partial() {
             let listener = tokio::net::TcpListener::from_std(listener).unwrap();
             let acceptor = tokio_rustls::TlsAcceptor::from(config);
             while !flag.load(Ordering::SeqCst) {
-                let accepted = tokio::time::timeout(Duration::from_millis(50), listener.accept()).await;
+                let accepted =
+                    tokio::time::timeout(Duration::from_millis(50), listener.accept()).await;
                 let Ok(Ok((tcp, _))) = accepted else {
                     continue;
                 };
@@ -1018,7 +1125,10 @@ fn h3_fallback_keeps_the_bound_and_the_partial() {
     assert_eq!(file, body);
     assert_eq!(sha256(&file), sha256(&body));
     let stored = engine.store().get_task(id).unwrap().unwrap();
-    assert_eq!(stored.representation_restarts, 1, "H3 fallback zeroed the representation budget");
+    assert_eq!(
+        stored.representation_restarts, 1,
+        "H3 fallback zeroed the representation budget"
+    );
     assert_eq!(stored.representation_bound.unwrap().strong_etag, "\"h3\"");
     let seen = requests.lock().unwrap().clone();
     let ranges: Vec<_> = gets(&seen)

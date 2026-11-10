@@ -33,17 +33,15 @@ pub fn describe(browser: &str, ext_id: &str) -> Option<BrowserSpec> {
         "chrome" => Some(BrowserSpec {
             browser: "chrome",
             host_name: "pw.cino.udm.handoff.chrome",
-            registry_key:
-                r"Software\Google\Chrome\NativeMessagingHosts\pw.cino.udm.handoff.chrome"
-                    .to_string(),
+            registry_key: r"Software\Google\Chrome\NativeMessagingHosts\pw.cino.udm.handoff.chrome"
+                .to_string(),
             caller: format!("chrome:{ext_id}"),
         }),
         "firefox" => Some(BrowserSpec {
             browser: "firefox",
             host_name: "pw.cino.udm.handoff.firefox",
-            registry_key:
-                r"Software\Mozilla\NativeMessagingHosts\pw.cino.udm.handoff.firefox"
-                    .to_string(),
+            registry_key: r"Software\Mozilla\NativeMessagingHosts\pw.cino.udm.handoff.firefox"
+                .to_string(),
             caller: format!("firefox:{ext_id}"),
         }),
         _ => None,
@@ -91,9 +89,7 @@ fn sidecar_path() -> std::io::Result<std::path::PathBuf> {
 
 pub fn run(args: &[String]) -> i32 {
     match args.first().map(String::as_str) {
-        Some("--register") if args.len() == 3 => {
-            register(&args[1], &args[2])
-        }
+        Some("--register") if args.len() == 3 => register(&args[1], &args[2]),
         Some("--unregister") if args.len() == 2 => unregister(&args[1]),
         _ => {
             eprintln!("usage: udm-host --register <chrome|firefox> <extension-id>");
@@ -207,8 +203,8 @@ fn unregister(browser: &str) -> i32 {
 mod platform {
     use super::BrowserSpec;
     use windows_sys::Win32::System::Registry::{
-        RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegSetValueExW, HKEY,
-        HKEY_CURRENT_USER, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ,
+        RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegSetValueExW, HKEY, HKEY_CURRENT_USER,
+        KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ,
     };
 
     fn to_wide(s: &str) -> Vec<u16> {

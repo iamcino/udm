@@ -1,30 +1,62 @@
 // Regression tests for engine data integrity bugs identified in review-2026-11-04.md.
 // All tests assert CORRECT, expected file content and recovery behavior.
-use std::{io::{Read, Write}, net::TcpListener, path::Path, thread, time::{Duration, Instant}};
-use usagi::{config::Settings, engine::{AddRequest, Engine, EngineBuilder}, paths::Paths,
-    store::{RepresentationBound, Store, TaskRecord, TaskState, SegmentState}};
+use std::{
+    io::{Read, Write},
+    net::TcpListener,
+    path::Path,
+    thread,
+    time::{Duration, Instant},
+};
+use usagi::{
+    config::Settings,
+    engine::{AddRequest, Engine, EngineBuilder},
+    paths::Paths,
+    store::{RepresentationBound, SegmentState, Store, TaskRecord, TaskState},
+};
 
 fn engine(root: &Path) -> Engine {
-    let paths = Paths { root: root.into(), db_file: root.join("test.redb"),
-        log_file: root.join("logs/test.log"), temp_dir: root.join("tmp"),
-        default_download_dir: root.join("downloads"), portable: true, exe_dir: Some(root.into()) };
-    let settings = Settings { http3_enabled: false, use_system_proxy: false,
-        segments_per_task: 1, max_retries: 2,
-        default_download_dir: root.join("downloads").to_string_lossy().into(), ..Settings::default() };
-    EngineBuilder::new().paths(paths).settings(settings).build().unwrap()
+    let paths = Paths {
+        root: root.into(),
+        db_file: root.join("test.redb"),
+        log_file: root.join("logs/test.log"),
+        temp_dir: root.join("tmp"),
+        default_download_dir: root.join("downloads"),
+        portable: true,
+        exe_dir: Some(root.into()),
+    };
+    let settings = Settings {
+        http3_enabled: false,
+        use_system_proxy: false,
+        segments_per_task: 1,
+        max_retries: 2,
+        default_download_dir: root.join("downloads").to_string_lossy().into(),
+        ..Settings::default()
+    };
+    EngineBuilder::new()
+        .paths(paths)
+        .settings(settings)
+        .build()
+        .unwrap()
 }
 
 fn wait(engine: &Engine, id: u64) -> usagi::engine::TaskSnapshot {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         let task = engine.task(id).unwrap();
-        if task.state.is_terminal() { return task; }
+        if task.state.is_terminal() {
+            return task;
+        }
         assert!(Instant::now() < deadline, "timed out: {:?}", task.state);
         thread::sleep(Duration::from_millis(20));
     }
 }
 
-fn server(total: usize, first: usize, body: Vec<u8>, status: &str) -> (String, thread::JoinHandle<()>) {
+fn server(
+    total: usize,
+    first: usize,
+    body: Vec<u8>,
+    status: &str,
+) -> (String, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}/file.bin", listener.local_addr().unwrap());
     let status = status.to_string();
@@ -43,7 +75,9 @@ fn server(total: usize, first: usize, body: Vec<u8>, status: &str) -> (String, t
                 }
             };
             stream.set_nonblocking(false).unwrap();
-            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
             let mut request = Vec::new();
             while !request.ends_with(b"\r\n\r\n") {
                 let mut byte = [0];
@@ -63,9 +97,19 @@ fn server(total: usize, first: usize, body: Vec<u8>, status: &str) -> (String, t
             } else {
                 assert!(request.starts_with("GET "));
                 let range = if status.starts_with("206") {
-                    format!("Content-Range: bytes {first}-{}/{total}\r\n", first + body.len() - 1)
-                } else { String::new() };
-                write!(stream, "HTTP/1.1 {status}\r\nContent-Length: {}\r\n{range}Connection: close\r\n\r\n", body.len()).unwrap();
+                    format!(
+                        "Content-Range: bytes {first}-{}/{total}\r\n",
+                        first + body.len() - 1
+                    )
+                } else {
+                    String::new()
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\n{range}Connection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
                 stream.write_all(&body).unwrap();
             }
         }
@@ -92,7 +136,10 @@ fn seed_checkpointed(root: &Path, url: &str) -> u64 {
     let mut task = store.get_task(id).unwrap().unwrap();
     let segments = store.get_segments(id).unwrap();
     std::fs::write(task.part_path(), b"ABCD\0\0\0\0").unwrap();
-    let file = std::fs::OpenOptions::new().write(true).open(task.part_path()).unwrap();
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(task.part_path())
+        .unwrap();
     // A stored prefix resumes only with a bound. The 200 below is then
     // RangeIgnored, which restarts without spending max_retries.
     task.etag = Some("\"v\"".into());
@@ -125,7 +172,10 @@ fn regression_missing_part_resets_progress_to_zero() {
 fn regression_range_ignored_falls_back_to_single_connection_and_completes() {
     let dir = tempfile::tempdir().unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://{}/range_fallback.bin", listener.local_addr().unwrap());
+    let url = format!(
+        "http://{}/range_fallback.bin",
+        listener.local_addr().unwrap()
+    );
     let server = thread::spawn(move || {
         listener.set_nonblocking(true).unwrap();
         let deadline = Instant::now() + Duration::from_secs(15);
@@ -143,7 +193,9 @@ fn regression_range_ignored_falls_back_to_single_connection_and_completes() {
                 }
             };
             stream.set_nonblocking(false).unwrap();
-            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
             let mut request = Vec::new();
             while !request.ends_with(b"\r\n\r\n") {
                 let mut byte = [0];
@@ -170,7 +222,10 @@ fn regression_range_ignored_falls_back_to_single_connection_and_completes() {
                     // Range ignored: 200 at a non-zero offset restarts from 0.
                     write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: 8\r\nETag: \"v\"\r\nConnection: close\r\n\r\nABCDEFGH").unwrap();
                 } else {
-                    assert!(request.to_ascii_lowercase().contains("range: bytes=0-") || !request.to_ascii_lowercase().contains("range:"));
+                    assert!(
+                        request.to_ascii_lowercase().contains("range: bytes=0-")
+                            || !request.to_ascii_lowercase().contains("range:")
+                    );
                     write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: 8\r\nETag: \"v\"\r\nConnection: close\r\n\r\nABCDEFGH").unwrap();
                 }
             }
@@ -267,7 +322,10 @@ fn regression_delete_never_started_task_does_not_delete_preexisting_file() {
     }
 
     // Preexisting file must NOT be deleted
-    assert!(target.exists(), "preexisting file was unexpectedly deleted!");
+    assert!(
+        target.exists(),
+        "preexisting file was unexpectedly deleted!"
+    );
     assert_eq!(std::fs::read(&target).unwrap(), b"original user file");
     engine.shutdown();
 }
@@ -293,7 +351,9 @@ fn regression_zero_retry_budget_still_performs_range_fallback() {
                 }
             };
             stream.set_nonblocking(false).unwrap();
-            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
             let mut request = Vec::new();
             while !request.ends_with(b"\r\n\r\n") {
                 let mut byte = [0];
@@ -318,7 +378,10 @@ fn regression_zero_retry_budget_still_performs_range_fallback() {
                     );
                     write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: 8\r\nETag: \"v\"\r\nConnection: close\r\n\r\nABCDEFGH").unwrap();
                 } else {
-                    assert!(request.to_ascii_lowercase().contains("range: bytes=0-") || !request.to_ascii_lowercase().contains("range:"));
+                    assert!(
+                        request.to_ascii_lowercase().contains("range: bytes=0-")
+                            || !request.to_ascii_lowercase().contains("range:")
+                    );
                     write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: 8\r\nETag: \"v\"\r\nConnection: close\r\n\r\nABCDEFGH").unwrap();
                 }
             }

@@ -153,7 +153,7 @@ impl Error {
                 | Error::ChecksumMismatch { .. }
                 | Error::Conflict(_)
                 | Error::Route(_)
-                  | Error::Finalize(_)
+                | Error::Finalize(_)
                 | Error::Unsupported(_)
         ) || matches!(self, Error::HttpStatus { status, .. } if (400..500).contains(status) && !matches!(status, 408 | 425 | 429))
     }

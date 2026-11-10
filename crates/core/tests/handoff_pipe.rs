@@ -10,8 +10,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use usagi::error::Result;
 use usagi::handoff::{
-    Coordinator, CoordinatorConfig, EnginePort, HandoffClock, HandoffIntent,
-    MemoryStore,
+    Coordinator, CoordinatorConfig, EnginePort, HandoffClock, HandoffIntent, MemoryStore,
 };
 use usagi::handoff_pipe::{pipe_name, serve, PipeClient};
 

@@ -245,8 +245,9 @@ async fn execute(
     // takes the same path: the lock is re-run from the snapshot.
     let route_pending = cell.record.read().route_unlocked();
 
-    if !crate::net::content_coding_is_identity(crate::net::content_encoding(&probe.headers).as_deref())
-    {
+    if !crate::net::content_coding_is_identity(
+        crate::net::content_encoding(&probe.headers).as_deref(),
+    ) {
         return Err(Error::UnsupportedCoding);
     }
 
@@ -441,11 +442,7 @@ async fn lock_route(ctx: &Arc<RunCtx>, cell: &Arc<TaskCell>, probe: &ProbeInfo) 
                 live.route = staged.route.clone();
             },
         )
-        .map_err(|e| {
-            Error::Route(format!(
-                "could not persist the locked category route: {e}"
-            ))
-        })?;
+        .map_err(|e| Error::Route(format!("could not persist the locked category route: {e}")))?;
     Ok(())
 }
 
@@ -502,7 +499,10 @@ async fn build_plan(ctx: &Arc<RunCtx>, cell: &Arc<TaskCell>, probe: &ProbeInfo) 
 
     let (existing, bound) = {
         let record = cell.record.read();
-        (cell.segments.read().clone(), record.representation_bound.clone())
+        (
+            cell.segments.read().clone(),
+            record.representation_bound.clone(),
+        )
     };
     // Multi-segment planning is allowed only after a full bound exists, and
     // only before those segments receive bytes (a reusable layout already
@@ -546,7 +546,9 @@ async fn build_plan(ctx: &Arc<RunCtx>, cell: &Arc<TaskCell>, probe: &ProbeInfo) 
     // Check if the partial file already exists and inspect its actual size
     // BEFORE creating or expanding it. If the file is missing but segments
     // claim progress, the partial file was deleted and progress must reset.
-    let (file, initial_disk_len) = ctx.state.open_partial(cell.id, ctx.generation, &part_path)?;
+    let (file, initial_disk_len) = ctx
+        .state
+        .open_partial(cell.id, ctx.generation, &part_path)?;
     let file = tokio::fs::File::from_std(file);
 
     // If the partial file is missing or empty while we thought we had data,
@@ -678,8 +680,14 @@ enum SegmentOut {
 impl SegmentOut {
     async fn seek_start(&mut self, offset: u64) -> std::io::Result<()> {
         match self {
-            Self::Plain(file) => file.seek(std::io::SeekFrom::Start(offset)).await.map(|_| ()),
-            Self::Fault(file) => file.seek(std::io::SeekFrom::Start(offset)).await.map(|_| ()),
+            Self::Plain(file) => file
+                .seek(std::io::SeekFrom::Start(offset))
+                .await
+                .map(|_| ()),
+            Self::Fault(file) => file
+                .seek(std::io::SeekFrom::Start(offset))
+                .await
+                .map(|_| ()),
         }
     }
 
@@ -855,7 +863,7 @@ async fn run_segment(
     let mut opened = tokio::select! {
         biased;
         _ = token.cancelled() => return Ok(()),
-        opened = ctx.state.net.open(&spec, plan.pref) => opened?,
+        opened = ctx.state.net.open_observed(&spec, plan.pref, &cell.lanes, cell.id, ctx.generation, index) => opened?,
     };
     let active_request = ActiveRequest::new(&cell);
 
@@ -943,6 +951,13 @@ async fn run_segment(
 
         // Narrow defense: a superseded run writes no further bytes. Overlap is
         // already excluded by drain-before-regrant (`running`).
+        cell.fence(ctx.generation)?;
+        if let Some(gate) = cell.proof_gate(crate::engine::proof::ProofPoint::BeforeWrite) {
+            gate.wait_async(to_write.len() as u64).await;
+            if token.is_cancelled() {
+                return Ok(());
+            }
+        }
         cell.fence(ctx.generation)?;
         file.write_all(to_write)
             .await
@@ -1206,8 +1221,9 @@ fn etag_difference(stored: &str, observed: &str) -> &'static str {
 }
 
 fn bindable_bound(probe: &ProbeInfo) -> Option<crate::store::records::RepresentationBound> {
-    if !crate::net::content_coding_is_identity(crate::net::content_encoding(&probe.headers).as_deref())
-    {
+    if !crate::net::content_coding_is_identity(
+        crate::net::content_encoding(&probe.headers).as_deref(),
+    ) {
         return None;
     }
     if !crate::net::vary_allows_none_scope(crate::net::vary(&probe.headers).as_deref()) {
@@ -1266,7 +1282,9 @@ fn commit_identity(
     let mut record = cell.record.write();
     let segments = cell.segments.write();
     cell.fence(ctx.generation)?;
-    let flushed = segments.iter().any(|segment| segment.done > 0 || segment.finished);
+    let flushed = segments
+        .iter()
+        .any(|segment| segment.done > 0 || segment.finished);
     if let Some(bound) = &new_bound {
         let existing = record.representation_bound.clone();
         if existing.is_none() && flushed {
@@ -1287,7 +1305,11 @@ fn commit_identity(
     record.content_type = probe.content_type.clone();
     if let Some(size) = probe.size {
         record.total_size = Some(size);
-    } else if new_bound.as_ref().and_then(|bound| bound.total_size).is_some() {
+    } else if new_bound
+        .as_ref()
+        .and_then(|bound| bound.total_size)
+        .is_some()
+    {
         record.total_size = new_bound.as_ref().and_then(|bound| bound.total_size);
     }
     record.error = None;
@@ -1301,8 +1323,9 @@ async fn reconcile_representation(
     probe: &ProbeInfo,
     previous: &Previous,
 ) -> Result<()> {
-    if !crate::net::content_coding_is_identity(crate::net::content_encoding(&probe.headers).as_deref())
-    {
+    if !crate::net::content_coding_is_identity(
+        crate::net::content_encoding(&probe.headers).as_deref(),
+    ) {
         return Err(Error::UnsupportedCoding);
     }
     let bound = cell.record.read().representation_bound.clone();
@@ -1435,8 +1458,7 @@ fn confirm_segment_representation(
             };
             plan.bound = Some(updated);
             plan.total = updated_total(plan);
-            ctx.state
-                .persist_owned(cell, true, Some(ctx.generation))?;
+            ctx.state.persist_owned(cell, true, Some(ctx.generation))?;
         }
         (Some(expected), Some(actual)) if expected != actual => {
             tracing::warn!("representation length mismatch");
@@ -1465,8 +1487,11 @@ async fn finish(
     // name.
     // Completion has an empty segment layout. Sync the full backing before
     // rename so its final tail is not exempt from the progress ordering rule.
-    let file = tokio::fs::OpenOptions::new().write(true).open(&plan.part_path)
-        .await.map_err(|e| Error::io(plan.part_path.clone(), e))?;
+    let file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .open(&plan.part_path)
+        .await
+        .map_err(|e| Error::io(plan.part_path.clone(), e))?;
     if ctx.state.take_finish_sync_fault() {
         drop(file);
         return Err(Error::io(
@@ -1474,7 +1499,9 @@ async fn finish(
             std::io::Error::new(std::io::ErrorKind::Other, "injected disk sync failure"),
         ));
     }
-    file.sync_all().await.map_err(|e| Error::io(plan.part_path.clone(), e))?;
+    file.sync_all()
+        .await
+        .map_err(|e| Error::io(plan.part_path.clone(), e))?;
     drop(file);
     let expected = cell.record.read().expected_hash.clone();
     if let Some(expected) = expected.filter(|_| ctx.settings.verify_checksums) {
@@ -1564,9 +1591,12 @@ async fn finish(
         None => {
             set_state(ctx, cell, TaskState::Verifying);
             let digest = hash::hash_file(
-                &plan.part_path, crate::hash::HashAlgo::Blake3,
-                Some(cell.verify_progress.clone()), Some(token.clone()),
-            ).await;
+                &plan.part_path,
+                crate::hash::HashAlgo::Blake3,
+                Some(cell.verify_progress.clone()),
+                Some(token.clone()),
+            )
+            .await;
             cell.verify_progress.store(0, Ordering::Relaxed);
             crate::hash::ExpectedHash::new(crate::hash::HashAlgo::Blake3, digest?)?
         }
@@ -1575,15 +1605,26 @@ async fn finish(
         return Ok(Outcome::Stopped);
     }
     let final_path = ctx.state.finalize_file(
-        cell, ctx.generation, &plan.part_path, &plan.final_path, content, ctx.settings.conflict_policy,
+        cell,
+        ctx.generation,
+        &plan.part_path,
+        &plan.final_path,
+        content,
+        ctx.settings.conflict_policy,
     )?;
     completed(ctx, cell, &plan.part_path, &final_path)
 }
 
 fn completed(
-    ctx: &Arc<RunCtx>, cell: &Arc<TaskCell>, part: &std::path::Path,
+    ctx: &Arc<RunCtx>,
+    cell: &Arc<TaskCell>,
+    part: &std::path::Path,
     final_path: &std::path::Path,
 ) -> Result<Outcome> {
+    // Finalize (or recovery) has returned after its durable completion save.
+    // The write handle follows the rename on Windows and must be closed before
+    // publishing completion so consumers can open/execute the finished file.
+    cell.checkpoint_file.lock().take();
     if let Some(total) = cell.record.read().total_size {
         cell.received.store(total, Ordering::Relaxed);
     }
@@ -1762,7 +1803,12 @@ pub(super) fn publish_exit(ctx: &Arc<RunCtx>, cell: &Arc<TaskCell>, kind: ExitKi
     announce_exit(ctx, cell, final_state, failed);
 }
 
-fn announce_exit(ctx: &Arc<RunCtx>, cell: &Arc<TaskCell>, state: TaskState, failed: Option<String>) {
+fn announce_exit(
+    ctx: &Arc<RunCtx>,
+    cell: &Arc<TaskCell>,
+    state: TaskState,
+    failed: Option<String>,
+) {
     cell.speed.write().reset();
     cell.dirty.store(true, Ordering::Relaxed);
     if let Err(e) = ctx.state.persist_owned(cell, true, Some(ctx.generation)) {
@@ -1772,7 +1818,8 @@ fn announce_exit(ctx: &Arc<RunCtx>, cell: &Arc<TaskCell>, state: TaskState, fail
             format!("#{} cannot persist {what}: {e}", cell.id),
         );
     }
-    ctx.state.emit(Event::TaskStateChanged { id: cell.id, state });
+    ctx.state
+        .emit(Event::TaskStateChanged { id: cell.id, state });
     if let Some(error) = failed {
         ctx.state.emit(Event::TaskFailed {
             id: cell.id,
@@ -1786,7 +1833,11 @@ fn announce_exit(ctx: &Arc<RunCtx>, cell: &Arc<TaskCell>, state: TaskState, fail
         let resumed_from = util::human_bytes(cell.received.load(Ordering::Relaxed) as f64);
         ctx.state.log(
             LogLevel::Info,
-            format!("#{} {} ({resumed_from} kept for resume)", cell.id, state.label()),
+            format!(
+                "#{} {} ({resumed_from} kept for resume)",
+                cell.id,
+                state.label()
+            ),
         );
     }
     ctx.state.emit(Event::QueueChanged);
@@ -1795,7 +1846,11 @@ fn announce_exit(ctx: &Arc<RunCtx>, cell: &Arc<TaskCell>, state: TaskState, fail
 /// Throw away partial progress. The cleared bound, validator, segments, and
 /// size are one mutation and are durable before the partial file is deleted.
 /// `spend_restart` records the one task-level representation restart.
-async fn reset_progress(ctx: &Arc<RunCtx>, cell: &Arc<TaskCell>, spend_restart: bool) -> Result<()> {
+async fn reset_progress(
+    ctx: &Arc<RunCtx>,
+    cell: &Arc<TaskCell>,
+    spend_restart: bool,
+) -> Result<()> {
     // G2: a task whose route is not durably locked owns no partial; never
     // touch its provisional path (Zed G2 review, P2). In-memory progress
     // still resets so a fallback restart begins clean.
@@ -1883,21 +1938,45 @@ mod tests {
         *cell.segments.write() = vec![SegmentState::new(0, 0, 9), SegmentState::new(1, 10, 19)];
         cell.segments.write()[1].done = 4;
         cell.generation.store(3, Ordering::Release);
-        let stale = RunCtx { state: engine.state.clone(), settings: engine.settings(), generation: 2 };
-        let current = RunCtx { state: engine.state.clone(), settings: engine.settings(), generation: 3 };
+        let stale = RunCtx {
+            state: engine.state.clone(),
+            settings: engine.settings(),
+            generation: 2,
+        };
+        let current = RunCtx {
+            state: engine.state.clone(),
+            settings: engine.settings(),
+            generation: 3,
+        };
 
         assert!(matches!(
             mark_finished(&stale, &cell, 0),
-            Err(Error::StaleGeneration { stale: 2, current: 3 })
+            Err(Error::StaleGeneration {
+                stale: 2,
+                current: 3
+            })
         ));
-        assert!(!cell.segments.read()[0].finished, "stale run published coverage");
+        assert!(
+            !cell.segments.read()[0].finished,
+            "stale run published coverage"
+        );
         let stale = Arc::new(stale);
         let refused = reset_progress(&stale, &cell, false).await;
         assert!(
-            matches!(refused, Err(Error::StaleGeneration { stale: 2, current: 3 })),
+            matches!(
+                refused,
+                Err(Error::StaleGeneration {
+                    stale: 2,
+                    current: 3
+                })
+            ),
             "stale reset must be refused, got {refused:?}"
         );
-        assert_eq!(cell.segments.read().len(), 2, "stale run reset current progress");
+        assert_eq!(
+            cell.segments.read().len(),
+            2,
+            "stale run reset current progress"
+        );
         assert_eq!(cell.segments.read()[1].done, 4);
 
         mark_finished(&current, &cell, 0).unwrap();
@@ -1928,7 +2007,11 @@ mod tests {
             .add(AddRequest::new("http://127.0.0.1:9/drain.bin").start_paused(true))
             .unwrap();
         let cell = engine.state.cell(id).unwrap();
-        let ctx = Arc::new(RunCtx { state: engine.state.clone(), settings: engine.settings(), generation: 0 });
+        let ctx = Arc::new(RunCtx {
+            state: engine.state.clone(),
+            settings: engine.settings(),
+            generation: 0,
+        });
         // The revoked run is still draining, so no new run may be admitted.
         cell.running.store(true, Ordering::SeqCst);
         for reason in [stop_reason::PAUSE, stop_reason::CANCEL] {
@@ -1938,7 +2021,11 @@ mod tests {
             cell.record.write().state = TaskState::Queued;
             cell.stop_reason.store(stop_reason::NONE, Ordering::SeqCst);
             stopped(&ctx, &cell);
-            assert_eq!(cell.state(), TaskState::Queued, "resume lost (reason {reason})");
+            assert_eq!(
+                cell.state(),
+                TaskState::Queued,
+                "resume lost (reason {reason})"
+            );
         }
         // Without a resume, the stop is still published.
         cell.record.write().state = TaskState::Downloading;

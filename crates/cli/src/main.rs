@@ -127,8 +127,7 @@ impl From<TransportArg> for TransportPref {
     }
 }
 
-#[derive(Args)]
-#[derive(Clone)]
+#[derive(Args, Clone)]
 struct GetArgs {
     /// One or more http(s) URLs.
     #[arg(required = true)]
@@ -167,8 +166,7 @@ struct GetArgs {
     no_wait: bool,
 }
 
-#[derive(Args)]
-#[derive(Clone)]
+#[derive(Args, Clone)]
 struct ProbeArgs {
     url: String,
 
@@ -185,8 +183,7 @@ struct ProbeArgs {
     headers: bool,
 }
 
-#[derive(Args)]
-#[derive(Clone)]
+#[derive(Args, Clone)]
 struct ImportArgs {
     /// Text file with one URL per line.
     file: PathBuf,
@@ -207,8 +204,7 @@ struct ImportArgs {
     quiet: bool,
 }
 
-#[derive(Args)]
-#[derive(Clone)]
+#[derive(Args, Clone)]
 struct SettingsArgs {
     /// `key=value` pairs, e.g. `segments_per_task=16`.
     pairs: Vec<String>,
@@ -330,7 +326,11 @@ async fn cmd_probe(cli: &Cli, args: ProbeArgs) -> Result<ExitCode> {
     };
 
     let stack = NetStack::new(&settings, Arc::new(MemAltSvc::new()))?;
-    println!("probing {} (transport preference: {})", args.url, pref.as_str());
+    println!(
+        "probing {} (transport preference: {})",
+        args.url,
+        pref.as_str()
+    );
     println!(
         "  HTTP/3 stack in this process: {}",
         if stack.http3_available() {
@@ -350,7 +350,11 @@ async fn cmd_probe(cli: &Cli, args: ProbeArgs) -> Result<ExitCode> {
             println!("  size:              {}", util::human_bytes_opt(info.size));
             println!(
                 "  range requests:    {}",
-                if info.accept_ranges { "supported" } else { "NOT supported" }
+                if info.accept_ranges {
+                    "supported"
+                } else {
+                    "NOT supported"
+                }
             );
             println!("  etag:              {}", opt(&info.etag));
             println!("  last-modified:     {}", opt(&info.last_modified));
@@ -374,7 +378,10 @@ async fn cmd_probe(cli: &Cli, args: ProbeArgs) -> Result<ExitCode> {
             println!(
                 "  segmented resume:  {}",
                 if resumable {
-                    format!("yes, up to {} concurrent byte-range requests", settings.segments_per_task)
+                    format!(
+                        "yes, up to {} concurrent byte-range requests",
+                        settings.segments_per_task
+                    )
                 } else {
                     "no - a single request will be used".to_string()
                 }
@@ -391,8 +398,8 @@ async fn cmd_probe(cli: &Cli, args: ProbeArgs) -> Result<ExitCode> {
 }
 
 async fn cmd_import(cli: &Cli, args: ImportArgs) -> Result<ExitCode> {
-    let content = std::fs::read_to_string(&args.file)
-        .map_err(|e| usagi::Error::io(args.file.clone(), e))?;
+    let content =
+        std::fs::read_to_string(&args.file).map_err(|e| usagi::Error::io(args.file.clone(), e))?;
     let urls: Vec<String> = content
         .lines()
         .map(|l| l.trim())
@@ -427,7 +434,10 @@ fn cmd_list(cli: &Cli) -> Result<ExitCode> {
     store.recover_finalizations()?;
     let tasks = store.list_tasks()?;
     if tasks.is_empty() {
-        println!("no tasks (database: {})", util::display_path(&paths.db_file));
+        println!(
+            "no tasks (database: {})",
+            util::display_path(&paths.db_file)
+        );
         return Ok(ExitCode::SUCCESS);
     }
     println!(
@@ -524,9 +534,9 @@ fn cmd_settings(cli: &Cli, args: SettingsArgs) -> Result<ExitCode> {
         println!("settings restored to defaults");
     }
     for pair in &args.pairs {
-        let (key, value) = pair.split_once('=').ok_or_else(|| {
-            usagi::Error::Other(format!("`{pair}` is not a key=value pair"))
-        })?;
+        let (key, value) = pair
+            .split_once('=')
+            .ok_or_else(|| usagi::Error::Other(format!("`{pair}` is not a key=value pair")))?;
         settings.apply_pair(key, value)?;
         store.save_settings(&settings)?;
         println!("{key} = {value}");
@@ -574,7 +584,8 @@ fn cmd_doctor(cli: &Cli) -> Result<ExitCode> {
                     for entry in store.alt_svc_all()? {
                         println!(
                             "    {}:{} (learned {}, {} failure(s))",
-                            entry.host, entry.port,
+                            entry.host,
+                            entry.port,
                             util::format_timestamp(entry.learned_at),
                             entry.failures
                         );
@@ -634,7 +645,10 @@ fn cmd_doctor(cli: &Cli) -> Result<ExitCode> {
             "ignored"
         }
     );
-    println!("  log file:          {}", util::display_path(&paths.log_file));
+    println!(
+        "  log file:          {}",
+        util::display_path(&paths.log_file)
+    );
     Ok(ExitCode::SUCCESS)
 }
 
@@ -790,17 +804,15 @@ async fn wait_for(engine: &Engine, ids: &[u64], live: bool) -> ExitCode {
                     task.id,
                     task.state.as_str(),
                     util::human_bytes(task.received as f64),
-                    task.error.clone().unwrap_or_else(|| util::display_path(&PathBuf::from(&task.final_path)))
+                    task.error
+                        .clone()
+                        .unwrap_or_else(|| util::display_path(&PathBuf::from(&task.final_path)))
                 );
             }
             let failed = watched
                 .iter()
                 .any(|t| t.state == TaskState::Failed || t.state == TaskState::Canceled);
-            return if failed {
-                ExitCode::from(3)
-            } else {
-                exit
-            };
+            return if failed { ExitCode::from(3) } else { exit };
         }
     }
 }
@@ -825,7 +837,11 @@ fn render_line(task: &TaskSnapshot, _elapsed: Duration) -> String {
     let bar = match task.fraction {
         Some(f) => {
             let filled = (f * 24.0).round() as usize;
-            format!("[{}{}]", "#".repeat(filled), ".".repeat(24usize.saturating_sub(filled)))
+            format!(
+                "[{}{}]",
+                "#".repeat(filled),
+                ".".repeat(24usize.saturating_sub(filled))
+            )
         }
         None => format!("[{}]", "?".repeat(24)),
     };

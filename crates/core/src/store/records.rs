@@ -118,10 +118,7 @@ pub enum RouteState {
         rules: Vec<crate::category::CategoryRule>,
     },
     /// Route locked before the partial was claimed.
-    Locked {
-        category_id: String,
-        root: String,
-    },
+    Locked { category_id: String, root: String },
     /// The route was selected in memory but its durable write failed, so the
     /// lock was never persisted (Zed G2 review, P1). Carries the same
     /// snapshot as [`RouteState::Pending`]: a retry or resume must re-run
@@ -288,7 +285,11 @@ pub struct RepresentationBound {
 }
 
 impl RepresentationBound {
-    pub fn none_scope(final_url: impl Into<String>, strong_etag: impl Into<String>, total_size: Option<u64>) -> Self {
+    pub fn none_scope(
+        final_url: impl Into<String>,
+        strong_etag: impl Into<String>,
+        total_size: Option<u64>,
+    ) -> Self {
         Self {
             final_url: final_url.into(),
             strong_etag: strong_etag.into(),
@@ -375,7 +376,11 @@ impl TaskRecord {
     /// Synchronize the claimed backing file for this exact segment snapshot.
     /// Persist this record and the same segments together in a durable Store
     /// transaction. This receipt alone does not mean the DB commit succeeded.
-    pub fn prepare_progress_checkpoint(&mut self, segments: &[SegmentState], file: &std::fs::File) -> crate::Result<()> {
+    pub fn prepare_progress_checkpoint(
+        &mut self,
+        segments: &[SegmentState],
+        file: &std::fs::File,
+    ) -> crate::Result<()> {
         crate::durability::prepare(self, segments, Some(file), std::fs::File::sync_all)
     }
 
@@ -573,7 +578,12 @@ mod tests {
 
     #[test]
     fn legacy_row_deserializes_without_a_representation_bound() {
-        let record = TaskRecord::new(1, "https://example.test/a", Path::new("/tmp"), Some("a.bin".into()));
+        let record = TaskRecord::new(
+            1,
+            "https://example.test/a",
+            Path::new("/tmp"),
+            Some("a.bin".into()),
+        );
         let mut value = serde_json::to_value(&record).unwrap();
         let object = value.as_object_mut().unwrap();
         object.remove("representation_bound");
@@ -585,9 +595,13 @@ mod tests {
         let mut round = loaded;
         round.representation_bound = Some(bound.clone());
         round.representation_restarts = 1;
-        let again: TaskRecord = serde_json::from_str(&serde_json::to_string(&round).unwrap()).unwrap();
+        let again: TaskRecord =
+            serde_json::from_str(&serde_json::to_string(&round).unwrap()).unwrap();
         assert_eq!(again.representation_bound, Some(bound));
         assert_eq!(again.representation_restarts, 1);
-        assert_eq!(again.representation_bound.unwrap().header_scope, HEADER_SCOPE_NONE);
+        assert_eq!(
+            again.representation_bound.unwrap().header_scope,
+            HEADER_SCOPE_NONE
+        );
     }
 }

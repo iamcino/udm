@@ -234,9 +234,7 @@ impl Store {
                 .map(|g| g.value())
                 .unwrap_or(0);
             let next = current + 1;
-            counters
-                .insert(TASK_ID_COUNTER, &next)
-                .map_err(map_table)?;
+            counters.insert(TASK_ID_COUNTER, &next).map_err(map_table)?;
             next
         };
         txn.commit().map_err(map_commit)?;
@@ -296,9 +294,7 @@ impl Store {
             .fail_all_saves
             .load(std::sync::atomic::Ordering::SeqCst)
         {
-            return Err(Error::Storage(
-                "injected save failure (test fault)".into(),
-            ));
+            return Err(Error::Storage("injected save failure (test fault)".into()));
         }
         let mut armed = self.fail_saves.load(std::sync::atomic::Ordering::SeqCst);
         while armed > 0 {
@@ -309,9 +305,7 @@ impl Store {
                 std::sync::atomic::Ordering::SeqCst,
             ) {
                 Ok(_) => {
-                    return Err(Error::Storage(
-                        "injected save failure (test fault)".into(),
-                    ));
+                    return Err(Error::Storage("injected save failure (test fault)".into()));
                 }
                 Err(actual) => armed = actual,
             }
@@ -335,9 +329,7 @@ impl Store {
             let mut tasks = txn.open_table(TASKS).map_err(map_table)?;
             for record in records {
                 let json = serde_json::to_vec(record)?;
-                tasks
-                    .insert(record.id, &json[..])
-                    .map_err(map_table)?;
+                tasks.insert(record.id, &json[..]).map_err(map_table)?;
             }
         }
         if !segments.is_empty() {
@@ -642,12 +634,24 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("schema.redb");
         let store = Store::open(&path).unwrap();
-        let record = TaskRecord::new(1, "https://example.test/file", dir.path(), Some("file".into()));
-        store.save(&[record.clone()], &[(1, vec![SegmentState::new(0, 0, 7)])], true).unwrap();
+        let record = TaskRecord::new(
+            1,
+            "https://example.test/file",
+            dir.path(),
+            Some("file".into()),
+        );
+        store
+            .save(
+                &[record.clone()],
+                &[(1, vec![SegmentState::new(0, 0, 7)])],
+                true,
+            )
+            .unwrap();
         let transaction = store.db.begin_write().unwrap();
         {
             let mut meta = transaction.open_table(META).unwrap();
-            meta.insert(SCHEMA_KEY, 1u32.to_le_bytes().as_slice()).unwrap();
+            meta.insert(SCHEMA_KEY, 1u32.to_le_bytes().as_slice())
+                .unwrap();
         }
         transaction.commit().unwrap();
         drop(store);
@@ -657,12 +661,18 @@ mod tests {
         let transaction = upgraded.db.begin_write().unwrap();
         {
             let mut meta = transaction.open_table(META).unwrap();
-            assert_eq!(meta.get(SCHEMA_KEY).unwrap().unwrap().value(), &2u32.to_le_bytes());
-            meta.insert(SCHEMA_KEY, 3u32.to_le_bytes().as_slice()).unwrap();
+            assert_eq!(
+                meta.get(SCHEMA_KEY).unwrap().unwrap().value(),
+                &2u32.to_le_bytes()
+            );
+            meta.insert(SCHEMA_KEY, 3u32.to_le_bytes().as_slice())
+                .unwrap();
         }
         transaction.commit().unwrap();
         drop(upgraded);
-        assert!(matches!(Store::open(&path), Err(Error::Storage(message)) if message.contains("newer than this build")));
+        assert!(
+            matches!(Store::open(&path), Err(Error::Storage(message)) if message.contains("newer than this build"))
+        );
     }
 
     use super::*;
@@ -680,7 +690,12 @@ mod tests {
         let (_dir, store) = tmp_db();
         let id = store.next_task_id().unwrap();
         assert_eq!(id, 1);
-        let mut record = TaskRecord::new(id, "https://x.example/f.bin", Path::new("/tmp"), Some("f.bin".into()));
+        let mut record = TaskRecord::new(
+            id,
+            "https://x.example/f.bin",
+            Path::new("/tmp"),
+            Some("f.bin".into()),
+        );
         record.total_size = Some(300);
         store.put_task(&record).unwrap();
         store
@@ -771,9 +786,7 @@ mod tests {
             // reloaded from disk
             assert!(store.get("cdn.example:443").is_some());
             // way in the future -> expired
-            let pruned = store
-                .alt_svc_prune(now + 3600 * 1000 + 10, 3600)
-                .unwrap();
+            let pruned = store.alt_svc_prune(now + 3600 * 1000 + 10, 3600).unwrap();
             assert_eq!(pruned, 1);
             assert!(store.get("cdn.example:443").is_none());
         }
@@ -787,7 +800,18 @@ mod tests {
         record.state = TaskState::Completed;
         store.put_task(&record).unwrap();
         store
-            .save(&[], &[(id, vec![{ let mut s = SegmentState::new(0,0,99); s.done = 42; s }])], true)
+            .save(
+                &[],
+                &[(
+                    id,
+                    vec![{
+                        let mut s = SegmentState::new(0, 0, 99);
+                        s.done = 42;
+                        s
+                    }],
+                )],
+                true,
+            )
             .unwrap();
         let stats = store.stats().unwrap();
         assert_eq!(stats.tasks, 1);

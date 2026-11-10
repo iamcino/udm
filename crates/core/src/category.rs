@@ -85,8 +85,20 @@ pub fn default_categories() -> Vec<CategoryRule> {
             "programs",
             "Programs",
             &[
-                ".exe", ".msi", ".msix", ".msixbundle", ".appx", ".appxbundle", ".bat", ".cmd",
-                ".ps1", ".pkg", ".deb", ".rpm", ".appimage", ".apk",
+                ".exe",
+                ".msi",
+                ".msix",
+                ".msixbundle",
+                ".appx",
+                ".appxbundle",
+                ".bat",
+                ".cmd",
+                ".ps1",
+                ".pkg",
+                ".deb",
+                ".rpm",
+                ".appimage",
+                ".apk",
             ],
         ),
         rule(
@@ -131,15 +143,12 @@ pub fn validate_categories(rules: &[CategoryRule]) -> Result<Vec<CategoryRule>> 
                 rule.id
             )));
         }
-        validate_folder_name(&rule.folder).map_err(|e| {
-            Error::Other(format!("category `{id}` has an invalid folder: {e}"))
-        })?;
+        validate_folder_name(&rule.folder)
+            .map_err(|e| Error::Other(format!("category `{id}` has an invalid folder: {e}")))?;
         let mut suffixes = Vec::with_capacity(rule.suffixes.len());
         for raw in &rule.suffixes {
             let suffix = normalize_suffix(raw).ok_or_else(|| {
-                Error::Other(format!(
-                    "category `{id}` has an invalid suffix `{raw}`"
-                ))
+                Error::Other(format!("category `{id}` has an invalid suffix `{raw}`"))
             })?;
             if let Some(owner) = suffix_owner.get(&suffix) {
                 return Err(Error::Other(format!(
@@ -245,7 +254,8 @@ fn is_reparse(path: &Path) -> bool {
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
     match std::fs::symlink_metadata(path) {
         Ok(md) => {
-            md.file_type().is_symlink() || (md.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+            md.file_type().is_symlink()
+                || (md.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0
         }
         Err(_) => false,
     }
@@ -314,7 +324,9 @@ pub fn verify_plain_dir(dir: &Path) -> Result<PathBuf> {
             Component::Prefix(prefix) => {
                 use std::path::Prefix;
                 match prefix.kind() {
-                    Prefix::Disk(_) | Prefix::VerbatimDisk(_) => current.push(component.as_os_str()),
+                    Prefix::Disk(_) | Prefix::VerbatimDisk(_) => {
+                        current.push(component.as_os_str())
+                    }
                     _ => {
                         return Err(Error::Route(format!(
                             "download root {} uses a UNC or device namespace",
@@ -452,7 +464,11 @@ pub fn prepare_category_dir(root: &Path, folder: &str, filename: &str) -> Result
 /// Provisional destination for display only (Add-form preview). Uses the
 /// same classifier as the engine; the result is *not* a promise — the
 /// final filename is only known after the probe. Creates nothing.
-pub fn preview_dest(root: &Path, url_filename: Option<&str>, rules: &[CategoryRule]) -> Option<PathBuf> {
+pub fn preview_dest(
+    root: &Path,
+    url_filename: Option<&str>,
+    rules: &[CategoryRule],
+) -> Option<PathBuf> {
     let name = url_filename?;
     let rule = classify(name, rules)?;
     Some(root.join(&rule.folder).join(name))

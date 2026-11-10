@@ -147,7 +147,11 @@ fn the_only_network_clients_are_the_download_stacks() {
             let Ok(text) = std::fs::read_to_string(path) else {
                 return;
             };
-            for bad in ["UdpSocket::bind", "TcpStream::connect", "reqwest::Client::new"] {
+            for bad in [
+                "UdpSocket::bind",
+                "TcpStream::connect",
+                "reqwest::Client::new",
+            ] {
                 if text.contains(bad) {
                     violations.push(format!("{}: {bad}", path.display()));
                 }

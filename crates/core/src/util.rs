@@ -370,11 +370,9 @@ pub fn plan_segments(total: u64, count: u32, min_size: u64) -> Vec<(u64, u64)> {
 mod tests {
     #[test]
     fn remainder_does_not_create_an_extra_segment() {
-        for (total, requested, minimum, expected) in [
-            (65, 8, 1, 8),
-            (u64::MAX, 64, 1, 64),
-            (500, 8, 128, 3),
-        ] {
+        for (total, requested, minimum, expected) in
+            [(65, 8, 1, 8), (u64::MAX, 64, 1, 64), (500, 8, 128, 3)]
+        {
             let ranges = super::plan_segments(total, requested, minimum);
             assert_eq!(ranges.len(), expected);
             assert_eq!(ranges.first().unwrap().0, 0);

@@ -133,7 +133,10 @@ impl ProbeInfo {
     /// is not either: the field stays on the probe as a hint and is never
     /// copied into this return value.
     pub fn validator(&self) -> Option<String> {
-        self.etag.as_deref().and_then(net::strong_etag).map(str::to_string)
+        self.etag
+            .as_deref()
+            .and_then(net::strong_etag)
+            .map(str::to_string)
     }
 
     fn from_headers(
@@ -228,6 +231,8 @@ impl std::fmt::Debug for Body {
 /// A successfully issued request (any status; check [`Opened::is_success`]).
 #[derive(Debug)]
 pub struct Opened {
+    /// Peer of this response; observation only, never a family pin.
+    pub remote_addr: Option<std::net::SocketAddr>,
     pub status: u16,
     pub headers: HeaderMap,
     pub transport: TransportKind,
@@ -496,7 +501,10 @@ impl NetStack {
         let mut info: Option<ProbeInfo> = None;
 
         // 1) HEAD is cheapest.
-        match client.send_capped(&RequestSpec::head(url.as_str()), cap).await {
+        match client
+            .send_capped(&RequestSpec::head(url.as_str()), cap)
+            .await
+        {
             Ok(response) => {
                 let status = response.status().as_u16();
                 let headers = response.headers().clone();
@@ -536,7 +544,10 @@ impl NetStack {
             drop(response);
 
             if !(200..300).contains(&status) {
-                return Err(Error::HttpStatus { status, url: final_url });
+                return Err(Error::HttpStatus {
+                    status,
+                    url: final_url,
+                });
             }
             let mut probe = ProbeInfo::from_headers(
                 &headers,
@@ -567,7 +578,10 @@ impl NetStack {
         if !(200..300).contains(&status) {
             // Servers are allowed to refuse HEAD; try a one-byte GET.
             if !matches!(status, 405 | 501 | 403 | 400) {
-                return Err(Error::HttpStatus { status, url: final_url });
+                return Err(Error::HttpStatus {
+                    status,
+                    url: final_url,
+                });
             }
             let (response, final_url) = self
                 .h3_exchange(
@@ -581,7 +595,10 @@ impl NetStack {
             let mut response = response;
             response.abort();
             if !(200..300).contains(&status) {
-                return Err(Error::HttpStatus { status, url: final_url });
+                return Err(Error::HttpStatus {
+                    status,
+                    url: final_url,
+                });
             }
             let mut probe = ProbeInfo::from_headers(
                 &headers,
@@ -609,7 +626,10 @@ impl NetStack {
             let mut response = response;
             response.abort();
             if !(200..300).contains(&status) {
-                return Err(Error::HttpStatus { status, url: final_url });
+                return Err(Error::HttpStatus {
+                    status,
+                    url: final_url,
+                });
             }
             let mut probe = ProbeInfo::from_headers(
                 &headers,
@@ -635,6 +655,36 @@ impl NetStack {
 
     // ---------------------------------------------------------------- open
 
+    /// Observe a segment open without changing transport selection or I5.
+    pub(crate) async fn open_observed(
+        &self,
+        spec: &RequestSpec,
+        pref: TransportPref,
+        table: &Arc<crate::net::lane::LaneTable>,
+        task: u64,
+        generation: u64,
+        segment: usize,
+    ) -> Result<Opened> {
+        use crate::net::lane::{OpenObservation, OpenOutcome};
+        let mut attempt = table.begin(OpenObservation {
+            task,
+            generation,
+            segment,
+            range: spec.range,
+            preference: pref,
+            outcome: OpenOutcome::Pending,
+            failure: None,
+            open_to_headers: None,
+            observed_family: None,
+            protocol: None,
+        });
+        let result = self.open(spec, pref).await;
+        match &result {
+            Ok(opened) => attempt.headers(opened.transport, opened.remote_addr),
+            Err(error) => attempt.failed(error),
+        }
+        result
+    }
     /// Open a byte range for transfer.
     pub async fn open(&self, spec: &RequestSpec, pref: TransportPref) -> Result<Opened> {
         let parsed = validate(&spec.url)?;
@@ -667,6 +717,7 @@ impl NetStack {
     async fn open_http12(&self, spec: &RequestSpec) -> Result<Opened> {
         let client = self.inner.http.read().clone();
         let response = client.send(spec).await?;
+        let remote_addr = response.remote_addr();
         let status = response.status().as_u16();
         let headers = response.headers().clone();
         let final_url = response.url().to_string();
@@ -681,6 +732,7 @@ impl NetStack {
         };
 
         Ok(Opened {
+            remote_addr,
             status,
             headers,
             transport,
@@ -843,6 +895,7 @@ fn rewrite_for_h3(mut spec: RequestSpec, entry: &AltSvcEntry) -> RequestSpec {
 }
 
 fn opened_from_h3(mut response: H3Response, final_url: String) -> Opened {
+    let remote_addr = Some(response.remote_addr);
     let status = response.status.as_u16();
     let headers = response.headers.clone();
     let body = if (200..300).contains(&status) {
@@ -852,6 +905,7 @@ fn opened_from_h3(mut response: H3Response, final_url: String) -> Opened {
         Body::Empty
     };
     Opened {
+        remote_addr,
         status,
         headers,
         transport: TransportKind::Http3,
@@ -942,9 +996,7 @@ mod tests {
         assert!(stack.h3_target(&url, TransportPref::NoHttp3).is_none());
         // Plain http:// never uses QUIC.
         let plain = Url::parse("http://cdn.example/file.bin").unwrap();
-        assert!(stack
-            .h3_target(&plain, TransportPref::Http3Only)
-            .is_none());
+        assert!(stack.h3_target(&plain, TransportPref::Http3Only).is_none());
     }
 
     #[test]

@@ -311,9 +311,7 @@ fn plant(root: &Path, seed: &Planted) -> u64 {
     record
         .prepare_progress_checkpoint(&segments, &file)
         .unwrap();
-    store
-        .save(&[record], &[(id, segments)], true)
-        .unwrap();
+    store.save(&[record], &[(id, segments)], true).unwrap();
     id
 }
 
@@ -325,7 +323,11 @@ fn prefix_of(path: &Path, prefix: &[u8]) {
         bytes.len(),
         prefix.len()
     );
-    assert_eq!(&bytes[..prefix.len()], prefix, "planted prefix was overwritten");
+    assert_eq!(
+        &bytes[..prefix.len()],
+        prefix,
+        "planted prefix was overwritten"
+    );
 }
 
 fn assert_no_final(path: &Path) {
@@ -426,12 +428,18 @@ fn chain_416_mismatch_restarts_once_and_does_not_splice() {
     assert_eq!(std::fs::read(&task.final_path).unwrap(), new_body);
     let stored = engine.store().get_task(id).unwrap().unwrap();
     assert_eq!(stored.representation_restarts, 1);
-    assert_eq!(stored.attempts, 0, "the 416 mismatch spent the network budget");
+    assert_eq!(
+        stored.attempts, 0,
+        "the 416 mismatch spent the network budget"
+    );
     assert_eq!(
         stored.representation_bound.as_ref().unwrap().strong_etag,
         "\"v2\""
     );
-    assert!(!stored.part_path().exists(), "the old partial was kept beside the final");
+    assert!(
+        !stored.part_path().exists(),
+        "the old partial was kept beside the final"
+    );
     let ranges: Vec<_> = gets(&server.requests())
         .iter()
         .filter_map(|request| header(request, "range").map(str::to_string))
@@ -541,7 +549,10 @@ fn chain_416_matching_total_does_not_restart() {
     let task = wait_terminal(&engine, id);
     assert_eq!(task.state, TaskState::Failed, "{:?}", task.error);
     let stored = wait_store_state(&engine, id, TaskState::Failed);
-    assert_eq!(stored.representation_restarts, 0, "a matching 416 spent a restart");
+    assert_eq!(
+        stored.representation_restarts, 0,
+        "a matching 416 spent a restart"
+    );
     assert_eq!(stored.attempts, 1);
     assert_eq!(durable_done(&engine, id), 4);
     prefix_of(&stored.part_path(), &[0x11; 4]);
@@ -595,7 +606,11 @@ fn chain_416_second_mismatch_does_not_restart() {
     assert_eq!(durable_done(&engine, id), 4);
     prefix_of(&stored.part_path(), &[0x11; 4]);
     assert_no_final(&stored.final_path());
-    assert_eq!(gets(&server.requests()).len(), 1, "a second restart downloaded");
+    assert_eq!(
+        gets(&server.requests()).len(),
+        1,
+        "a second restart downloaded"
+    );
     engine.shutdown();
 }
 
@@ -675,9 +690,19 @@ fn chain_live_representation_restart_does_not_splice() {
     assert_eq!(std::fs::read(&task.final_path).unwrap(), body);
     let stored = engine.store().get_task(id).unwrap().unwrap();
     assert_eq!(stored.representation_restarts, 1);
-    assert_eq!(stored.attempts, 0, "the live mismatch spent the network budget");
-    assert_eq!(stored.representation_bound.as_ref().unwrap().strong_etag, "\"v2\"");
-    assert_eq!(gets(&server.requests()).len(), 1, "the mismatch downloaded before the restart");
+    assert_eq!(
+        stored.attempts, 0,
+        "the live mismatch spent the network budget"
+    );
+    assert_eq!(
+        stored.representation_bound.as_ref().unwrap().strong_etag,
+        "\"v2\""
+    );
+    assert_eq!(
+        gets(&server.requests()).len(),
+        1,
+        "the mismatch downloaded before the restart"
+    );
     engine.shutdown();
     drop(engine);
 
@@ -716,11 +741,17 @@ fn chain_live_second_mismatch_fails_closed() {
     let stored = wait_store_state(&engine, id, TaskState::Failed);
     assert_eq!(stored.representation_restarts, 1);
     assert_eq!(stored.attempts, 1);
-    assert_eq!(stored.representation_bound.as_ref().unwrap().strong_etag, "\"v1\"");
+    assert_eq!(
+        stored.representation_bound.as_ref().unwrap().strong_etag,
+        "\"v1\""
+    );
     assert_eq!(durable_done(&engine, id), 4);
     prefix_of(&stored.part_path(), &[0x11; 4]);
     assert_no_final(&stored.final_path());
-    assert!(gets(&server.requests()).is_empty(), "the spent budget still downloaded");
+    assert!(
+        gets(&server.requests()).is_empty(),
+        "the spent budget still downloaded"
+    );
     engine.shutdown();
 }
 
@@ -796,7 +827,11 @@ fn chain_enospc_keeps_prior_coverage() {
     assert_eq!(engine.worker_faults_fired(), 1);
     assert_eq!(durable_done(&engine, id), 4);
     let partial = std::fs::read(stored.part_path()).unwrap();
-    assert_eq!(partial.len(), 16, "preallocation changed size past the plan");
+    assert_eq!(
+        partial.len(),
+        16,
+        "preallocation changed size past the plan"
+    );
     assert_eq!(&partial[..4], &[0x11; 4]);
     assert_eq!(partial[4], 0, "ENOSPC still stored a payload byte");
     assert_no_final(&stored.final_path());
@@ -833,7 +868,10 @@ fn assert_advanced_snapshot_was_not_promoted(engine: &Engine, id: u64) {
         error.contains("ended early"),
         "the worker did not flush a short body and then stop: {error}"
     );
-    assert_eq!(task.received, 6, "session coverage was not the two new bytes");
+    assert_eq!(
+        task.received, 6,
+        "session coverage was not the two new bytes"
+    );
     assert_eq!(engine.worker_faults_fired(), 1);
     let stored = engine.store().get_task(id).unwrap().unwrap();
     // The probing save already committed Downloading with the planted prefix.
@@ -927,7 +965,10 @@ fn chain_finish_sync_failure_does_not_finalize() {
     assert_eq!(stored.state, TaskState::Failed);
     assert_eq!(stored.representation_restarts, 0);
     assert_eq!(stored.attempts, 1);
-    assert!(stored.computed_hash.is_none(), "a failed finish sync published a hash");
+    assert!(
+        stored.computed_hash.is_none(),
+        "a failed finish sync published a hash"
+    );
     assert_eq!(engine.worker_faults_fired(), 1);
     assert_eq!(std::fs::read(stored.part_path()).unwrap(), body);
     assert_no_final(&stored.final_path());

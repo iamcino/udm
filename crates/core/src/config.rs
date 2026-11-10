@@ -369,10 +369,8 @@ impl Settings {
                 // The whole rule set as JSON (same shape as stored). It is
                 // validated strictly: an invalid set is rejected, never
                 // sanitised into different routing.
-                let rules: Vec<crate::category::CategoryRule> =
-                    serde_json::from_str(value).map_err(|e| {
-                        Error::Other(format!("`categories` is not valid JSON: {e}"))
-                    })?;
+                let rules: Vec<crate::category::CategoryRule> = serde_json::from_str(value)
+                    .map_err(|e| Error::Other(format!("`categories` is not valid JSON: {e}")))?;
                 crate::category::validate_categories(&rules)?;
                 self.categories = Some(rules);
             }
@@ -532,12 +530,10 @@ mod tests {
         assert_eq!(fresh.handoff_lease_secs, Some(60));
         // An explicitly stored null is preserved as None: upgrades never
         // silently enable the coordinator for existing installs.
-        let stored: Settings =
-            serde_json::from_str(r#"{"handoff_lease_secs": null}"#).unwrap();
+        let stored: Settings = serde_json::from_str(r#"{"handoff_lease_secs": null}"#).unwrap();
         assert_eq!(stored.handoff_lease_secs, None);
         // And an explicit value round-trips.
-        let set: Settings =
-            serde_json::from_str(r#"{"handoff_lease_secs": 120}"#).unwrap();
+        let set: Settings = serde_json::from_str(r#"{"handoff_lease_secs": 120}"#).unwrap();
         assert_eq!(set.handoff_lease_secs, Some(120));
     }
 
@@ -573,8 +569,7 @@ mod tests {
         assert!(back.start_minimized);
         assert!(back.start_with_windows);
         // A legacy config without the lifecycle keys loads with defaults.
-        let legacy: Settings =
-            serde_json::from_str(r#"{"theme": "auto"}"#).unwrap();
+        let legacy: Settings = serde_json::from_str(r#"{"theme": "auto"}"#).unwrap();
         assert!(legacy.close_to_tray);
         assert!(!legacy.minimize_to_tray);
         assert!(!legacy.start_minimized);

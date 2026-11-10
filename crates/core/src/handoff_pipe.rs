@@ -47,8 +47,8 @@ pub const MAX_FRAME_BYTES: usize = 1_048_576;
 
 /// Write one length-prefixed JSON frame.
 pub fn write_frame<W: Write>(w: &mut W, value: &Value) -> io::Result<()> {
-    let bytes = serde_json::to_vec(value)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let bytes =
+        serde_json::to_vec(value).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     if bytes.len() > MAX_FRAME_BYTES {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -78,8 +78,8 @@ pub fn read_frame<R: Read>(r: &mut R) -> io::Result<Option<Value>> {
     }
     let mut buf = vec![0u8; len];
     r.read_exact(&mut buf)?;
-    let value = serde_json::from_slice(&buf)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let value =
+        serde_json::from_slice(&buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     Ok(Some(value))
 }
 
@@ -131,8 +131,7 @@ fn dispatch(coordinator: &Coordinator, caller: &str, req: &Value) -> Value {
                 "status": serde_json::to_value(&reply.status).unwrap_or(Value::Null),
             });
             if let Some(state) = &reply.state {
-                out["state"] =
-                    serde_json::to_value(state).unwrap_or(Value::Null);
+                out["state"] = serde_json::to_value(state).unwrap_or(Value::Null);
             }
             if let Some(task_ref) = &reply.task_ref {
                 out["task_ref"] = json!(task_ref);
@@ -298,21 +297,19 @@ mod windows_impl {
     use std::os::windows::io::{AsRawHandle, FromRawHandle};
 
     use windows_sys::Win32::Foundation::{
-        CloseHandle, GetLastError, LocalFree, ERROR_PIPE_CONNECTED, HANDLE,
-        HLOCAL, INVALID_HANDLE_VALUE,
+        CloseHandle, GetLastError, LocalFree, ERROR_PIPE_CONNECTED, HANDLE, HLOCAL,
+        INVALID_HANDLE_VALUE,
     };
     use windows_sys::Win32::Security::Authorization::{
         ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
     };
     use windows_sys::Win32::Security::{
-        GetTokenInformation, TokenUser, SECURITY_ATTRIBUTES, TOKEN_QUERY,
-        TOKEN_USER,
+        GetTokenInformation, TokenUser, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
     };
     use windows_sys::Win32::Storage::FileSystem::{FlushFileBuffers, PIPE_ACCESS_DUPLEX};
     use windows_sys::Win32::System::Pipes::{
-        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe,
-        PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
-        PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
+        PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -353,8 +350,7 @@ mod windows_impl {
                 p = p.add(1);
             }
             LocalFree(sid_str as HLOCAL);
-            String::from_utf16(&chars)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+            String::from_utf16(&chars).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
         }
     }
 
@@ -389,10 +385,7 @@ mod windows_impl {
             let handle = CreateNamedPipeW(
                 wide_name.as_ptr(),
                 PIPE_ACCESS_DUPLEX,
-                PIPE_TYPE_BYTE
-                    | PIPE_READMODE_BYTE
-                    | PIPE_WAIT
-                    | PIPE_REJECT_REMOTE_CLIENTS,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
                 PIPE_UNLIMITED_INSTANCES,
                 65_536,
                 65_536,
@@ -440,8 +433,7 @@ mod windows_impl {
             let coordinator = coordinator.clone();
             let secret = pairing_secret.clone();
             std::thread::spawn(move || {
-                let mut file =
-                    unsafe { std::fs::File::from_raw_handle(handle as _) };
+                let mut file = unsafe { std::fs::File::from_raw_handle(handle as _) };
                 handle_connection(&mut file, &coordinator, &secret);
                 unsafe {
                     // Push the final reply (notably a pairing refusal)

@@ -377,6 +377,7 @@ impl H3Pool {
         }
 
         Ok(H3Response {
+            remote_addr: conn.quinn.remote_address(),
             status: response.status(),
             headers: response.headers().clone(),
             connection_id,
@@ -631,6 +632,8 @@ async fn await_shared(
 
 /// An HTTP/3 response: headers plus a stream you can pull body chunks from.
 pub struct H3Response {
+    /// Peer observed on the QUIC connection serving this response.
+    pub remote_addr: SocketAddr,
     pub status: StatusCode,
     pub headers: HeaderMap,
     /// `stable_id` stored when this connection was inserted into the pool.

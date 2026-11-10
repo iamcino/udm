@@ -5,6 +5,7 @@ pub mod altsvc;
 pub mod gauge;
 pub mod h3;
 pub mod http12;
+pub mod lane;
 pub mod stack;
 pub mod tls;
 
@@ -130,7 +131,11 @@ pub fn content_range(headers: &HeaderMap) -> Option<(u64, u64, Option<u64>)> {
 }
 
 /// Learn an HTTP/3 endpoint from an `Alt-Svc` header, if it advertises one.
-pub fn alt_svc_from(headers: &HeaderMap, origin_host: &str, origin_port: u16) -> Option<AltSvcEntry> {
+pub fn alt_svc_from(
+    headers: &HeaderMap,
+    origin_host: &str,
+    origin_port: u16,
+) -> Option<AltSvcEntry> {
     let value = header_str(headers, &http::header::ALT_SVC)?;
     let (port, ma) = util::parse_alt_svc_h3(&value, origin_port)?;
     Some(AltSvcEntry::new(origin_host, port, ma))
@@ -140,7 +145,11 @@ pub fn alt_svc_from(headers: &HeaderMap, origin_host: &str, origin_port: u16) ->
 pub fn headers_to_vec(headers: &HeaderMap) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = headers
         .iter()
-        .filter_map(|(k, v)| v.to_str().ok().map(|s| (k.as_str().to_string(), s.to_string())))
+        .filter_map(|(k, v)| {
+            v.to_str()
+                .ok()
+                .map(|s| (k.as_str().to_string(), s.to_string()))
+        })
         .collect();
     out.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
     out
@@ -171,7 +180,10 @@ mod tests {
     fn parses_range_support() {
         assert!(accepts_ranges(&headers(&[("accept-ranges", "bytes")])));
         assert!(!accepts_ranges(&headers(&[("accept-ranges", "none")])));
-        assert!(accepts_ranges(&headers(&[("content-range", "bytes 0-1/2")])));
+        assert!(accepts_ranges(&headers(&[(
+            "content-range",
+            "bytes 0-1/2"
+        )])));
         assert!(!accepts_ranges(&headers(&[])));
     }
 
@@ -191,7 +203,10 @@ mod tests {
             last_modified(&h).as_deref(),
             Some("Wed, 21 Oct 2025 07:28:00 GMT")
         );
-        assert_eq!(content_type(&h).as_deref(), Some("application/octet-stream"));
+        assert_eq!(
+            content_type(&h).as_deref(),
+            Some("application/octet-stream")
+        );
         assert_eq!(filename_hint(&h).as_deref(), Some("thing.iso"));
         let learned = alt_svc_from(&h, "cdn.example", 443).unwrap();
         assert_eq!(learned.origin, "cdn.example:443");
@@ -224,7 +239,9 @@ mod tests {
         assert!(vary_allows_none_scope(None));
         assert!(vary_allows_none_scope(Some("")));
         assert!(vary_allows_none_scope(Some("Accept-Encoding")));
-        assert!(vary_allows_none_scope(Some("accept-encoding, Accept-Encoding")));
+        assert!(vary_allows_none_scope(Some(
+            "accept-encoding, Accept-Encoding"
+        )));
         assert!(!vary_allows_none_scope(Some("*")));
         assert!(!vary_allows_none_scope(Some("Accept-Encoding, User-Agent")));
     }

@@ -75,11 +75,10 @@ impl Paths {
             per_user_data_root()?
         };
 
-        let default_download_dir =
-            env_or_legacy("UDM_DOWNLOAD_DIR", LEGACY_DOWNLOAD_DIR_ENV)
-                .filter(|s| !s.trim().is_empty())
-                .map(PathBuf::from)
-                .unwrap_or_else(system_download_dir);
+        let default_download_dir = env_or_legacy("UDM_DOWNLOAD_DIR", LEGACY_DOWNLOAD_DIR_ENV)
+            .filter(|s| !s.trim().is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(system_download_dir);
 
         Ok(Paths {
             db_file: migrate_legacy_db(&root),
@@ -96,7 +95,11 @@ impl Paths {
     /// location is not writable (e.g. someone put udm in `C:\Program Files`
     /// without the portable marker and without admin rights).
     pub fn ensure_dirs(&self) -> Result<()> {
-        for dir in [&self.root, &self.temp_dir, self.log_file.parent().unwrap_or(&self.root)] {
+        for dir in [
+            &self.root,
+            &self.temp_dir,
+            self.log_file.parent().unwrap_or(&self.root),
+        ] {
             fs::create_dir_all(dir).map_err(|e| Error::IoPath {
                 path: dunce::simplified(dir).to_path_buf(),
                 source: e,
@@ -114,7 +117,11 @@ impl Paths {
              log file:    {}\n\
              downloads:   {}\n\
              exe dir:     {}",
-            if self.portable { "portable" } else { "per-user" },
+            if self.portable {
+                "portable"
+            } else {
+                "per-user"
+            },
             display(&self.root),
             display(&self.db_file),
             display(&self.log_file),
@@ -209,7 +216,9 @@ fn per_user_data_root() -> Result<PathBuf> {
             }
         } else {
             let home = env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
-                Error::Other("$HOME is not set; cannot resolve a per-user data directory".to_string())
+                Error::Other(
+                    "$HOME is not set; cannot resolve a per-user data directory".to_string(),
+                )
             })?;
             home.join(".local").join("share")
         }

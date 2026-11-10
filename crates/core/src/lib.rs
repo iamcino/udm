@@ -55,12 +55,12 @@
 pub mod category;
 pub mod config;
 pub(crate) mod durability;
-pub(crate) mod finalize;
 pub mod engine;
 pub mod error;
-pub mod hash;
+pub(crate) mod finalize;
 pub mod handoff;
 pub mod handoff_pipe;
+pub mod hash;
 pub mod net;
 pub mod paths;
 pub mod store;

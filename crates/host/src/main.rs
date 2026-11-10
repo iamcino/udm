@@ -92,7 +92,10 @@ fn handle(req: &Value) -> Value {
     let secret = match std::fs::read_to_string(paths.root.join("handoff").join("pairing.key")) {
         Ok(s) => s.trim().to_string(),
         Err(_) => {
-            log(&paths, "no pairing key (coordinator not running); unavailable");
+            log(
+                &paths,
+                "no pairing key (coordinator not running); unavailable",
+            );
             return unavailable(op, tx);
         }
     };

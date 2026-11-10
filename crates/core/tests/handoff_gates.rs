@@ -93,7 +93,9 @@ struct ManualClock {
 
 impl ManualClock {
     fn new() -> Self {
-        ManualClock { now: Mutex::new(T0) }
+        ManualClock {
+            now: Mutex::new(T0),
+        }
     }
 
     fn advance(&self, ms: i64) {
@@ -107,11 +109,7 @@ impl HandoffClock for ManualClock {
     }
 }
 
-fn coordinator(
-    engine: Arc<FakeEngine>,
-    clock: Arc<ManualClock>,
-    lease_ms: u64,
-) -> Coordinator {
+fn coordinator(engine: Arc<FakeEngine>, clock: Arc<ManualClock>, lease_ms: u64) -> Coordinator {
     Coordinator::open(
         Box::new(MemoryStore::new()),
         engine,
@@ -186,7 +184,10 @@ fn caller_namespace_is_isolated() {
     let c = coordinator(Arc::new(FakeEngine::default()), clock, 60_000);
     c.prepare(ALICE, "tx-3", intent()).unwrap();
     // For another caller the transaction does not exist (freeze §3).
-    assert_eq!(c.query(BOB, "tx-3").unwrap().status, HandoffStatus::NotFound);
+    assert_eq!(
+        c.query(BOB, "tx-3").unwrap().status,
+        HandoffStatus::NotFound
+    );
     assert_eq!(
         c.commit(BOB, "tx-3", true).unwrap().status,
         HandoffStatus::NotFound
@@ -221,7 +222,10 @@ fn commit_requires_the_cancellation_confirmation() {
     let reply = c.commit(ALICE, "tx-5", false).unwrap();
     assert_eq!(reply.status, HandoffStatus::Conflict);
     assert_eq!(engine.add_calls(), 0);
-    assert_eq!(c.query(ALICE, "tx-5").unwrap().status, HandoffStatus::Prepared);
+    assert_eq!(
+        c.query(ALICE, "tx-5").unwrap().status,
+        HandoffStatus::Prepared
+    );
     // The real confirmation still lands afterwards.
     assert_eq!(
         c.commit(ALICE, "tx-5", true).unwrap().status,
@@ -255,8 +259,15 @@ fn expired_commit_is_recovery_required_and_never_adds() {
     let reply = c.commit(ALICE, "tx-7", true).unwrap();
     assert_eq!(reply.status, HandoffStatus::RecoveryRequired);
     assert_eq!(reply.state, Some(HandoffState::Expired));
-    assert_eq!(engine.add_calls(), 0, "an expired lease must not auto-start");
-    assert_eq!(c.query(ALICE, "tx-7").unwrap().status, HandoffStatus::Expired);
+    assert_eq!(
+        engine.add_calls(),
+        0,
+        "an expired lease must not auto-start"
+    );
+    assert_eq!(
+        c.query(ALICE, "tx-7").unwrap().status,
+        HandoffStatus::Expired
+    );
 }
 
 #[test]
@@ -266,7 +277,9 @@ fn crash_gap_with_marker_present_heals_without_second_add() {
     let engine = Arc::new(FakeEngine::with_task("tx-8", 4242));
     let clock = Arc::new(ManualClock::new());
     let c = Coordinator::open(
-        Box::new(MemoryStore::with_records(vec![pending_commit_record("tx-8")])),
+        Box::new(MemoryStore::with_records(vec![pending_commit_record(
+            "tx-8",
+        )])),
         engine.clone(),
         clock,
         CoordinatorConfig {
@@ -278,7 +291,11 @@ fn crash_gap_with_marker_present_heals_without_second_add() {
     let reply = c.query(ALICE, "tx-8").unwrap();
     assert_eq!(reply.status, HandoffStatus::Committed);
     assert_eq!(reply.task_ref.as_deref(), Some("4242"));
-    assert_eq!(engine.add_calls(), 0, "marker found: recovery must not re-Add");
+    assert_eq!(
+        engine.add_calls(),
+        0,
+        "marker found: recovery must not re-Add"
+    );
 }
 
 #[test]
@@ -286,7 +303,9 @@ fn crash_gap_without_marker_adds_exactly_once() {
     let engine = Arc::new(FakeEngine::default());
     let clock = Arc::new(ManualClock::new());
     let c = Coordinator::open(
-        Box::new(MemoryStore::with_records(vec![pending_commit_record("tx-9")])),
+        Box::new(MemoryStore::with_records(vec![pending_commit_record(
+            "tx-9",
+        )])),
         engine.clone(),
         clock,
         CoordinatorConfig {
@@ -440,12 +459,8 @@ fn fingerprint_is_stable_and_sensitive_to_every_field() {
 
 #[test]
 fn legacy_task_record_json_has_no_marker() {
-    let record = usagi::store::TaskRecord::new(
-        7,
-        "https://example.com/x.bin",
-        Path::new("/tmp"),
-        None,
-    );
+    let record =
+        usagi::store::TaskRecord::new(7, "https://example.com/x.bin", Path::new("/tmp"), None);
     let mut value = serde_json::to_value(&record).unwrap();
     value
         .as_object_mut()
@@ -529,17 +544,23 @@ fn concurrent_duplicate_commits_add_exactly_once() {
     }
     let mut refs = Vec::new();
     for h in handles {
-        refs.push(h.join().expect("commit thread panicked").expect("commit ok"));
+        refs.push(
+            h.join()
+                .expect("commit thread panicked")
+                .expect("commit ok"),
+        );
     }
     assert_eq!(
         engine.add_calls(),
         1,
         "concurrent commits must Add exactly once"
     );
-    assert_eq!(refs[0], refs[1], "both callers see the recorded association");
+    assert_eq!(
+        refs[0], refs[1],
+        "both callers see the recorded association"
+    );
     assert_eq!(refs[0].as_deref(), Some("1001"));
 }
-
 
 /// G5-closing package (owner decision 2026-11-09): the GUI recovery
 /// rows read exactly the set `query` answers `recovery_required` for.

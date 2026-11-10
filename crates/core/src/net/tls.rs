@@ -61,12 +61,11 @@ pub fn client_config(alpn: &[&[u8]]) -> Result<ClientConfig> {
     if rejected > 0 {
         tracing::debug!("{rejected} trust anchors were skipped");
     }
-    let mut config = ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()?
-    .with_root_certificates(roots)
-    .with_no_client_auth();
+    let mut config =
+        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()?
+            .with_root_certificates(roots)
+            .with_no_client_auth();
     config.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
     Ok(config)
 }

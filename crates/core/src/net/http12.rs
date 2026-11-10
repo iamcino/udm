@@ -53,7 +53,10 @@ impl Http12Client {
         headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
         // Identity encoding is mandatory: `Range` + `Content-Length` must
         // describe the *same* bytes we write to disk.
-        headers.insert(ACCEPT_ENCODING, HeaderValue::from_static(ACCEPT_ENCODING_IDENTITY));
+        headers.insert(
+            ACCEPT_ENCODING,
+            HeaderValue::from_static(ACCEPT_ENCODING_IDENTITY),
+        );
         headers.insert(
             USER_AGENT,
             HeaderValue::from_str(&settings.user_agent)
@@ -75,14 +78,15 @@ impl Http12Client {
             builder = builder.no_proxy();
         }
         for der in extra_roots {
-            let cert = reqwest::Certificate::from_der(der).map_err(|e| {
-                Error::Tls(format!("cannot load the extra trust anchor ({e})"))
-            })?;
+            let cert = reqwest::Certificate::from_der(der)
+                .map_err(|e| Error::Tls(format!("cannot load the extra trust anchor ({e})")))?;
             builder = builder.add_root_certificate(cert);
         }
 
         let client = builder.build().map_err(|e| {
-            Error::Tls(format!("cannot initialise the HTTP client ({e}); check the OS trust store"))
+            Error::Tls(format!(
+                "cannot initialise the HTTP client ({e}); check the OS trust store"
+            ))
         })?;
         Ok(Http12Client { client })
     }

@@ -66,7 +66,14 @@ impl Server {
                 }
             }
         });
-        Self { url, mode, gate, gets, stop, thread: Some(thread) }
+        Self {
+            url,
+            mode,
+            gate,
+            gets,
+            stop,
+            thread: Some(thread),
+        }
     }
 
     fn release(&self) {
@@ -110,7 +117,11 @@ fn serve(
     gets.fetch_add(1, Ordering::SeqCst);
     let range = request
         .lines()
-        .find_map(|l| l.to_ascii_lowercase().strip_prefix("range: bytes=").map(str::to_owned))
+        .find_map(|l| {
+            l.to_ascii_lowercase()
+                .strip_prefix("range: bytes=")
+                .map(str::to_owned)
+        })
         .expect("ranged GET");
     let (start, end) = range.split_once('-').unwrap();
     let (start, end): (usize, usize) = (start.parse().unwrap(), end.parse().unwrap());
@@ -165,7 +176,10 @@ fn engine(root: &std::path::Path) -> Engine {
 fn wait_until(what: &str, limit: Duration, mut done: impl FnMut() -> bool) -> Duration {
     let start = Instant::now();
     while !done() {
-        assert!(start.elapsed() < limit, "{what} not reached within {limit:?}");
+        assert!(
+            start.elapsed() < limit,
+            "{what} not reached within {limit:?}"
+        );
         thread::sleep(Duration::from_millis(5));
     }
     start.elapsed()
@@ -177,7 +191,8 @@ fn start_held(engine: &Engine, server: &Server, held_body: bool) -> u64 {
     wait_until("all segment requests held", Duration::from_secs(20), || {
         let task = engine.task(id).unwrap();
         server.gets.load(Ordering::SeqCst) >= SEGMENTS as usize
-            && (!held_body || (task.active_requests == SEGMENTS && task.received >= SEGMENTS as u64))
+            && (!held_body
+                || (task.active_requests == SEGMENTS && task.received >= SEGMENTS as u64))
     });
     id
 }
@@ -189,12 +204,21 @@ fn pause_and_cancel_revoke_held_bodies_promptly() {
         let server = Server::start(HOLD_BODY);
         let engine = engine(dir.path());
         let id = start_held(&engine, &server, true);
-        if cancel { engine.cancel(id) } else { engine.pause(id) }.unwrap();
+        if cancel {
+            engine.cancel(id)
+        } else {
+            engine.pause(id)
+        }
+        .unwrap();
         let took = wait_until("revoked run drained", PROMPT, || {
             engine.task(id).unwrap().active_requests == 0
         });
         let task = engine.task(id).unwrap();
-        let expected = if cancel { TaskState::Canceled } else { TaskState::Paused };
+        let expected = if cancel {
+            TaskState::Canceled
+        } else {
+            TaskState::Paused
+        };
         assert_eq!(task.state, expected, "{task:?}");
         eprintln!("cancel={cancel}: drained in {took:?}");
         engine.shutdown();
@@ -245,7 +269,9 @@ fn resume_after_pause_regrants_and_completes_intact() {
     let engine = engine(dir.path());
     let id = start_held(&engine, &server, true);
     engine.pause(id).unwrap();
-    wait_until("revoked run drained", PROMPT, || engine.task(id).unwrap().active_requests == 0);
+    wait_until("revoked run drained", PROMPT, || {
+        engine.task(id).unwrap().active_requests == 0
+    });
     let first_round = server.gets.load(Ordering::SeqCst);
     // Second run: hold again so the old gate release happens while it lives.
     engine.resume(id).unwrap();
@@ -258,7 +284,14 @@ fn resume_after_pause_regrants_and_completes_intact() {
     });
     let task = engine.task(id).unwrap();
     assert_eq!(task.state, TaskState::Completed, "{:?}", task.error);
-    assert_eq!((task.segments_done, task.segments_total, task.active_requests), (8, 8, 0));
+    assert_eq!(
+        (
+            task.segments_done,
+            task.segments_total,
+            task.active_requests
+        ),
+        (8, 8, 0)
+    );
     assert_eq!(std::fs::read(&task.final_path).unwrap(), vec![b'F'; SIZE]);
     engine.shutdown();
 }

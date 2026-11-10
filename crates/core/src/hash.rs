@@ -298,7 +298,8 @@ pub async fn hash_file(
         }
         Ok(h.finish_hex())
     });
-    span.await.map_err(|e| Error::Other(format!("hash task failed: {e}")))?
+    span.await
+        .map_err(|e| Error::Other(format!("hash task failed: {e}")))?
 }
 
 #[cfg(test)]

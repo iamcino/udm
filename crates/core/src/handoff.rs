@@ -268,7 +268,9 @@ pub struct MemoryStore {
 
 impl MemoryStore {
     pub fn new() -> Self {
-        MemoryStore { records: Vec::new() }
+        MemoryStore {
+            records: Vec::new(),
+        }
     }
 
     pub fn with_records(records: Vec<HandoffRecord>) -> Self {
@@ -495,7 +497,9 @@ impl Coordinator {
     }
 
     fn find(records: &[HandoffRecord], caller: &str, tx: &str) -> Option<usize> {
-        records.iter().position(|r| r.caller == caller && r.tx == tx)
+        records
+            .iter()
+            .position(|r| r.caller == caller && r.tx == tx)
     }
 
     fn persist(inner: &mut Inner) -> Result<()> {
@@ -601,10 +605,7 @@ impl Coordinator {
                 return Ok(HandoffReply::of_record(HandoffStatus::Conflict, rec)
                     .with_detail("same key, different intent"));
             }
-            return Ok(HandoffReply::of_record(
-                HandoffStatus::of(rec.state),
-                rec,
-            ));
+            return Ok(HandoffReply::of_record(HandoffStatus::of(rec.state), rec));
         }
         let expires_at_ms = now.saturating_add(self.lease_ms);
         let rec = HandoffRecord {
@@ -632,12 +633,7 @@ impl Coordinator {
     /// reported. Materialization then follows the marker protocol in
     /// the design handoff §4, so a crash anywhere in this operation
     /// converges to exactly one associated task.
-    pub fn commit(
-        &self,
-        caller: &str,
-        tx: &str,
-        browser_cancelled: bool,
-    ) -> Result<HandoffReply> {
+    pub fn commit(&self, caller: &str, tx: &str, browser_cancelled: bool) -> Result<HandoffReply> {
         self.check_caller(caller)?;
         Self::check_tx(tx)?;
         let now = self.clock.now_ms();
@@ -655,8 +651,10 @@ impl Coordinator {
             }
             HandoffState::Expired => {
                 let rec = &inner.records[idx];
-                Ok(HandoffReply::of_record(HandoffStatus::RecoveryRequired, rec)
-                    .with_detail("lease expired before commit; no automatic start"))
+                Ok(
+                    HandoffReply::of_record(HandoffStatus::RecoveryRequired, rec)
+                        .with_detail("lease expired before commit; no automatic start"),
+                )
             }
             HandoffState::Committed => {
                 if inner.records[idx].association_pending {
@@ -664,8 +662,10 @@ impl Coordinator {
                 }
                 let rec = &inner.records[idx];
                 if rec.association_pending {
-                    Ok(HandoffReply::of_record(HandoffStatus::RecoveryRequired, rec)
-                        .with_detail("commitment durable; association pending"))
+                    Ok(
+                        HandoffReply::of_record(HandoffStatus::RecoveryRequired, rec)
+                            .with_detail("commitment durable; association pending"),
+                    )
                 } else {
                     Ok(HandoffReply::of_record(HandoffStatus::Committed, rec))
                 }
@@ -674,9 +674,7 @@ impl Coordinator {
                 if !browser_cancelled {
                     let rec = &inner.records[idx];
                     return Ok(HandoffReply::of_record(HandoffStatus::Conflict, rec)
-                        .with_detail(
-                            "commit requires the browser-cancelled confirmation",
-                        ));
+                        .with_detail("commit requires the browser-cancelled confirmation"));
                 }
                 {
                     let rec = &mut inner.records[idx];
@@ -692,8 +690,10 @@ impl Coordinator {
                 self.materialize(&mut inner, idx);
                 let rec = &inner.records[idx];
                 if rec.association_pending {
-                    Ok(HandoffReply::of_record(HandoffStatus::RecoveryRequired, rec)
-                        .with_detail("commitment durable; association pending"))
+                    Ok(
+                        HandoffReply::of_record(HandoffStatus::RecoveryRequired, rec)
+                            .with_detail("commitment durable; association pending"),
+                    )
                 } else {
                     Ok(HandoffReply::of_record(HandoffStatus::Committed, rec))
                 }
@@ -706,12 +706,7 @@ impl Coordinator {
     /// anything weaker retains the recovery intent. Aborting an
     /// unknown key writes the tombstone that blocks a delayed
     /// `prepare` from resurrecting the transaction.
-    pub fn abort(
-        &self,
-        caller: &str,
-        tx: &str,
-        browser_retains: bool,
-    ) -> Result<HandoffReply> {
+    pub fn abort(&self, caller: &str, tx: &str, browser_retains: bool) -> Result<HandoffReply> {
         self.check_caller(caller)?;
         Self::check_tx(tx)?;
         let now = self.clock.now_ms();
@@ -757,14 +752,11 @@ impl Coordinator {
             HandoffState::Prepared | HandoffState::Expired => {
                 if !browser_retains {
                     let rec = &inner.records[idx];
-                    return Ok(HandoffReply::of_record(
-                        HandoffStatus::of(rec.state),
-                        rec,
-                    )
-                    .with_detail(
-                        "recovery intent retained: abort requires the \
+                    return Ok(HandoffReply::of_record(HandoffStatus::of(rec.state), rec)
+                        .with_detail(
+                            "recovery intent retained: abort requires the \
                          browser-retains-download confirmation",
-                    ));
+                        ));
                 }
                 {
                     let rec = &mut inner.records[idx];
@@ -795,8 +787,10 @@ impl Coordinator {
         Self::reconcile_expiry(&mut inner, idx, now)?;
         let rec = &inner.records[idx];
         if rec.association_pending {
-            return Ok(HandoffReply::of_record(HandoffStatus::RecoveryRequired, rec)
-                .with_detail("commitment durable; association pending"));
+            return Ok(
+                HandoffReply::of_record(HandoffStatus::RecoveryRequired, rec)
+                    .with_detail("commitment durable; association pending"),
+            );
         }
         Ok(HandoffReply::of_record(HandoffStatus::of(rec.state), rec))
     }
@@ -851,10 +845,7 @@ impl RecoveryEntry {
             tx: rec.tx.clone(),
             caller: rec.caller.clone(),
             url: rec.intent.as_ref().map(|i| i.url.clone()),
-            filename_hint: rec
-                .intent
-                .as_ref()
-                .and_then(|i| i.filename_hint.clone()),
+            filename_hint: rec.intent.as_ref().and_then(|i| i.filename_hint.clone()),
             size_hint: rec.intent.as_ref().and_then(|i| i.size_hint),
             committed_at_ms: rec.transition_at_ms,
             outcome: rec.outcome.clone(),

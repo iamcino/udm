@@ -444,7 +444,10 @@ fn install_checkpoint(root: &Path) {
     assert!(m.bytes > 1, "checkpoint needs a closed byte range");
     let store = Store::open(root.join("state.redb")).unwrap();
     let mut record = store.get_task(1).unwrap().unwrap();
-    assert!(record.finalization.is_none(), "checkpoint preface runs once");
+    assert!(
+        record.finalization.is_none(),
+        "checkpoint preface runs once"
+    );
     assert!(
         record.progress_checkpoint.is_none(),
         "checkpoint preface runs once"
@@ -706,7 +709,9 @@ fn chain_verified_volatile_kill_does_not_resurrect() {
     assert_eq!(opened.final_sha256, m.old_sha256);
     assert_eq!(opened.error.as_deref(), Some(INTERRUPTED));
     assert_eq!(opened.restarts, 0);
-    assert!(opened.part_len.is_some_and(|len| (m.bytes..=m.bytes + 1).contains(&len)));
+    assert!(opened
+        .part_len
+        .is_some_and(|len| (m.bytes..=m.bytes + 1).contains(&len)));
 }
 
 #[test]

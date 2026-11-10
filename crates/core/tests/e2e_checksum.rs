@@ -1,6 +1,11 @@
-use std::{io::Write, net::TcpListener, thread, time::Duration};
 use sha2::Digest;
-use usagi::{config::Settings, engine::{AddRequest, EngineBuilder}, hash::ExpectedHash, paths::Paths};
+use std::{io::Write, net::TcpListener, thread, time::Duration};
+use usagi::{
+    config::Settings,
+    engine::{AddRequest, EngineBuilder},
+    hash::ExpectedHash,
+    paths::Paths,
+};
 
 #[test]
 fn e2e_download_with_checksum_verification() {
@@ -30,7 +35,12 @@ fn e2e_download_with_checksum_verification() {
             if req_str.starts_with("HEAD ") {
                 write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n", server_payload.len()).unwrap();
             } else {
-                write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", server_payload.len()).unwrap();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    server_payload.len()
+                )
+                .unwrap();
                 stream.write_all(&server_payload).unwrap();
             }
         }
@@ -53,9 +63,15 @@ fn e2e_download_with_checksum_verification() {
         default_download_dir: root.join("downloads").to_string_lossy().into(),
         ..Settings::default()
     };
-    let engine = EngineBuilder::new().paths(paths).settings(settings).build().unwrap();
+    let engine = EngineBuilder::new()
+        .paths(paths)
+        .settings(settings)
+        .build()
+        .unwrap();
 
-    let id = engine.add(AddRequest::new(url).expected_hash(expected_hash)).unwrap();
+    let id = engine
+        .add(AddRequest::new(url).expected_hash(expected_hash))
+        .unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
         let task = engine.task(id).unwrap();
@@ -75,7 +91,11 @@ fn e2e_download_with_checksum_verification() {
 
 #[test]
 fn active_requests_are_independent_of_finished_segments() {
-    use std::{io::Read, sync::{Arc, Condvar, Mutex}, time::Instant};
+    use std::{
+        io::Read,
+        sync::{Arc, Condvar, Mutex},
+        time::Instant,
+    };
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -131,18 +151,31 @@ fn active_requests_are_independent_of_finished_segments() {
                 stream.write_all(&vec![b'B'; length - 1]).unwrap();
             }));
         }
-        for worker in workers { worker.join().unwrap(); }
+        for worker in workers {
+            worker.join().unwrap();
+        }
     });
     let paths = Paths {
-        root: root.into(), db_file: root.join("test.redb"), log_file: root.join("logs/test.log"),
-        temp_dir: root.join("tmp"), default_download_dir: root.join("downloads"),
-        portable: true, exe_dir: Some(root.into()),
+        root: root.into(),
+        db_file: root.join("test.redb"),
+        log_file: root.join("logs/test.log"),
+        temp_dir: root.join("tmp"),
+        default_download_dir: root.join("downloads"),
+        portable: true,
+        exe_dir: Some(root.into()),
     };
-    let engine = EngineBuilder::new().paths(paths).settings(Settings {
-        http3_enabled: false, use_system_proxy: false, segments_per_task: 8,
-        default_download_dir: root.join("downloads").to_string_lossy().into_owned(),
-        min_segment_bytes: 64 * 1024, ..Settings::default()
-    }).build().unwrap();
+    let engine = EngineBuilder::new()
+        .paths(paths)
+        .settings(Settings {
+            http3_enabled: false,
+            use_system_proxy: false,
+            segments_per_task: 8,
+            default_download_dir: root.join("downloads").to_string_lossy().into_owned(),
+            min_segment_bytes: 64 * 1024,
+            ..Settings::default()
+        })
+        .build()
+        .unwrap();
     let id = engine.add(AddRequest::new(url)).unwrap();
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
@@ -152,7 +185,10 @@ fn active_requests_are_independent_of_finished_segments() {
             assert_eq!(task.segments_total, 8);
             break;
         }
-        assert!(Instant::now() < deadline, "requests never became active: {task:?}");
+        assert!(
+            Instant::now() < deadline,
+            "requests never became active: {task:?}"
+        );
         thread::sleep(Duration::from_millis(5));
     }
     *gate.0.lock().unwrap() = true;
@@ -161,7 +197,14 @@ fn active_requests_are_independent_of_finished_segments() {
         let task = engine.task(id).unwrap();
         if task.state.is_terminal() {
             assert_eq!(task.state, usagi::TaskState::Completed, "{:?}", task.error);
-            assert_eq!((task.segments_done, task.segments_total, task.active_requests), (8, 8, 0));
+            assert_eq!(
+                (
+                    task.segments_done,
+                    task.segments_total,
+                    task.active_requests
+                ),
+                (8, 8, 0)
+            );
             assert_eq!(std::fs::read(task.final_path).unwrap(), vec![b'B'; 524288]);
             break;
         }

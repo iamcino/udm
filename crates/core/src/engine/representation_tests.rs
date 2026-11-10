@@ -85,7 +85,9 @@ fn serve_once(response: Vec<u8>) -> (String, std::thread::JoinHandle<String>) {
             }
         };
         stream.set_nonblocking(false).unwrap();
-        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
         let mut request = Vec::new();
         while !request.ends_with(b"\r\n\r\n") {
             let mut byte = [0];
@@ -155,7 +157,10 @@ fn url_for_log_strips_the_query() {
 #[test]
 fn etag_difference_names_quote_only_and_weak_prefix() {
     assert_eq!(etag_difference("\"abc\"", "abc"), "quote-only difference");
-    assert_eq!(etag_difference("\"abc\"", "W/\"abc\""), "weak-prefix difference");
+    assert_eq!(
+        etag_difference("\"abc\"", "W/\"abc\""),
+        "weak-prefix difference"
+    );
     assert_eq!(etag_difference("\"abc\"", "\"xyz\""), "verbatim difference");
 }
 
@@ -171,16 +176,25 @@ async fn run_segment_416_unbound_done_does_not_finish() {
         "",
     ));
     let plan = plan_for(&url, cell.record.read().part_path(), Some(8), None);
-    let error = run_segment(ctx_for(&engine), cell.clone(), plan, CancellationToken::new(), 0)
-        .await
-        .expect_err("unbound 416 is a mismatch");
+    let error = run_segment(
+        ctx_for(&engine),
+        cell.clone(),
+        plan,
+        CancellationToken::new(),
+        0,
+    )
+    .await
+    .expect_err("unbound 416 is a mismatch");
     assert!(matches!(error, Error::RemoteChanged), "{error}");
     let segment = cell.segments.read()[0];
     assert_eq!(segment.done, 8, "416 must not add coverage");
     assert!(!segment.finished, "416 must not mark_finished");
     assert_eq!(cell.record.read().representation_restarts, 0);
     let request = server.join().unwrap();
-    assert!(request.starts_with("GET "), "the early return must not skip this request");
+    assert!(
+        request.starts_with("GET "),
+        "the early return must not skip this request"
+    );
     engine.shutdown();
 }
 
@@ -191,15 +205,24 @@ async fn run_segment_416_matching_bound_skips_the_network() {
     let cell = engine.state.cell(id).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
-    let url = format!("http://127.0.0.1:{}/f.bin", listener.local_addr().unwrap().port());
+    let url = format!(
+        "http://127.0.0.1:{}/f.bin",
+        listener.local_addr().unwrap().port()
+    );
     let bound = bound_for(&url, "\"e\"", Some(8));
     cell.record.write().representation_bound = Some(bound.clone());
     arm_segment(&engine, id, 8, 7, true);
     let plan = plan_for(&url, cell.record.read().part_path(), Some(8), Some(bound));
     let started = Instant::now();
-    run_segment(ctx_for(&engine), cell.clone(), plan, CancellationToken::new(), 0)
-        .await
-        .expect("a matched complete segment returns before the network");
+    run_segment(
+        ctx_for(&engine),
+        cell.clone(),
+        plan,
+        CancellationToken::new(),
+        0,
+    )
+    .await
+    .expect("a matched complete segment returns before the network");
     assert!(started.elapsed() < Duration::from_millis(1500));
     assert!(
         matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
@@ -225,9 +248,15 @@ async fn run_segment_416_bound_mismatch_does_not_finish() {
     cell.record.write().representation_bound = Some(live);
     arm_segment(&engine, id, 2, 7, false);
     let plan = plan_for(&url, cell.record.read().part_path(), Some(8), Some(planned));
-    let error = run_segment(ctx_for(&engine), cell.clone(), plan, CancellationToken::new(), 0)
-        .await
-        .expect_err("a mismatched 416 restarts");
+    let error = run_segment(
+        ctx_for(&engine),
+        cell.clone(),
+        plan,
+        CancellationToken::new(),
+        0,
+    )
+    .await
+    .expect_err("a mismatched 416 restarts");
     assert!(matches!(error, Error::RemoteChanged), "{error}");
     assert_eq!(cell.segments.read()[0].done, 2);
     assert!(!cell.segments.read()[0].finished);
@@ -249,9 +278,15 @@ async fn run_segment_416_without_a_usable_total_is_not_a_restart() {
     cell.record.write().representation_bound = Some(bound.clone());
     arm_segment(&engine, id, 2, 7, false);
     let plan = plan_for(&url, cell.record.read().part_path(), Some(8), Some(bound));
-    let error = run_segment(ctx_for(&engine), cell.clone(), plan, CancellationToken::new(), 0)
-        .await
-        .expect_err("an unsatisfiable range is not a restart");
+    let error = run_segment(
+        ctx_for(&engine),
+        cell.clone(),
+        plan,
+        CancellationToken::new(),
+        0,
+    )
+    .await
+    .expect_err("an unsatisfiable range is not a restart");
     assert!(matches!(error, Error::RangeNotSatisfiable), "{error}");
     assert_eq!(cell.segments.read()[0].done, 2);
     assert!(!cell.segments.read()[0].finished);
@@ -274,9 +309,15 @@ async fn run_segment_416_short_segment_with_matching_total_is_not_a_restart() {
     cell.record.write().representation_bound = Some(bound.clone());
     arm_segment(&engine, id, 2, 7, false);
     let plan = plan_for(&url, cell.record.read().part_path(), Some(8), Some(bound));
-    let error = run_segment(ctx_for(&engine), cell.clone(), plan, CancellationToken::new(), 0)
-        .await
-        .expect_err("a matching total on a short segment is RangeNotSatisfiable");
+    let error = run_segment(
+        ctx_for(&engine),
+        cell.clone(),
+        plan,
+        CancellationToken::new(),
+        0,
+    )
+    .await
+    .expect_err("a matching total on a short segment is RangeNotSatisfiable");
     assert!(matches!(error, Error::RangeNotSatisfiable), "{error}");
     assert_eq!(cell.segments.read()[0].done, 2);
     assert!(!cell.segments.read()[0].finished);
@@ -298,9 +339,15 @@ async fn run_segment_416_shortened_resource_is_a_mismatch() {
     cell.record.write().representation_bound = Some(bound.clone());
     arm_segment(&engine, id, 10, 99, false);
     let plan = plan_for(&url, cell.record.read().part_path(), Some(100), Some(bound));
-    let error = run_segment(ctx_for(&engine), cell.clone(), plan, CancellationToken::new(), 0)
-        .await
-        .expect_err("a shorter 416 total contradicts the bound");
+    let error = run_segment(
+        ctx_for(&engine),
+        cell.clone(),
+        plan,
+        CancellationToken::new(),
+        0,
+    )
+    .await
+    .expect_err("a shorter 416 total contradicts the bound");
     assert!(matches!(error, Error::RemoteChanged), "{error}");
     assert_eq!(cell.segments.read()[0].done, 10);
     assert!(!cell.segments.read()[0].finished);
@@ -332,13 +379,22 @@ async fn partial_is_deleted_only_after_the_clear_is_durable() {
     engine.state.persist(&cell, true).unwrap();
     assert!(part.exists());
     assert_eq!(
-        engine.store().get_task(id).unwrap().unwrap().etag.as_deref(),
+        engine
+            .store()
+            .get_task(id)
+            .unwrap()
+            .unwrap()
+            .etag
+            .as_deref(),
         Some("\"v\"")
     );
 
     engine.store().fail_next_saves(1);
     let failed = reset_progress(&ctx_for(&engine), &cell, true).await;
-    assert!(failed.is_err(), "the injected save must fail before the delete");
+    assert!(
+        failed.is_err(),
+        "the injected save must fail before the delete"
+    );
     assert!(part.exists(), "a failed clear must leave the partial");
     let stored = engine.store().get_task(id).unwrap().unwrap();
     assert_eq!(stored.etag.as_deref(), Some("\"v\""));
@@ -348,7 +404,10 @@ async fn partial_is_deleted_only_after_the_clear_is_durable() {
     reset_progress(&ctx_for(&engine), &cell, false)
         .await
         .expect("the durable clear deletes the partial");
-    assert!(!part.exists(), "the partial is deleted only after the clear is durable");
+    assert!(
+        !part.exists(),
+        "the partial is deleted only after the clear is durable"
+    );
     let stored = engine.store().get_task(id).unwrap().unwrap();
     assert!(stored.etag.is_none());
     assert!(stored.representation_bound.is_none());
@@ -379,7 +438,13 @@ fn persist_epoch_retry_does_not_commit_the_pre_clear_pair() {
     }
     engine.state.persist(&cell, true).unwrap();
     assert_eq!(
-        engine.store().get_task(id).unwrap().unwrap().etag.as_deref(),
+        engine
+            .store()
+            .get_task(id)
+            .unwrap()
+            .unwrap()
+            .etag
+            .as_deref(),
         Some("\"keep\"")
     );
 
@@ -396,8 +461,14 @@ fn persist_epoch_retry_does_not_commit_the_pre_clear_pair() {
     engine.state.persist(&cell, true).unwrap();
     let stored = engine.store().get_task(id).unwrap().unwrap();
     let segments = engine.store().get_segments(id).unwrap();
-    assert!(stored.etag.is_none(), "the pre-clear validator was the last commit");
+    assert!(
+        stored.etag.is_none(),
+        "the pre-clear validator was the last commit"
+    );
     assert!(stored.representation_bound.is_none());
-    assert!(segments.is_empty(), "cleared progress was not the last commit");
+    assert!(
+        segments.is_empty(),
+        "cleared progress was not the last commit"
+    );
     engine.shutdown();
 }

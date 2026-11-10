@@ -18,7 +18,7 @@ use usagi::net::h3::{H3Pool, H3StableIds};
 use usagi::net::{EngineConnections, ProtocolGauge, RequestSpec};
 use usagi::{AddRequest, Engine, EngineBuilder, Paths, Settings, TaskState, TransportPref};
 
-use common::dev_tls::{HARNESS_MARKER, HarnessCa};
+use common::dev_tls::{HarnessCa, HARNESS_MARKER};
 
 /// Rendezvous budget for this suite's condition and operation waits. A
 /// rendezvous wait returns the moment its condition holds (a tenth of a

@@ -143,8 +143,13 @@ fn seed(root: &Path, url: &str, copies: usize) -> Vec<u64> {
         record.total_size = Some(8);
         let mut segment = SegmentState::new(0, 0, 7);
         segment.done = 4;
-        let file = fs::OpenOptions::new().write(true).open(record.part_path()).unwrap();
-        record.prepare_progress_checkpoint(&[segment], &file).unwrap();
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .open(record.part_path())
+            .unwrap();
+        record
+            .prepare_progress_checkpoint(&[segment], &file)
+            .unwrap();
         store.save(&[record], &[(id, vec![segment])], true).unwrap();
         ids.push(id);
     }
@@ -168,8 +173,13 @@ fn seed_bound(root: &Path, url: &str) -> u64 {
     record.representation_bound = Some(RepresentationBound::none_scope(url, "\"v\"", Some(8)));
     let mut segment = SegmentState::new(0, 0, 7);
     segment.done = 4;
-    let file = fs::OpenOptions::new().write(true).open(record.part_path()).unwrap();
-    record.prepare_progress_checkpoint(&[segment], &file).unwrap();
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .open(record.part_path())
+        .unwrap();
+    record
+        .prepare_progress_checkpoint(&[segment], &file)
+        .unwrap();
     store.save(&[record], &[(id, vec![segment])], true).unwrap();
     id
 }
@@ -215,7 +225,9 @@ fn malformed_partial_headers_never_write_resume_data() {
         engine.shutdown();
         let requests = server.join().unwrap();
         assert!(
-            requests[1].to_ascii_lowercase().contains("range: bytes=0-7"),
+            requests[1]
+                .to_ascii_lowercase()
+                .contains("range: bytes=0-7"),
             "legacy progress resumed instead of restarting: {}",
             requests[1]
         );
@@ -248,7 +260,13 @@ fn extra_body_after_full_flush_cannot_complete_or_checkpoint_the_tail() {
 #[test]
 fn protocol_restart_leaves_one_network_retry_for_503() {
     let dir = tempfile::tempdir().unwrap();
-    let full = || reply("200 OK", "Content-Length: 8\r\nETag: \"v\"\r\n", b"ABCDEFGH");
+    let full = || {
+        reply(
+            "200 OK",
+            "Content-Length: 8\r\nETag: \"v\"\r\n",
+            b"ABCDEFGH",
+        )
+    };
     let (url, server) = serve(vec![
         head_bound(8),
         full(),
@@ -272,9 +290,17 @@ fn repeated_protocol_failures_remain_bounded_with_zero_network_retries() {
     let dir = tempfile::tempdir().unwrap();
     let (url, server) = serve(vec![
         head_bound(8),
-        reply("200 OK", "Content-Length: 8\r\nETag: \"v\"\r\n", b"ABCDEFGH"),
+        reply(
+            "200 OK",
+            "Content-Length: 8\r\nETag: \"v\"\r\n",
+            b"ABCDEFGH",
+        ),
         head_bound(8),
-        reply("200 OK", "Content-Length: 12\r\nETag: \"v\"\r\n", b"ABCDEFGHIJKL"),
+        reply(
+            "200 OK",
+            "Content-Length: 12\r\nETag: \"v\"\r\n",
+            b"ABCDEFGHIJKL",
+        ),
     ]);
     let id = seed_bound(dir.path(), &url);
     let engine = engine(dir.path(), 0);

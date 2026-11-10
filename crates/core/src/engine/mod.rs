@@ -12,6 +12,7 @@
 //!   [`TaskCell`], which the UI reads with [`Engine::snapshot`] - no callbacks
 //!   crossing into the UI thread except [`Event`]s.
 
+pub mod proof;
 pub mod speed;
 pub(crate) mod task;
 
@@ -232,6 +233,8 @@ pub(crate) struct TaskCell {
     /// Bytes on disk for this task (sum of segment progress).
     pub received: AtomicU64,
     pub(super) active_requests: AtomicU32,
+    pub(super) lanes: Arc<crate::net::lane::LaneTable>,
+    proof_barrier: Mutex<Option<Arc<proof::ProofBarrier>>>,
     /// Runtime run generation (Usagi PR 3). `spawn_task` advances it once per
     /// granted run, and only after the previous run has drained (`running`).
     /// Coverage, partial claim and finalize writes carry the generation of
@@ -267,12 +270,23 @@ impl std::fmt::Debug for TaskCell {
 }
 
 impl TaskCell {
+    pub(super) fn proof_gate(&self, point: proof::ProofPoint) -> Option<Arc<proof::ProofBarrier>> {
+        self.proof_barrier
+            .lock()
+            .as_ref()
+            .filter(|gate| gate.point == point)
+            .cloned()
+    }
     fn new(record: TaskRecord, segments: Vec<SegmentState>) -> Arc<Self> {
-        let checkpoint_file = if record.progress_checkpoint.is_some() {
-            fs::OpenOptions::new().write(true).open(record.part_path()).ok()
-        } else {
-            None
-        };
+        let checkpoint_file =
+            if record.state != TaskState::Completed && record.progress_checkpoint.is_some() {
+                fs::OpenOptions::new()
+                    .write(true)
+                    .open(record.part_path())
+                    .ok()
+            } else {
+                None
+            };
         let received: u64 = if record.state == TaskState::Completed {
             record.total_size.unwrap_or(0)
         } else {
@@ -284,6 +298,8 @@ impl TaskCell {
             segments: RwLock::new(segments),
             received: AtomicU64::new(received),
             active_requests: AtomicU32::new(0),
+            lanes: Arc::new(crate::net::lane::LaneTable::default()),
+            proof_barrier: Mutex::new(None),
             generation: AtomicU64::new(0),
             persist_epoch: AtomicU64::new(0),
             speed: RwLock::new(SpeedMeter::default()),
@@ -305,7 +321,10 @@ impl TaskCell {
         if current == generation {
             Ok(())
         } else {
-            Err(Error::StaleGeneration { stale: generation, current })
+            Err(Error::StaleGeneration {
+                stale: generation,
+                current,
+            })
         }
     }
 
@@ -698,7 +717,12 @@ impl SharedState {
     /// Save one consistent epoch of each cell. If the epoch moves during the
     /// write, the newer pair is saved before this returns. A stale run
     /// (`generation` does not match) saves nothing.
-    fn save_locked(&self, cells: &[&TaskCell], durable: bool, generation: Option<u64>) -> Result<()> {
+    fn save_locked(
+        &self,
+        cells: &[&TaskCell],
+        durable: bool,
+        generation: Option<u64>,
+    ) -> Result<()> {
         if cells.is_empty() {
             return Ok(());
         }
@@ -724,7 +748,17 @@ impl SharedState {
             let mut segments = Vec::with_capacity(ready.len());
             for snap in &ready {
                 let mut record = snap.record.clone();
-                if let Err(error) = self.prepare_checkpoint(snap.cell, &mut record, &snap.segments) {
+                let written: u64 = snap.segments.iter().map(|segment| segment.done).sum();
+                if written > 0 && record.finalization.is_none() {
+                    if let Some(gate) = snap
+                        .cell
+                        .proof_gate(proof::ProofPoint::AfterWriteBeforeSync)
+                    {
+                        gate.wait_sync(written);
+                    }
+                }
+                if let Err(error) = self.prepare_checkpoint(snap.cell, &mut record, &snap.segments)
+                {
                     for snap in &ready {
                         snap.cell.dirty.store(true, Ordering::Relaxed);
                     }
@@ -733,13 +767,21 @@ impl SharedState {
                 records.push(record);
                 segments.push((snap.cell.id, snap.segments.clone()));
             }
+            for (snap, record) in ready.iter().zip(&records) {
+                if record.progress_checkpoint.is_some() {
+                    if let Some(gate) = snap
+                        .cell
+                        .proof_gate(proof::ProofPoint::AfterSyncBeforeTransaction)
+                    {
+                        gate.wait_sync(snap.segments.iter().map(|segment| segment.done).sum());
+                    }
+                }
+            }
             if self.reject_advanced_checkpoint_store(&ready) {
                 for snap in &ready {
                     snap.cell.dirty.store(true, Ordering::Relaxed);
                 }
-                return Err(Error::Storage(
-                    "injected save failure (test fault)".into(),
-                ));
+                return Err(Error::Storage("injected save failure (test fault)".into()));
             }
             if let Err(error) = self.store.save(&records, &segments, durable) {
                 for snap in &ready {
@@ -747,9 +789,19 @@ impl SharedState {
                 }
                 return Err(error);
             }
-            let moved = ready.iter().any(|snap| {
-                snap.cell.persist_epoch.load(Ordering::Acquire) != snap.epoch
-            });
+            for (snap, record) in ready.iter().zip(&records) {
+                if record.progress_checkpoint.is_some() {
+                    if let Some(gate) = snap
+                        .cell
+                        .proof_gate(proof::ProofPoint::TransactionCommittedBeforeAcknowledgment)
+                    {
+                        gate.wait_sync(snap.segments.iter().map(|segment| segment.done).sum());
+                    }
+                }
+            }
+            let moved = ready
+                .iter()
+                .any(|snap| snap.cell.persist_epoch.load(Ordering::Acquire) != snap.epoch);
             if !moved {
                 return Ok(());
             }
@@ -782,12 +834,21 @@ impl SharedState {
         // publish a completion.
         cell.fence(generation)?;
         let file = cell.checkpoint_file.lock();
-        let held = file.as_ref()
+        let held = file
+            .as_ref()
             .ok_or_else(|| Error::Finalize("no claimed backing handle".into()))?;
         let finalized = crate::finalize::complete(
-            &self.store, &mut record, &mut segments,
-            source, target, policy, content, held, |_| Ok(()),
-        ).map_err(|e| Error::Finalize(e.to_string()));
+            &self.store,
+            &mut record,
+            &mut segments,
+            source,
+            target,
+            policy,
+            content,
+            held,
+            |_| Ok(()),
+        )
+        .map_err(|e| Error::Finalize(e.to_string()));
         // `complete` writes `total_size` and clears the segment vector while
         // both locks are held. The epoch bump is the pair a later saver clones.
         cell.bump_persist_epoch();
@@ -808,7 +869,11 @@ impl SharedState {
         let failure = if completed {
             None
         } else {
-            Some(live.error.clone().unwrap_or_else(|| "unresolved transaction".into()))
+            Some(
+                live.error
+                    .clone()
+                    .unwrap_or_else(|| "unresolved transaction".into()),
+            )
         };
         cell.bump_persist_epoch();
         match failure {
@@ -822,9 +887,9 @@ impl SharedState {
     ///
     /// `stage` receives a clone of the live record and returns the candidate
     /// to persist, or `None` to abort without touching anything. The
-    /// candidate is saved while holding the persistence mutex — the same
+    /// candidate is saved while holding the persistence mutex â€” the same
     /// mutex [`SharedState::persist`], [`SharedState::flush_dirty`] and
-    /// [`SharedState::flush_all`] hold for their whole snapshot+save — so no
+    /// [`SharedState::flush_all`] hold for their whole snapshot+save â€” so no
     /// concurrent flush or command persist can observe or durably write the
     /// candidate before its own save has succeeded. Only after the save
     /// returns Ok are the staged fields copied back into the live record,
@@ -862,10 +927,11 @@ impl SharedState {
                 cell.dirty.store(true, Ordering::Relaxed);
                 return Err(error);
             }
-            if let Err(error) = self
-                .store
-                .save(&[candidate.clone()], &[(cell.id, snap.segments.clone())], true)
-            {
+            if let Err(error) = self.store.save(
+                &[candidate.clone()],
+                &[(cell.id, snap.segments.clone())],
+                true,
+            ) {
                 cell.dirty.store(true, Ordering::Relaxed);
                 return Err(error);
             }
@@ -902,7 +968,13 @@ impl SharedState {
         let refs: Vec<&TaskCell> = dirty.iter().map(|cell| cell.as_ref()).collect();
         let total_done: u64 = refs
             .iter()
-            .map(|cell| cell.segments.read().iter().map(|segment| segment.done).sum::<u64>())
+            .map(|cell| {
+                cell.segments
+                    .read()
+                    .iter()
+                    .map(|segment| segment.done)
+                    .sum::<u64>()
+            })
             .sum();
         match self.save_locked(&refs, true, None) {
             Ok(()) => {
@@ -1120,7 +1192,11 @@ impl EngineBuilder {
         {
             let mut cells = state.cells.write();
             let mut order = state.order.write();
-            for StoredTask { mut record, mut segments } in store.list_tasks()? {
+            for StoredTask {
+                mut record,
+                mut segments,
+            } in store.list_tasks()?
+            {
                 let id = record.id;
                 if !segments.is_empty()
                     && !record.filename.is_empty()
@@ -1136,7 +1212,10 @@ impl EngineBuilder {
                 }
                 if record.state != TaskState::Completed {
                     if crate::durability::recover(&mut record, &mut segments) {
-                        state.log(LogLevel::Warn, format!("#{id} unproven progress will be re-fetched; partial retained"));
+                        state.log(
+                            LogLevel::Warn,
+                            format!("#{id} unproven progress will be re-fetched; partial retained"),
+                        );
                     }
                 }
                 let cell = TaskCell::new(record, segments);
@@ -1265,9 +1344,9 @@ impl Engine {
         client: quinn::ClientConfig,
     ) -> Result<Arc<crate::net::h3::H3Pool>> {
         let runtime = self.runtime.read();
-        let runtime = runtime.as_ref().ok_or_else(|| {
-            Error::Other("the engine runtime has stopped".to_string())
-        })?;
+        let runtime = runtime
+            .as_ref()
+            .ok_or_else(|| Error::Other("the engine runtime has stopped".to_string()))?;
         // Quinn's endpoint driver has to spawn on the runtime that will poll
         // the connection. The test thread is not that runtime.
         let _enter = runtime.enter();
@@ -1309,6 +1388,22 @@ impl Engine {
         self.state.totals()
     }
 
+    /// Local proof evidence only; not persisted or included in IPC snapshots.
+    #[doc(hidden)]
+    pub fn transport_open_evidence(&self, id: u64) -> Option<crate::net::lane::OpenEvidence> {
+        self.state.cell(id).map(|cell| cell.lanes.snapshot())
+    }
+
+    /// Arm one explicit proof barrier. Never armed by application code.
+    #[doc(hidden)]
+    pub fn install_proof_barrier(&self, id: u64, barrier: Arc<proof::ProofBarrier>) -> Result<()> {
+        let cell = self
+            .state
+            .cell(id)
+            .ok_or_else(|| Error::Other("proof task missing".into()))?;
+        *cell.proof_barrier.lock() = Some(barrier);
+        Ok(())
+    }
     pub fn task(&self, id: u64) -> Option<TaskSnapshot> {
         self.state.cell(id).map(|c| c.snapshot())
     }
@@ -1501,7 +1596,8 @@ impl Engine {
         // A draining run holds `running`. Keeping it set stops the supervisor
         // from admitting the task in the middle of the publication.
         let was_running = cell.running.swap(true, Ordering::SeqCst);
-        cell.generation.store(exit.current_generation, Ordering::Release);
+        cell.generation
+            .store(exit.current_generation, Ordering::Release);
         {
             let mut record = cell.record.write();
             record.state = exit.prior;
@@ -1729,7 +1825,8 @@ async fn handle_command(state: &Arc<SharedState>, cmd: Command) -> bool {
                 // Completed stays completed, and its files stay. Cancel of
                 // Failed, Paused, Queued, and the active states is unchanged.
                 if cell.state() != TaskState::Completed {
-                    cell.stop_reason.store(stop_reason::CANCEL, Ordering::SeqCst);
+                    cell.stop_reason
+                        .store(stop_reason::CANCEL, Ordering::SeqCst);
                     cell.token().cancel();
                     {
                         let mut record = cell.record.write();
@@ -1771,16 +1868,21 @@ async fn handle_command(state: &Arc<SharedState>, cmd: Command) -> bool {
                 // no locked destination to move yet; the manual Move
                 // operation is out of G2 scope for it.
                 let route_pending = cell.record.read().route_unlocked();
-                let finalize_pending = cell.record.read().finalization.as_ref()
+                let finalize_pending = cell
+                    .record
+                    .read()
+                    .finalization
+                    .as_ref()
                     .is_some_and(crate::finalize::FinalizeIntent::pending);
                 if finalize_pending {
-                    state.log(LogLevel::Warn, format!("#{id} must resolve its finalization before moving"));
+                    state.log(
+                        LogLevel::Warn,
+                        format!("#{id} must resolve its finalization before moving"),
+                    );
                 } else if route_pending {
                     state.log(
                         LogLevel::Warn,
-                        format!(
-                            "#{id} cannot be moved before its category route is locked"
-                        ),
+                        format!("#{id} cannot be moved before its category route is locked"),
                     );
                 } else if cell.running.load(Ordering::Relaxed) {
                     state.log(
@@ -2062,6 +2164,39 @@ mod tests {
         engine.shutdown();
     }
 
+    #[test]
+    fn completed_record_does_not_reinstall_checkpoint_handle() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut record = TaskRecord::new(
+            1,
+            "https://example.com/file",
+            dir.path(),
+            Some("file.bin".into()),
+        );
+        fs::write(record.part_path(), b"data").unwrap();
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .open(record.part_path())
+            .unwrap();
+        let mut segments = vec![SegmentState::new(0, 0, 3)];
+        segments[0].done = 4;
+        record
+            .prepare_progress_checkpoint(&segments, &file)
+            .unwrap();
+        assert!(record.progress_checkpoint.is_some());
+        drop(file);
+        // Paused records still need their backing handle for checkpoint sync.
+        record.state = TaskState::Paused;
+        let paused = TaskCell::new(record.clone(), segments.clone());
+        assert!(paused.checkpoint_file.lock().is_some());
+        drop(paused);
+        // Even a legacy/inconsistent Completed row with a surviving partial
+        // and receipt must not install a writer during startup.
+        record.state = TaskState::Completed;
+        let completed = TaskCell::new(record, segments);
+        assert!(completed.checkpoint_file.lock().is_none());
+    }
+
     /// Usagi PR 3: a superseded run can neither claim the partial (swapping
     /// the current checkpoint handle) nor journal or recover a finalize.
     #[test]
@@ -2079,9 +2214,21 @@ mod tests {
         // Current generation is 0; a run granted generation 1 supersedes it.
         cell.generation.store(1, Ordering::Release);
         let stale = engine.state.open_partial(id, 0, &part);
-        assert!(matches!(stale, Err(Error::StaleGeneration { stale: 0, current: 1 })));
-        assert!(cell.checkpoint_file.lock().is_none(), "stale claim installed a handle");
-        assert!(!engine.state.owns_partial(id, &part), "stale claim took ownership");
+        assert!(matches!(
+            stale,
+            Err(Error::StaleGeneration {
+                stale: 0,
+                current: 1
+            })
+        ));
+        assert!(
+            cell.checkpoint_file.lock().is_none(),
+            "stale claim installed a handle"
+        );
+        assert!(
+            !engine.state.owns_partial(id, &part),
+            "stale claim took ownership"
+        );
         assert!(!part.exists(), "stale claim created the backing");
 
         let (mut held, _) = engine.state.open_partial(id, 1, &part).unwrap();
@@ -2090,12 +2237,31 @@ mod tests {
         cell.generation.store(2, Ordering::Release);
         let target = dir.path().join("downloads/fenced.bin");
         let refused = engine.state.finalize_file(
-            &cell, 1, &part, &target, ExpectedHash::parse(&format!("blake3:{}", blake3::hash(b"current").to_hex())).unwrap(),
+            &cell,
+            1,
+            &part,
+            &target,
+            ExpectedHash::parse(&format!("blake3:{}", blake3::hash(b"current").to_hex())).unwrap(),
             crate::config::ConflictPolicy::default(),
         );
-        assert!(matches!(refused, Err(Error::StaleGeneration { stale: 1, current: 2 })), "{refused:?}");
-        assert!(cell.record.read().finalization.is_none(), "stale finalize journaled an intent");
-        assert!(part.exists() && !target.exists(), "stale finalize renamed the backing");
+        assert!(
+            matches!(
+                refused,
+                Err(Error::StaleGeneration {
+                    stale: 1,
+                    current: 2
+                })
+            ),
+            "{refused:?}"
+        );
+        assert!(
+            cell.record.read().finalization.is_none(),
+            "stale finalize journaled an intent"
+        );
+        assert!(
+            part.exists() && !target.exists(),
+            "stale finalize renamed the backing"
+        );
         assert!(matches!(
             engine.state.recover_finalization(&cell, 1),
             Err(Error::StaleGeneration { .. })
