@@ -50,7 +50,14 @@ $thumb = (New-Object Security.Cryptography.X509Certificates.X509Certificate2 (Jo
 Step "Reading GitLab release $Tag"
 $deadline = (Get-Date).AddMinutes($WaitMinutes)
 while ($true) {
-    try { $release = Invoke-RestMethod "$api/releases/$([Uri]::EscapeDataString($Tag))"; break }
+    try {
+        # decode the bytes as UTF-8 ourselves: Windows PowerShell reads a JSON response without a
+        # charset as Latin-1, which garbles the Vietnamese release notes
+        $response = Invoke-WebRequest -UseBasicParsing "$api/releases/$([Uri]::EscapeDataString($Tag))"
+        $bytes = $response.RawContentStream.ToArray()
+        $release = [Text.Encoding]::UTF8.GetString($bytes) | ConvertFrom-Json
+        break
+    }
     catch {
         if ((Get-Date) -ge $deadline) { throw "GitLab release $Tag not found: $($_.Exception.Message)" }
         Write-Host 'not there yet, waiting a minute'

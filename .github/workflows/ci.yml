@@ -16,6 +16,8 @@ jobs:
   # ------------------------------------------------------------------ tests
   test:
     name: Tests + compile checks (Linux)
+    # skipped in the private repository (udm-private has no Actions minutes); runs on the public mirror
+    if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -33,6 +35,8 @@ jobs:
   # ------------------------------------------------- Slint source compile
   slint-compile:
     name: Slint source compile check (Linux)
+    # skipped in the private repository (udm-private has no Actions minutes); runs on the public mirror
+    if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -50,6 +54,8 @@ jobs:
   # ------------------------------------------------- native Windows build
   windows-msvc:
     name: Windows build + installer (MSVC)
+    # skipped in the private repository (udm-private has no Actions minutes); runs on the public mirror
+    if: ${{ !github.event.repository.private }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -71,6 +77,8 @@ jobs:
   # --------------------------------------------- cross-build from Linux
   windows-gnu:
     name: Windows cross-build (GNU, from Linux)
+    # skipped in the private repository (udm-private has no Actions minutes); runs on the public mirror
+    if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

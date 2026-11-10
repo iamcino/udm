@@ -23,6 +23,8 @@ permissions:
 jobs:
   mirror:
     name: Publish the GitLab release on GitHub
+    # skipped in the private repository (udm-private has no Actions minutes); runs on the public mirror
+    if: ${{ !github.event.repository.private }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4

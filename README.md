@@ -9,7 +9,8 @@ UDM splits large files into concurrent transfers, keeps recoverable progress on 
 
 **English** · [Tiếng Việt](README.vi.md)
 
-[![Release](https://img.shields.io/gitlab/v/release/cino-group/udm?label=release&color=0a7aff)](https://gitlab.com/cino-group/udm/-/releases)
+[![GitHub release](https://img.shields.io/github/v/release/iamcino/udm?label=GitHub&logo=github&color=0a7aff)](https://github.com/iamcino/udm/releases)
+[![GitLab release](https://img.shields.io/gitlab/v/release/cino-group/udm?label=GitLab&logo=gitlab&color=fc6d26)](https://gitlab.com/cino-group/udm/-/releases)
 ![Platform](https://img.shields.io/badge/platform-Windows%2011%20x64-0a7aff)
 ![Rust](https://img.shields.io/badge/Rust-stable-000000?logo=rust)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-green)](LICENSE)
