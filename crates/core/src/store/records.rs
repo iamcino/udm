@@ -390,6 +390,11 @@ pub struct TaskRecord {
     /// deserializes as none and is not resumed.
     #[serde(default)]
     pub representation_bound: Option<RepresentationBound>,
+    /// Additive schema-2 provenance. False on pre-S2 records: their H3 URL
+    /// may be synthetic. Only exact original-URL equality proves old coverage
+    /// logical; discard ambiguous identity without guessing a port mapping.
+    #[serde(default)]
+    pub logical_url_identity: bool,
 
     /// Browser-handoff transaction that created this task (G5). Missing
     /// on every row written before G5, which deserializes as none. The
@@ -418,6 +423,18 @@ pub struct TaskRecord {
 }
 
 impl TaskRecord {
+    /// Pre-S2 routing could have stored an internal Alt-Svc port as a URL.
+    /// Exact original identity is safe; any divergence is ambiguous because
+    /// the legacy scalar may have lost an earlier H3 observation.
+    pub(crate) fn needs_logical_url_discard(&self) -> bool {
+        !self.logical_url_identity
+            && (self.final_url != self.url
+                || self
+                    .representation_bound
+                    .as_ref()
+                    .is_some_and(|bound| bound.final_url != self.url))
+    }
+
     /// Synchronize the claimed backing file for this exact segment snapshot.
     /// Persist this record and the same segments together in a durable Store
     /// transaction. This receipt alone does not mean the DB commit succeeded.
@@ -453,6 +470,7 @@ impl TaskRecord {
             attempts: 0,
             representation_restarts: 0,
             representation_bound: None,
+            logical_url_identity: true,
             handoff_tx: None,
             transport: None,
             transport_summary: TransportSummary::Unknown,
@@ -697,5 +715,32 @@ mod transport_summary_compatibility {
         }
         let old: Scalar = serde_json::from_value(serde_json::to_value(record).unwrap()).unwrap();
         assert_eq!(old.transport, None);
+    }
+}
+
+#[cfg(test)]
+mod s2_identity_compatibility {
+    use super::*;
+    #[test]
+    fn missing_provenance_requires_discard_without_reinterpreting_transport() {
+        let record = TaskRecord::new(1, "https://localhost:443/file", Path::new("."), None);
+        assert!(record.logical_url_identity);
+        let mut old = serde_json::to_value(record).unwrap();
+        old.as_object_mut().unwrap().remove("logical_url_identity");
+        let loaded: TaskRecord = serde_json::from_value(old).unwrap();
+        assert!(!loaded.logical_url_identity);
+        assert_eq!(loaded.transport_summary, TransportSummary::Unknown);
+        assert!(!loaded.needs_logical_url_discard());
+        let mut synthetic = loaded.clone();
+        synthetic.final_url = "https://localhost:8443/file".into();
+        assert!(synthetic.needs_logical_url_discard());
+        let mut hidden_h3 = loaded;
+        hidden_h3.transport = Some(TransportKind::Http2);
+        hidden_h3.representation_bound = Some(RepresentationBound::none_scope(
+            "https://localhost:8443/file",
+            "\"fixed\"",
+            Some(1024),
+        ));
+        assert!(hidden_h3.needs_logical_url_discard());
     }
 }

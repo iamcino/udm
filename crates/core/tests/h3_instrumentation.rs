@@ -659,11 +659,15 @@ fn two_tasks_on_one_connection_report_global_active_one() -> Result<(), String> 
 #[test]
 fn h3_failure_then_h1_leaves_the_engine_snapshot_unavailable() -> Result<(), String> {
     let _serial = serial();
-    let rt = harness_runtime()?;
-    let ca = HarnessCa::generate()?;
-    // Production trust does not accept this certificate, so the H3 dial fails.
-    let quic = rt.block_on(ca.spawn_h3())?;
-    let port = quic.addr.port();
+    // A certificate failure is terminal under S2 and must not exercise
+    // fallback. Hold a silent UDP endpoint instead: the transport timeout is
+    // eligible for Http12 fallback without ignoring authentication failure.
+    let quic = std::net::UdpSocket::bind("127.0.0.1:0")
+        .map_err(|e| format!("silent QUIC endpoint: {e}"))?;
+    let port = quic
+        .local_addr()
+        .map_err(|e| format!("UDP addr: {e}"))?
+        .port();
     let fallback_hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let fallback_v4 = listen_and_reset(
         (std::net::Ipv4Addr::LOCALHOST, port),
@@ -733,7 +737,7 @@ fn h3_failure_then_h1_leaves_the_engine_snapshot_unavailable() -> Result<(), Str
     engine.shutdown();
     drop(fallback_v4);
     drop(fallback_v6);
-    rt.block_on(quic.shutdown());
+    drop(quic);
     let _ = http_server.join();
     Ok(())
 }

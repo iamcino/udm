@@ -95,6 +95,7 @@ pub(super) async fn run(ctx: Arc<RunCtx>, id: u64, token: CancellationToken) {
     }
     cell.record.write().transport_summary = crate::store::records::TransportSummary::Unknown;
     cell.uses_family_paths.store(false, Ordering::Release);
+    cell.lanes.start_run(ctx.generation);
 
     loop {
         if token.is_cancelled() {
@@ -225,6 +226,30 @@ async fn execute(
         let part = cell.record.read().part_path();
         let final_path = ctx.state.recover_finalization(cell, ctx.generation)?;
         return completed(ctx, cell, &part, &final_path);
+    }
+    let legacy = {
+        let record = cell.record.read();
+        (
+            !record.logical_url_identity,
+            record.needs_logical_url_discard(),
+            record.segments_planned,
+        )
+    };
+    if legacy.0 {
+        if legacy.1 {
+            // Discard first: never pair a rewritten identity with old coverage
+            // in a periodic checkpoint. A crash here retains an unbound row.
+            reset_progress(ctx, cell, false).await?;
+        }
+        let mut record = cell.record.write();
+        let _segments = cell.segments.write();
+        cell.fence(ctx.generation)?;
+        if legacy.1 {
+            record.final_url = record.url.clone();
+        }
+        record.logical_url_identity = true;
+        record.segments_planned = legacy.2;
+        cell.bump_persist_epoch();
     }
     set_state(ctx, cell, TaskState::Probing);
 
@@ -657,18 +682,13 @@ async fn transfer(
     *cell.allocation_epochs.lock() = epochs;
     if ctx.settings.dual_stack_paths {
         let settings = ctx.state.net.settings();
-        let http12_only = !settings.http3_enabled
-            || plan.pref == TransportPref::NoHttp3
-            || (plan.pref == TransportPref::Auto
-                && settings.default_pref == TransportPref::NoHttp3);
         let eligible = !ctx.settings.use_system_proxy
             && !settings.use_system_proxy
-            && http12_only
-            && plan.pref != TransportPref::Http3Only
+            && ctx.state.net.effective_pref(plan.pref) != TransportPref::Http3Only
             && plan.bound.is_some()
             && plan.total.is_some();
         if eligible {
-            let paths = ctx.state.net.family_paths()?;
+            let paths = ctx.state.net.family_paths(&plan.request_url, plan.pref)?;
             // Conditional small range probes admit no coverage. All headers,
             // bound and actual peers are checked before any writer is granted.
             let mut admitted = true;
@@ -679,7 +699,7 @@ async fn transfer(
                     .with_family_route(Some(route.clone()));
                 let response = tokio::select! {
                     _ = token.cancelled() => return Ok(Outcome::Stopped),
-                    result = ctx.state.net.open(&spec, TransportPref::NoHttp3) => result,
+                    result = ctx.state.net.open(&spec, plan.pref) => result,
                 };
                 match response {
                     Ok(mut opened) => {
@@ -1144,6 +1164,11 @@ async fn run_segment(
         record.transport = record.transport_summary.legacy();
     }
 
+    let _path_use = plan.route.as_ref().and_then(|route| {
+        cell.lanes.admit_path(ctx.generation, route.family, plan.allocation_epoch,
+            opened.transport, &opened.final_url, opened.remote_addr)
+    });
+
     let stall = Duration::from_secs(ctx.settings.stall_timeout_secs);
     // Flushed means the OS has accepted the write, not power-loss durability.
     let mut flushed: u64 = done;
@@ -1559,11 +1584,15 @@ fn commit_identity(
         }
         record.representation_bound = Some(bound.clone());
     }
+    record.logical_url_identity = true;
     record.final_url = probe.final_url.clone();
     record.etag = probe.etag.clone();
     record.last_modified = probe.last_modified.clone();
     record.accept_ranges = probe.accept_ranges;
-    record.transport = Some(probe.transport);
+    record.transport = match record.transport_summary {
+        crate::store::records::TransportSummary::Unknown => Some(probe.transport),
+        _ => record.transport_summary.legacy(),
+    };
     record.content_type = probe.content_type.clone();
     if let Some(size) = probe.size {
         record.total_size = Some(size);

@@ -131,31 +131,13 @@ macro_rules! deferred {
         }
     };
 }
-deferred!(
-    a1_s2_mixed_not_run,
-    "NOT RUN: S2 mixed H3 route; S1 Http12 pair covered in transport_s1.rs"
-);
-deferred!(
-    a6_not_run,
-    "NOT RUN: S2 logical/effective H3 redirects not authorized"
-);
-deferred!(
-    a7_not_run,
-    "NOT RUN: S2 alternate-host rejection and authenticated logical H3 identity not authorized"
-);
-deferred!(
-    a8_not_run,
-    "NOT RUN: S2 logical Alt-Svc cache key and frozen epoch not authorized"
-);
+// S2 A1 mixed, A6/A7/A8/A13 executable drivers: transport_s2.rs.
+// Mixed A2-A5/A9-A11 lifecycle extensions remain NOT RUN except the named
+// representation and policy controls exercised in that file; see S2 evidence.
 deferred!(
     a12_probe_not_pass_case,
     "NOT RUN: historical Http12-only option b probe; countersigned option a retained"
 );
-deferred!(
-    a13_not_run,
-    "NOT RUN: S2 synthetic H3 URL recovery migration not authorized"
-);
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s0_h3_fixture_and_single_path_engine_barriers() {
     use std::time::Duration;

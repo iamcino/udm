@@ -1064,13 +1064,62 @@ fn short_hash(h: &str) -> String {
 /// Build the bottom-panel detail for the focused task, from snapshot data
 /// only. No priority, referer, per-segment speed, or history is invented:
 /// the snapshot does not carry those fields.
-fn detail_from(s: &TaskSnapshot, vietnamese: bool) -> TaskDetail {
-    let (_, transport_label) = match s.transport {
-        Some(usagi::store::records::TransportKind::Http3) => ("H3", "HTTP/3 (QUIC)"),
-        Some(usagi::store::records::TransportKind::Http2) => ("H2", "HTTP/2"),
-        Some(usagi::store::records::TransportKind::Http11) => ("H1", "HTTP/1.1"),
+fn transport_labels(s: &TaskSnapshot, vietnamese: bool) -> (&'static str, String) {
+    use usagi::store::records::{TransportKind, TransportSummary};
+    if matches!(s.transport_summary, TransportSummary::Mixed(_)) {
+        return ("Mixed", if vietnamese { "Hỗn hợp" } else { "Mixed" }.into());
+    }
+    let (short, label) = match s.transport {
+        Some(TransportKind::Http3) => ("H3", "HTTP/3 (QUIC)"),
+        Some(TransportKind::Http2) => ("H2", "HTTP/2"),
+        Some(TransportKind::Http11) => ("H1", "HTTP/1.1"),
         _ => ("?", ""),
     };
+    (short, label.into())
+}
+
+fn detail_from(s: &TaskSnapshot, vietnamese: bool) -> TaskDetail {
+    let (_, mut transport_label) = transport_labels(s, vietnamese);
+    if !s.paths.is_empty() {
+        let paths = s
+            .paths
+            .iter()
+            .map(|path| {
+                let family = match path.family {
+                    usagi::net::http12::Family::V4 => "IPv4",
+                    _ => "IPv6",
+                };
+                let protocols = path
+                    .observed_protocols
+                    .iter()
+                    .map(|p| p.short())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                let state = if path.active_ranges > 0 {
+                    if vietnamese {
+                        "tải"
+                    } else {
+                        "active"
+                    }
+                } else if s.state.is_active() {
+                    if vietnamese {
+                        "chờ"
+                    } else {
+                        "ready"
+                    }
+                } else {
+                    if vietnamese {
+                        "dừng"
+                    } else {
+                        "retired"
+                    }
+                };
+                format!("{family}: {protocols} ({state})")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        transport_label = paths;
+    }
     let percent = if s.state == TaskState::Completed {
         1.0
     } else {
@@ -1223,12 +1272,7 @@ fn detail_from(s: &TaskSnapshot, vietnamese: bool) -> TaskDetail {
 
 fn row_from(s: &TaskSnapshot, vietnamese: bool, selected: bool) -> TaskRow {
     let downloading = s.state == TaskState::Downloading;
-    let (transport, transport_label) = match s.transport {
-        Some(usagi::store::records::TransportKind::Http3) => ("H3", "HTTP/3 (QUIC)"),
-        Some(usagi::store::records::TransportKind::Http2) => ("H2", "HTTP/2"),
-        Some(usagi::store::records::TransportKind::Http11) => ("H1", "HTTP/1.1"),
-        _ => ("?", ""),
-    };
+    let (transport, transport_label) = transport_labels(s, vietnamese);
     let speed = if s.verify_bps > 0.0 {
         format!(
             "{} {}",
@@ -1850,5 +1894,144 @@ pub fn shell_open(path: &std::path::Path, select: bool) {
     {
         let _ = select;
         let _ = std::process::Command::new("xdg-open").arg(path).spawn();
+    }
+}
+
+#[cfg(all(test, windows))]
+mod s2_render_tests {
+    use super::*;
+    use slint::platform::{
+        software_renderer::{MinimalSoftwareWindow, RepaintBufferType},
+        Platform, WindowAdapter,
+    };
+    use usagi::store::records::{TransportKind, TransportSummary};
+
+    struct Headless(Rc<MinimalSoftwareWindow>);
+    impl Platform for Headless {
+        fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    // Exercise the real row/detail bindings and software renderer at the minimum
+    // width: family history must not silently elide the second family.
+    #[test]
+    fn s2_mixed_family_detail_headless_render() {
+        let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        slint::platform::set_platform(Box::new(Headless(window.clone()))).unwrap();
+        let ui = AppWindow::new().unwrap();
+        ui.global::<crate::I18n>().on_translate(|key, language| {
+            if language == 1 {
+                crate::i18n::vi(key.as_str()).into()
+            } else {
+                key
+            }
+        });
+        let mut task = TaskSnapshot {
+            id: 1,
+            url: "https://localhost/proof.bin".into(),
+            filename: "Mixed transport proof.bin".into(),
+            dest_dir: "C:/proof/downloads".into(),
+            state: TaskState::Downloading,
+            state_label: "Downloading".into(),
+            total_size: Some(262281),
+            received: 131140,
+            fraction: Some(0.5),
+            speed_bps: 65536.0,
+            eta_secs: 2.0,
+            segments_done: 2,
+            segments_total: 4,
+            active_requests: 2,
+            error: None,
+            transport: None,
+            transport_summary: TransportSummary::Mixed(vec![
+                TransportKind::Http3,
+                TransportKind::Http2,
+            ]),
+            paths: vec![
+                usagi::net::lane::PathSnapshot {
+                    generation: 1,
+                    family: usagi::net::http12::Family::V4,
+                    allocation_epoch: 0,
+                    active_ranges: 1,
+                    observed_protocols: vec![TransportKind::Http3],
+                    logical_url: "https://localhost/proof.bin".into(),
+                    endpoint: Some("127.0.0.1:8443".parse().unwrap()),
+                },
+                usagi::net::lane::PathSnapshot {
+                    generation: 1,
+                    family: usagi::net::http12::Family::V6,
+                    allocation_epoch: 0,
+                    active_ranges: 1,
+                    observed_protocols: vec![TransportKind::Http2],
+                    logical_url: "https://localhost/proof.bin".into(),
+                    endpoint: Some("[::1]:443".parse().unwrap()),
+                },
+            ],
+            created_at: 0,
+            started_at: Some(0),
+            finished_at: None,
+            final_path: "C:/proof/downloads/proof.bin".into(),
+            expected_hash: None,
+            computed_hash: None,
+            attempts: 0,
+            verify_bps: 0.0,
+        };
+        ui.show().unwrap();
+        let mut palette_samples = [None, None];
+        for vietnamese in [false, true] {
+            for theme in [0, 1] {
+                for (width, height) in [(800u32, 640u32), (1040, 720), (1600, 900)] {
+                    ui.set_language_index(if vietnamese { 1 } else { 0 });
+                    ui.set_theme_index(theme);
+                    ui.set_theme_pref(theme);
+                    ui.invoke_apply_native_theme();
+                    ui.set_tasks(ModelRc::new(VecModel::from(vec![row_from(
+                        &task, vietnamese, false,
+                    )])));
+                    let detail = detail_from(&task, vietnamese);
+                    assert_eq!(detail.transport_label.lines().count(), 2);
+                    assert!(detail.transport_label.contains("IPv4: H3"));
+                    assert!(detail.transport_label.contains("IPv6: H2"));
+                    ui.set_detail(detail);
+                    ui.set_detail_visible(true);
+                    window.set_size(slint::PhysicalSize::new(width, height));
+                    window.request_redraw();
+                    let mut pixels = vec![slint::Rgb8Pixel::default(); (width * height) as usize];
+                    assert!(window.draw_if_needed(|renderer| {
+                        renderer.render(&mut pixels, width as usize);
+                    }));
+                    if !vietnamese && width == 800 {
+                        palette_samples[theme as usize] = Some(pixels[0]);
+                    }
+                    if let Some(root) = std::env::var_os("UDM_S2_RENDER_DIR") {
+                        let root = std::path::PathBuf::from(root);
+                        std::fs::create_dir_all(&root).unwrap();
+                        let bytes: Vec<_> = pixels.iter().flat_map(|p| [p.r, p.g, p.b]).collect();
+                        image::save_buffer(
+                            root.join(format!(
+                                "mixed-{}-{theme}-{width}.png",
+                                if vietnamese { "vi" } else { "en" }
+                            )),
+                            &bytes,
+                            width,
+                            height,
+                            image::ColorType::Rgb8,
+                        )
+                        .unwrap();
+                    }
+                }
+            }
+        }
+        assert_ne!(
+            palette_samples[0], palette_samples[1],
+            "dark and light renders must differ"
+        );
+        task.paths[0].active_ranges = 0;
+        task.paths[0].observed_protocols.push(TransportKind::Http2);
+        let detail = detail_from(&task, false);
+        assert!(detail.transport_label.contains("IPv4: H3/H2 (ready)"));
+        assert!(detail.transport_label.contains("IPv6: H2 (active)"));
+        ui.hide().unwrap();
     }
 }

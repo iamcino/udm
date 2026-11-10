@@ -454,10 +454,17 @@ fn cmd_list(cli: &Cli) -> Result<ExitCode> {
                 received = md.len();
             }
         }
-        let proto = record
-            .transport
-            .map(|t| t.short().to_string())
-            .unwrap_or_else(|| "-".to_string());
+        let proto = if matches!(
+            record.transport_summary,
+            usagi::store::records::TransportSummary::Mixed(_)
+        ) {
+            "Mixed".to_string()
+        } else {
+            record
+                .transport
+                .map(|t| t.short().to_string())
+                .unwrap_or_else(|| "-".to_string())
+        };
         println!(
             "{:>4}  {:<11}  {:>10}  {:>10}  {:<6}  {}",
             record.id,
@@ -863,10 +870,16 @@ fn render_line(task: &TaskSnapshot, _elapsed: Duration) -> String {
     } else {
         task.state.label().to_string()
     };
-    let proto = task
-        .transport
-        .map(|t| t.short().to_string())
-        .unwrap_or_else(|| "-".to_string());
+    let proto = if matches!(
+        task.transport_summary,
+        usagi::store::records::TransportSummary::Mixed(_)
+    ) {
+        "Mixed".to_string()
+    } else {
+        task.transport
+            .map(|t| t.short().to_string())
+            .unwrap_or_else(|| "-".to_string())
+    };
     let name = truncate(&task.filename, 34);
     format!(
         "#{:<3} {name:<34} {bar} {percent}  {size:>22}  {speed:>13}  {eta:<10} {proto:<3} segs {}/{}",

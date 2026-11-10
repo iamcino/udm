@@ -249,6 +249,16 @@ pub fn parse_content_range(value: &str) -> Option<(u64, u64, Option<u64>)> {
 /// A plain `h3` wins over draft variants (`h3-29`), which are used as a
 /// fallback. Returns `(port, max_age_seconds)`.
 pub fn parse_alt_svc_h3(value: &str, default_port: u16) -> Option<(u16, u64)> {
+    parse_alt_svc_h3_for_host(value, "", default_port)
+}
+
+/// The minimum supports same-host alternatives only. Never erase an advertised
+/// host and accidentally authenticate a different endpoint on the origin host.
+pub fn parse_alt_svc_h3_for_host(
+    value: &str,
+    host: &str,
+    _default_port: u16,
+) -> Option<(u16, u64)> {
     let mut draft: Option<(u16, u64)> = None;
     for candidate in value.split(',') {
         let mut parts = candidate.trim().split(';');
@@ -273,12 +283,22 @@ pub fn parse_alt_svc_h3(value: &str, default_port: u16) -> Option<(u16, u64)> {
                 }
             }
         }
-        let port = authority
-            .and_then(|a| {
-                let a = a.trim().trim_matches('"');
-                a.rsplit(':').next()?.trim().parse::<u16>().ok()
-            })
-            .unwrap_or(default_port);
+        let Some(authority) = authority else {
+            continue;
+        };
+        let authority = authority.trim().trim_matches('"');
+        let Some((alt_host, port)) = authority.rsplit_once(':') else {
+            continue;
+        };
+        if !alt_host.is_empty() && !alt_host.eq_ignore_ascii_case(host) {
+            continue;
+        }
+        let Ok(port) = port.parse::<u16>() else {
+            continue;
+        };
+        if port == 0 {
+            continue;
+        }
         if is_h3 {
             return Some((port, max_age));
         }

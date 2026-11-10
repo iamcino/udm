@@ -58,7 +58,7 @@ impl NetSettings {
 /// One HTTP request description (used for both transports).
 #[derive(Clone, Debug)]
 pub struct RequestSpec {
-    /// Frozen, independently built Http12 route. Dispatch precedes H3.
+    /// Frozen family route. IPv6 dispatch always precedes H3 selection.
     pub family_route: Option<FamilyRoute>,
     pub url: String,
     pub method: Method,
@@ -114,6 +114,8 @@ impl RequestSpec {
 pub struct FamilyRoute {
     pub family: Family,
     client: Http12Client,
+    /// Frozen endpoint and pool for this task route; None freezes Http12.
+    h3: Option<(Arc<H3Pool>, AltSvcEntry)>,
 }
 
 #[derive(Clone, Debug)]
@@ -423,7 +425,11 @@ impl NetStack {
         Ok(())
     }
 
-    pub(crate) fn family_paths(&self) -> Result<FamilyPaths> {
+    pub(crate) fn family_paths(&self, url: &str, pref: TransportPref) -> Result<FamilyPaths> {
+        let parsed = validate(url)?;
+        let h3 = self
+            .h3_target(&parsed, self.effective_pref(pref))
+            .and_then(|entry| self.inner.h3.read().clone().map(|pool| (pool, entry)));
         let settings = self.settings();
         let roots = self.inner.test_roots.read();
         let roots: Vec<_> = roots.iter().map(Vec::as_slice).collect();
@@ -432,10 +438,12 @@ impl NetStack {
         Ok(FamilyPaths([
             FamilyRoute {
                 family: Family::V4,
+                h3,
                 client: Http12Client::family(&settings, &roots, Family::V4)?,
             },
             FamilyRoute {
                 family: Family::V6,
+                h3: None,
                 client: Http12Client::family(&settings, &roots, Family::V6)?,
             },
         ]))
@@ -517,7 +525,9 @@ impl NetStack {
                 }
                 Err(e) => {
                     self.record_h3_failure(&entry.origin);
-                    if effective == TransportPref::Http3Only {
+                    if effective == TransportPref::Http3Only
+                        || matches!(e, Error::Tls(_) | Error::RemoteChanged)
+                    {
                         return Err(e);
                     }
                     tracing::info!(
@@ -528,6 +538,11 @@ impl NetStack {
             }
         }
 
+        if effective == TransportPref::Http3Only {
+            return Err(Error::Unsupported(
+                "HTTP/3-only task has no eligible QUIC endpoint".into(),
+            ));
+        }
         self.probe_http12(&parsed).await
     }
 
@@ -730,15 +745,36 @@ impl NetStack {
     pub async fn open(&self, spec: &RequestSpec, pref: TransportPref) -> Result<Opened> {
         let parsed = validate(&spec.url)?;
         if let Some(route) = &spec.family_route {
-            // In particular, IPv6 never enters generic H3-first selection.
+            // IPv6 dispatch never enters H3. IPv4 uses only the endpoint frozen
+            // before admission, even if a later response advertises another port.
+            if let Some((pool, entry)) = &route.h3 {
+                match self.h3_exchange(pool, spec.clone(), entry).await {
+                    Ok((response, final_url)) => {
+                        self.record_h3_success(&entry.origin);
+                        self.learn_alt_svc_headers(&response.headers, &final_url);
+                        return Ok(opened_from_h3(response, final_url));
+                    }
+                    Err(e) => {
+                        self.record_h3_failure(&entry.origin);
+                        if matches!(e, Error::Tls(_) | Error::RemoteChanged) {
+                            return Err(e);
+                        }
+                    }
+                }
+            }
             let response = route.client.send(spec).await?;
+            self.learn_alt_svc_headers(response.headers(), response.url().as_str());
             return Ok(opened_from_http12(response));
         }
         let effective = self.effective_pref(pref);
 
         if let Some(entry) = self.h3_target(&parsed, effective) {
-            let pool = self.h3_pool()?;
-            match self.h3_exchange(&pool, spec.clone(), &entry).await {
+            let result = async {
+                let pool = self.h3_pool()?;
+                self.h3_exchange(&pool, spec.clone(), &entry).await
+            }
+            .await;
+            match result {
                 Ok((response, final_url)) => {
                     self.record_h3_success(&entry.origin);
                     self.learn_alt_svc_headers(&response.headers, &final_url);
@@ -746,7 +782,9 @@ impl NetStack {
                 }
                 Err(e) => {
                     self.record_h3_failure(&entry.origin);
-                    if effective == TransportPref::Http3Only {
+                    if effective == TransportPref::Http3Only
+                        || matches!(e, Error::Tls(_) | Error::RemoteChanged)
+                    {
                         return Err(e);
                     }
                     tracing::info!(
@@ -757,6 +795,11 @@ impl NetStack {
             }
         }
 
+        if effective == TransportPref::Http3Only {
+            return Err(Error::Unsupported(
+                "HTTP/3-only task has no eligible QUIC endpoint".into(),
+            ));
+        }
         self.open_http12(spec).await
     }
 
@@ -776,15 +819,17 @@ impl NetStack {
             .clone()
             .ok_or_else(|| Error::Http3("the QUIC stack is disabled in settings".to_string()))
     }
-    fn effective_pref(&self, pref: TransportPref) -> TransportPref {
+    pub(crate) fn effective_pref(&self, pref: TransportPref) -> TransportPref {
         let settings = self.inner.settings.read();
-        if !settings.http3_enabled {
-            return TransportPref::NoHttp3;
-        }
-        if pref == TransportPref::Auto {
+        let resolved = if pref == TransportPref::Auto {
             settings.default_pref
         } else {
             pref
+        };
+        if !settings.http3_enabled && resolved != TransportPref::Http3Only {
+            TransportPref::NoHttp3
+        } else {
+            resolved
         }
     }
 
@@ -801,11 +846,16 @@ impl NetStack {
             return None;
         }
         let settings = self.inner.settings.read();
+        if !settings.http3_enabled {
+            return None;
+        }
         let https_port = url.port_or_known_default().unwrap_or(443);
         let key = origin_key(&host, https_port);
 
         if let Some(entry) = self.inner.alt_svc.get(&key) {
-            if entry.is_valid(util::now_millis(), settings.alt_svc_max_age.as_secs()) {
+            if entry.host.eq_ignore_ascii_case(&host)
+                && entry.is_valid(util::now_millis(), settings.alt_svc_max_age.as_secs())
+            {
                 return Some(entry);
             }
         }
@@ -838,11 +888,11 @@ impl NetStack {
         entry: &AltSvcEntry,
     ) -> Result<(H3Response, String)> {
         let max_redirects = self.inner.settings.read().max_redirects;
-        let mut spec = rewrite_for_h3(spec, entry);
+        let mut spec = spec;
         let mut current = spec.url.clone();
 
         for _ in 0..=max_redirects {
-            let mut response = pool.request(&spec).await?;
+            let mut response = pool.request_at(&spec, &entry.host, entry.port).await?;
             if !response.status.is_redirection() {
                 return Ok((response, current));
             }
@@ -854,27 +904,11 @@ impl NetStack {
             let next = Url::parse(&current)?.join(&location)?;
             let next = validate(next.as_str())?;
 
-            let host = next
-                .host_str()
-                .ok_or_else(|| Error::InvalidUrl("redirect target has no host".into()))?
-                .to_ascii_lowercase();
-            let port = next.port_or_known_default().unwrap_or(443);
-            let key = origin_key(&host, port);
-            let known = self
-                .inner
-                .alt_svc
-                .get(&key)
-                .map(|e| {
-                    e.is_valid(
-                        util::now_millis(),
-                        self.inner.settings.read().alt_svc_max_age.as_secs(),
-                    )
-                })
-                .unwrap_or(false);
-            if !known && host != entry.host {
-                return Err(Error::Http3(format!(
-                    "redirect to `{host}` which has no known HTTP/3 endpoint"
-                )));
+            // An endpoint is authenticated for this logical host only. An
+            // actual origin redirect is identity change, never an Alt-Svc hop.
+            let original = Url::parse(&spec.url)?;
+            if next.origin() != original.origin() {
+                return Err(Error::RemoteChanged);
             }
             spec.url = next.to_string();
             current = next.to_string();
@@ -905,18 +939,6 @@ impl NetStack {
         self.inner.alt_svc.put(entry.clone());
         Some(entry)
     }
-}
-
-/// Rewrite a spec so it targets the QUIC port we learned about.
-fn rewrite_for_h3(mut spec: RequestSpec, entry: &AltSvcEntry) -> RequestSpec {
-    if let Ok(mut url) = Url::parse(&spec.url) {
-        let current_port = url.port_or_known_default().unwrap_or(443);
-        if entry.port != current_port {
-            let _ = url.set_port(Some(entry.port));
-            spec.url = url.to_string();
-        }
-    }
-    spec
 }
 
 fn opened_from_http12(response: reqwest::Response) -> Opened {
@@ -1056,13 +1078,6 @@ mod tests {
     }
 
     #[test]
-    fn rewrites_the_quic_port() {
-        let entry = AltSvcEntry::new("cdn.example", 8443, 60);
-        let spec = rewrite_for_h3(RequestSpec::get("https://cdn.example/f.bin"), &entry);
-        assert_eq!(spec.url, "https://cdn.example:8443/f.bin");
-    }
-
-    #[test]
     fn engine_connection_snapshot_stays_unavailable() {
         let stack = stack();
         assert!(stack.engine_connections().active().is_none());
@@ -1072,6 +1087,28 @@ mod tests {
         };
         stack.update_settings(&settings).unwrap();
         assert!(stack.engine_connections().active().is_none());
+    }
+
+    #[test]
+    fn unavailable_h3_pool_keeps_both_http12_family_routes() {
+        let stack = NetStack::new(
+            &Settings {
+                use_system_proxy: false,
+                ..Settings::default()
+            },
+            Arc::new(MemAltSvc::new()),
+        )
+        .unwrap();
+        stack
+            .alt_svc_store()
+            .put(AltSvcEntry::new("cdn.example", 443, 3600));
+        *stack.inner.h3.write() = None;
+        let paths = stack
+            .family_paths("https://cdn.example/f", TransportPref::Auto)
+            .unwrap();
+        assert!(paths.0.iter().all(|route| route.h3.is_none()));
+        assert_eq!(paths.0[0].family, Family::V4);
+        assert_eq!(paths.0[1].family, Family::V6);
     }
 
     #[test]

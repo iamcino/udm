@@ -122,6 +122,8 @@ pub struct TaskSnapshot {
     pub error: Option<String>,
     pub transport: Option<TransportKind>,
     pub transport_summary: crate::store::records::TransportSummary,
+    /// Current range activity and observed protocol history, at most one row per family.
+    pub paths: Vec<crate::net::lane::PathSnapshot>,
     pub created_at: i64,
     pub started_at: Option<i64>,
     pub finished_at: Option<i64>,
@@ -413,6 +415,7 @@ impl TaskCell {
             error: record.error.clone(),
             transport: record.transport,
             transport_summary: record.transport_summary.clone(),
+            paths: self.lanes.paths(),
             created_at: record.created_at,
             started_at: record.started_at,
             finished_at: record.finished_at,

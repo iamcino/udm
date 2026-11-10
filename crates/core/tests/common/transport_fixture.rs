@@ -45,6 +45,8 @@ pub struct Barrier {
     pub events: Arc<Mutex<Vec<Event>>>,
     pub fault: Arc<Mutex<Option<&'static str>>>,
     pub at_bytes: Arc<AtomicU64>,
+    pub headers: Arc<Mutex<Vec<(String, String)>>>,
+    pub redirect: Arc<Mutex<Option<String>>>,
 }
 impl Barrier {
     fn new() -> Self {
@@ -53,6 +55,8 @@ impl Barrier {
             events: Arc::default(),
             fault: Arc::default(),
             at_bytes: Arc::new(AtomicU64::new(1024)),
+            headers: Arc::default(),
+            redirect: Arc::default(),
         }
     }
     pub fn hold(&self) {
@@ -124,6 +128,22 @@ fn response(request: &http::Request<()>) -> (http::Response<()>, Bytes) {
         Bytes::copy_from_slice(&payload()[start..=end]),
     )
 }
+fn decorate(gate: &Barrier, request: &http::Request<()>, headers: &mut http::Response<()>) {
+    for (name, value) in gate.headers.lock().unwrap().iter() {
+        headers.headers_mut().insert(
+            http::header::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+            value.parse().unwrap(),
+        );
+    }
+    if request.uri().path() == "/redirect.bin" {
+        if let Some(location) = gate.redirect.lock().unwrap().as_ref() {
+            *headers.status_mut() = http::StatusCode::FOUND;
+            headers
+                .headers_mut()
+                .insert("location", location.parse().unwrap());
+        }
+    }
+}
 fn event(
     request: &http::Request<()>,
     id: u64,
@@ -188,6 +208,7 @@ impl Fixture {
                         while let Some(Ok((request, mut respond))) = conn.accept().await {
                             let request = request.map(|_| ());
                             let (mut headers, mut body) = response(&request);
+                            decorate(&gate, &request, &mut headers);
                             match *gate.fault.lock().unwrap() {
                                 Some("no-validator") => {
                                     headers.headers_mut().remove("etag");
@@ -210,6 +231,12 @@ impl Fixture {
                                 .is_some_and(|r| r == "bytes=0-0");
                             if !small && request.method() != http::Method::HEAD {
                                 match *gate.fault.lock().unwrap() {
+                                    Some("redirect") if request.uri().path() == "/proof.bin" => {
+                                        *headers.status_mut() = http::StatusCode::FOUND;
+                                        headers
+                                            .headers_mut()
+                                            .insert("location", "/changed.bin".parse().unwrap());
+                                    }
                                     Some("etag") => {
                                         headers
                                             .headers_mut()
@@ -224,10 +251,15 @@ impl Fixture {
                                         headers.headers_mut().remove("etag");
                                     }
                                     Some("total") => {
-                                        headers.headers_mut().insert(
-                                            "content-range",
-                                            format!("bytes 0-0/{}", SIZE + 1).parse().unwrap(),
-                                        );
+                                        let range = headers.headers()["content-range"]
+                                            .to_str()
+                                            .unwrap()
+                                            .rsplit_once('/')
+                                            .unwrap()
+                                            .0;
+                                        let changed =
+                                            format!("{range}/{}", SIZE + 1).parse().unwrap();
+                                        headers.headers_mut().insert("content-range", changed);
                                     }
                                     Some("interval") => {
                                         headers.headers_mut().insert(
@@ -327,20 +359,71 @@ impl Fixture {
 
                         let evidence = event(&request, id, "v4", "h3");
                         let head = request.method() == http::Method::HEAD;
-                        let (headers, body) = response(&request);
+                        let (mut headers, body) = response(&request);
+                        decorate(&gate, &request, &mut headers);
+                        let small = request
+                            .headers()
+                            .get("range")
+                            .is_some_and(|r| r == "bytes=0-0");
+                        if !small && !head {
+                            match *gate.fault.lock().unwrap() {
+                                Some("etag") => {
+                                    headers
+                                        .headers_mut()
+                                        .insert("etag", "\"changed\"".parse().unwrap());
+                                }
+                                Some("missing") => {
+                                    headers.headers_mut().remove("etag");
+                                }
+                                Some("coding") => {
+                                    headers
+                                        .headers_mut()
+                                        .insert("content-encoding", "gzip".parse().unwrap());
+                                }
+                                Some("total") => {
+                                    let range = headers.headers()["content-range"]
+                                        .to_str()
+                                        .unwrap()
+                                        .rsplit_once('/')
+                                        .unwrap()
+                                        .0;
+                                    let changed = format!("{range}/{}", SIZE + 1).parse().unwrap();
+                                    headers.headers_mut().insert("content-range", changed);
+                                }
+                                Some("200") => {
+                                    *headers.status_mut() = http::StatusCode::OK;
+                                }
+                                Some("redirect") if request.uri().path() == "/proof.bin" => {
+                                    *headers.status_mut() = http::StatusCode::FOUND;
+                                    headers
+                                        .headers_mut()
+                                        .insert("location", "/changed.bin".parse().unwrap());
+                                }
+                                _ => {}
+                            }
+                        }
+                        gate.events.lock().unwrap().push(evidence.clone());
                         let gate = gate.clone();
                         streams.spawn(async move {
-                            stream.send_response(headers).await.unwrap();
+                            if stream.send_response(headers).await.is_err() {
+                                return;
+                            }
                             if head {
-                                stream.finish().await.unwrap();
+                                let _ = stream.finish().await;
                                 return;
                             }
                             gate.arrive(evidence.clone(), 1, 0).await;
-                            let split = body.len().min(1024);
-                            stream.send_data(body.slice(..split)).await.unwrap();
+                            let split = body
+                                .len()
+                                .min(gate.at_bytes.load(Ordering::Relaxed) as usize);
+                            if stream.send_data(body.slice(..split)).await.is_err() {
+                                return;
+                            }
                             gate.arrive(evidence.clone(), 2, split).await;
                             if split < body.len() {
-                                stream.send_data(body.slice(split..)).await.unwrap();
+                                if stream.send_data(body.slice(split..)).await.is_err() {
+                                    return;
+                                }
                             }
                             gate.arrive(evidence, 3, body.len()).await;
                             let _ = stream.finish().await;
@@ -362,6 +445,10 @@ impl Fixture {
     /// Close one fixture route including its accepted connections and streams.
     pub fn kill_path(&self, index: usize) {
         self.jobs[index].abort();
+    }
+    #[allow(dead_code)] // Shared fixture: only S2 exercises mixed transport loss.
+    pub fn close_h3(&self) {
+        self.endpoint.close(0u32.into(), b"S2 transport loss");
     }
     pub fn url(&self) -> String {
         format!("https://localhost:{}/proof.bin", self.v4.port())
@@ -395,6 +482,7 @@ impl Fixture {
             "src/net/h3.rs",
             "tests/transport_proof_a.rs",
             "tests/transport_s1.rs",
+            "tests/transport_s2.rs",
             "tests/common/transport_fixture.rs",
         ]
         .into_iter()

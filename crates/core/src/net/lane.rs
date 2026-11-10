@@ -55,6 +55,8 @@ pub struct AllocationObservation {
 
 #[derive(Debug, Default)]
 struct State {
+    generation: u64,
+    paths: Vec<PathSnapshot>,
     pending: usize,
     dropped: u64,
     completed: VecDeque<OpenObservation>,
@@ -62,11 +64,93 @@ struct State {
     probe_bytes: u64,
 }
 
+/// Memory-only route history for this run, retained after a path retires.
+/// Active ranges include local tail flush; these are never socket/session counts.
+#[derive(Clone, Debug)]
+pub struct PathSnapshot {
+    pub generation: u64,
+    pub family: crate::net::http12::Family,
+    pub allocation_epoch: u64,
+    pub active_ranges: u32,
+    pub observed_protocols: Vec<TransportKind>,
+    pub logical_url: String,
+    pub endpoint: Option<std::net::SocketAddr>,
+}
+
+pub(crate) struct PathUse {
+    table: Arc<LaneTable>,
+    generation: u64,
+    family: crate::net::http12::Family,
+}
+impl Drop for PathUse {
+    fn drop(&mut self) {
+        let mut state = self.table.0.lock();
+        if state.generation == self.generation {
+            if let Some(path) = state.paths.iter_mut().find(|p| p.family == self.family) {
+                path.active_ranges = path.active_ranges.saturating_sub(1);
+            }
+        }
+    }
+}
+
 /// Owned by one task. Completed attempts are bounded; overflow invalidates proof.
 #[derive(Debug, Default)]
 pub struct LaneTable(Mutex<State>);
 
 impl LaneTable {
+    pub(crate) fn start_run(&self, generation: u64) {
+        let mut state = self.0.lock();
+        state.generation = generation;
+        state.paths.clear();
+    }
+
+    pub fn paths(&self) -> Vec<PathSnapshot> {
+        self.0.lock().paths.clone()
+    }
+
+    pub(crate) fn admit_path(
+        self: &Arc<Self>,
+        generation: u64,
+        family: crate::net::http12::Family,
+        epoch: u64,
+        protocol: TransportKind,
+        logical_url: &str,
+        endpoint: Option<std::net::SocketAddr>,
+    ) -> Option<PathUse> {
+        let mut state = self.0.lock();
+        if state.generation != generation {
+            return None;
+        }
+        let index = match state.paths.iter().position(|p| p.family == family) {
+            Some(index) => index,
+            None => {
+                state.paths.push(PathSnapshot {
+                    generation,
+                    family,
+                    allocation_epoch: epoch,
+                    active_ranges: 0,
+                    observed_protocols: Vec::new(),
+                    logical_url: logical_url.into(),
+                    endpoint,
+                });
+                state.paths.len() - 1
+            }
+        };
+        let path = &mut state.paths[index];
+        path.allocation_epoch = epoch;
+        path.endpoint = endpoint;
+        path.logical_url = logical_url.into();
+        path.active_ranges += 1;
+        if !path.observed_protocols.contains(&protocol) {
+            path.observed_protocols.push(protocol);
+        }
+        Some(PathUse {
+            table: self.clone(),
+            generation,
+            family,
+        })
+    }
+
     pub fn snapshot(&self) -> OpenEvidence {
         let state = self.0.lock();
         OpenEvidence {

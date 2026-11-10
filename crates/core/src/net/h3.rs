@@ -90,9 +90,23 @@ impl Drop for RequestUse {
     }
 }
 
+#[derive(Clone)]
+struct SharedFailure {
+    message: Arc<str>,
+    tls: bool,
+}
+impl From<Arc<str>> for SharedFailure {
+    fn from(message: Arc<str>) -> Self {
+        Self {
+            message,
+            tls: false,
+        }
+    }
+}
+
 /// Waiters blocked on the single in-flight handshake for one origin.
 struct Flight {
-    waiters: Vec<oneshot::Sender<std::result::Result<PooledConn, Arc<str>>>>,
+    waiters: Vec<oneshot::Sender<std::result::Result<PooledConn, SharedFailure>>>,
 }
 
 struct PoolState {
@@ -143,7 +157,8 @@ fn fail_flight(state: &mut PoolState, key: &str) {
     for waiter in flight.waiters {
         let _ = waiter.send(Err(Arc::<str>::from(
             "HTTP/3 connect ended before the handshake finished",
-        )));
+        )
+        .into()));
     }
 }
 
@@ -296,6 +311,22 @@ impl H3Pool {
     /// so it can decide to fall back to HTTP/2 for a different origin).
     pub async fn request(&self, spec: &RequestSpec) -> Result<H3Response> {
         let url = url::Url::parse(&spec.url)?;
+        let host = url
+            .host_str()
+            .ok_or_else(|| Error::InvalidUrl("URL has no host".into()))?;
+        self.request_at(spec, host, url.port_or_known_default().unwrap_or(443))
+            .await
+    }
+
+    /// Dial a separately authenticated same-host endpoint, retaining the logical
+    /// URI, authority and TLS name. The endpoint is frozen by the route owner.
+    pub(crate) async fn request_at(
+        &self,
+        spec: &RequestSpec,
+        endpoint_host: &str,
+        endpoint_port: u16,
+    ) -> Result<H3Response> {
+        let url = url::Url::parse(&spec.url)?;
         if url.scheme() != "https" {
             return Err(Error::UnsupportedScheme(format!(
                 "{} (HTTP/3 requires TLS)",
@@ -311,7 +342,10 @@ impl H3Pool {
                 "HTTP/3 needs a DNS name for SNI, got the IP literal `{host}`"
             )));
         }
-        let port = url.port_or_known_default().unwrap_or(443);
+        if !host.eq_ignore_ascii_case(endpoint_host) {
+            return Err(Error::Tls("alternate host is not authorized".into()));
+        }
+        let port = endpoint_port;
 
         let key = origin_key(&host, port);
         let conn = self.connection(&host, port).await?;
@@ -481,7 +515,11 @@ impl H3Pool {
             }
             Err(err) => {
                 let msg = Arc::<str>::from(err.to_string());
-                (Err(err), Err(msg))
+                let failure = SharedFailure {
+                    message: msg,
+                    tls: matches!(err, Error::Tls(_)),
+                };
+                (Err(err), Err(failure))
             }
         };
         for waiter in flight.waiters {
@@ -495,7 +533,7 @@ impl H3Pool {
     async fn connect(&self, host: &str, port: u16) -> Result<Handshake> {
         let addrs = resolve(host, port).await?;
         let mut last_err = Error::Http3(format!("no address found for {host}:{port}"));
-        for addr in addrs {
+        for addr in addrs.into_iter().filter(SocketAddr::is_ipv4) {
             match self.connect_to(addr, host).await {
                 Ok(conn) => {
                     tracing::debug!(host, %addr, "HTTP/3 connection established");
@@ -503,6 +541,9 @@ impl H3Pool {
                 }
                 Err(e) => {
                     tracing::debug!(host, %addr, "QUIC connect failed: {e}");
+                    if matches!(e, Error::Tls(_)) {
+                        return Err(e);
+                    }
                     last_err = e;
                 }
             }
@@ -513,7 +554,16 @@ impl H3Pool {
     async fn connect_to(&self, addr: SocketAddr, host: &str) -> Result<Handshake> {
         let quinn = tokio::time::timeout(self.connect_timeout, async {
             let connecting = self.endpoint.connect(addr, host).map_err(Error::from)?;
-            connecting.await.map_err(Error::from)
+            connecting.await.map_err(|e| match &e {
+                // Quinn carries rustls verification errors as transport crypto
+                // alerts. Never turn a failed certificate into Http12 fallback.
+                quinn::ConnectionError::TransportError(error)
+                    if (0x100..0x200).contains(&u64::from(error.code)) =>
+                {
+                    Error::Tls(e.to_string())
+                }
+                _ => Error::from(e),
+            })
         })
         .await
         .map_err(|_| Error::Timeout {
@@ -557,7 +607,9 @@ impl H3Pool {
         drop(state);
         for (_, flight) in flights {
             for waiter in flight.waiters {
-                let _ = waiter.send(Err(Arc::<str>::from("HTTP/3 pool closed during connect")));
+                let _ = waiter.send(Err(
+                    Arc::<str>::from("HTTP/3 pool closed during connect").into()
+                ));
             }
         }
     }
@@ -619,11 +671,12 @@ fn visible_request_rejected(err: &h3::error::StreamError) -> bool {
 }
 
 async fn await_shared(
-    rx: oneshot::Receiver<std::result::Result<PooledConn, Arc<str>>>,
+    rx: oneshot::Receiver<std::result::Result<PooledConn, SharedFailure>>,
 ) -> Result<PooledConn> {
     match rx.await {
         Ok(Ok(conn)) => Ok(conn),
-        Ok(Err(msg)) => Err(Error::Http3(msg.to_string())),
+        Ok(Err(failure)) if failure.tls => Err(Error::Tls(failure.message.to_string())),
+        Ok(Err(failure)) => Err(Error::Http3(failure.message.to_string())),
         Err(_canceled) => Err(Error::Http3(
             "HTTP/3 connect ended before the handshake finished".into(),
         )),
@@ -763,8 +816,8 @@ fn header_value(value: &str) -> Result<HeaderValue> {
     HeaderValue::from_str(value).map_err(|e| Error::Other(format!("bad header value: {e}")))
 }
 
-/// Resolve `host:port`, preferring IPv4 (many home networks have broken IPv6
-/// egress) but keeping IPv6 as a fallback.
+/// Resolve `host:port`. The dial loop admits IPv4 only, matching the bound
+/// endpoint; IPv6 Http12 is a separate family path, never an H3 fallback.
 async fn resolve(host: &str, port: u16) -> Result<Vec<SocketAddr>> {
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
         return Ok(vec![SocketAddr::new(ip, port)]);
@@ -834,5 +887,21 @@ mod tests {
             other => panic!("a readable empty pool is Known zero, got {other:?}"),
         }
         assert_eq!(pool.recorded_stable_ids(), H3StableIds::Known(Vec::new()));
+    }
+}
+
+#[cfg(test)]
+mod s2_security_tests {
+    use super::*;
+    #[tokio::test]
+    async fn handshake_waiter_preserves_certificate_failure() {
+        let (tx, rx) = oneshot::channel();
+        tx.send(Err(SharedFailure {
+            message: Arc::from("bad certificate on alternate endpoint"),
+            tls: true,
+        }))
+        .ok()
+        .unwrap();
+        assert!(matches!(await_shared(rx).await, Err(Error::Tls(_))));
     }
 }

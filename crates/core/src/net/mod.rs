@@ -137,8 +137,10 @@ pub fn alt_svc_from(
     origin_port: u16,
 ) -> Option<AltSvcEntry> {
     let value = header_str(headers, &http::header::ALT_SVC)?;
-    let (port, ma) = util::parse_alt_svc_h3(&value, origin_port)?;
-    Some(AltSvcEntry::new(origin_host, port, ma))
+    let (port, ma) = util::parse_alt_svc_h3_for_host(&value, origin_host, origin_port)?;
+    let mut entry = AltSvcEntry::new(origin_host, port, ma);
+    entry.origin = altsvc::origin_key(origin_host, origin_port);
+    Some(entry)
 }
 
 /// Flatten a header map into an owned, sorted list (for `udm-cli probe`).
@@ -244,5 +246,34 @@ mod tests {
         )));
         assert!(!vary_allows_none_scope(Some("*")));
         assert!(!vary_allows_none_scope(Some("Accept-Encoding, User-Agent")));
+    }
+}
+
+#[cfg(test)]
+mod s2_alt_svc_tests {
+    use super::*;
+    #[test]
+    fn logical_port_keys_same_host_alternative_and_rejects_foreign_host() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::ALT_SVC,
+            "h3=\":8443\"; ma=60".parse().unwrap(),
+        );
+        let entry = alt_svc_from(&headers, "origin.test", 9443).unwrap();
+        assert_eq!(entry.origin, "origin.test:9443");
+        assert_eq!(entry.port, 8443);
+        headers.insert(
+            http::header::ALT_SVC,
+            "h3=\"foreign.test:8443\"; ma=60".parse().unwrap(),
+        );
+        assert!(alt_svc_from(&headers, "origin.test", 9443).is_none());
+        headers.insert(
+            http::header::ALT_SVC,
+            "h3=\"ORIGIN.TEST:8443\"; ma=60".parse().unwrap(),
+        );
+        assert_eq!(
+            alt_svc_from(&headers, "origin.test", 9443).unwrap().origin,
+            "origin.test:9443"
+        );
     }
 }
