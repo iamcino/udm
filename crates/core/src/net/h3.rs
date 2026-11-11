@@ -31,7 +31,6 @@ use crate::net::tls;
 use crate::net::ACCEPT_ENCODING_IDENTITY;
 
 type H3Sender = h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>;
-type H3Stream = h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;
 
 /// A finished handshake that is not yet a pool member.
 ///
@@ -684,27 +683,27 @@ async fn await_shared(
 }
 
 /// An HTTP/3 response: headers plus a stream you can pull body chunks from.
-pub struct H3Response {
+pub struct H3Response<S: h3::quic::RecvStream = h3_quinn::BidiStream<Bytes>> {
     /// Peer observed on the QUIC connection serving this response.
     pub remote_addr: SocketAddr,
     pub status: StatusCode,
     pub headers: HeaderMap,
     /// `stable_id` stored when this connection was inserted into the pool.
     pub connection_id: usize,
-    stream: H3Stream,
+    stream: h3::client::RequestStream<S, Bytes>,
     use_guard: RequestUse,
     /// Set once the response has reached a network terminal, so a later drop
     /// does not send a second STOP_SENDING after a clean EOF.
     network_done: bool,
-    /// `recv_data` has been polled and has not returned.
+    /// Sticky once any body read has started, until this response is dropped.
     ///
-    /// Dropping that future does not clear this. h3-quinn 0.0.10 leaves the
-    /// quinn recv half inside the read until the read finishes, so a later
-    /// `stop_sending` would unwrap `None`.
+    /// h3 can return buffered DATA while h3-quinn 0.0.10 still owns the
+    /// quinn recv half in a pending read. A later `stop_sending` could
+    /// therefore unwrap `None` even after `recv_data` returned.
     body_read_pending: bool,
 }
 
-impl std::fmt::Debug for H3Response {
+impl<S: h3::quic::RecvStream> std::fmt::Debug for H3Response<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("H3Response")
             .field("status", &self.status)
@@ -713,18 +712,17 @@ impl std::fmt::Debug for H3Response {
     }
 }
 
-impl H3Response {
+impl<S: h3::quic::RecvStream> H3Response<S> {
     /// Next body chunk, or `None` at the end of the stream.
     ///
     /// `None` and a read error are network terminals: in-use ends here, even
     /// if the caller still holds this response across a later local flush.
     ///
-    /// `body_read_pending` is cleared only after `recv_data` returns. Cancel
-    /// drops this future at the await, and the flag stays set on purpose.
+    /// `body_read_pending` stays set even after `recv_data` returns: buffered
+    /// DATA does not prove that the underlying QUIC read has finished.
     pub async fn chunk(&mut self) -> Result<Option<Bytes>> {
         self.body_read_pending = true;
         let read = self.stream.recv_data().await;
-        self.body_read_pending = false;
         match read {
             Ok(Some(mut buf)) => {
                 let len = buf.remaining();
@@ -739,8 +737,8 @@ impl H3Response {
                 Ok(None)
             }
             Err(e) => {
-                // The read has returned, so the quinn recv half is back in
-                // place and `stop_sending` is the H3_NO_ERROR path below.
+                // Returning from recv_data does not prove that h3-quinn's
+                // recv half is back in its slot; retain the sticky guard.
                 self.finish_network(true);
                 Err(Error::Http3(format!("HTTP/3 body read failed: {e}")))
             }
@@ -762,9 +760,9 @@ impl H3Response {
             // slot. `catch_unwind` would still run the panic hook and print
             // the unwrap. The half lives in this response: dropping `stream`
             // drops it, and `quinn::RecvStream`'s Drop sends STOP_SENDING(0).
-            // Skip the explicit call only while the read owns the half. A half
-            // that is still in place (no body read yet, or a read that already
-            // returned) still gets STOP_SENDING(H3_NO_ERROR), 0x100, not 0.
+            // Once any body poll has started, conservatively use stream Drop:
+            // h3 can return buffered bytes while the half remains parked.
+            // Header-only abort still gets STOP_SENDING(H3_NO_ERROR), 0x100.
             if stop_sending && !self.body_read_pending {
                 self.stream.stop_sending(h3::error::Code::H3_NO_ERROR);
             }
@@ -773,7 +771,7 @@ impl H3Response {
     }
 }
 
-impl Drop for H3Response {
+impl<S: h3::quic::RecvStream> Drop for H3Response<S> {
     fn drop(&mut self) {
         // Cancel and drop are network terminals too. A clean EOF has already
         // set `network_done`, so this does not reset a finished stream. A
@@ -903,5 +901,183 @@ mod s2_security_tests {
         .ok()
         .unwrap();
         assert!(matches!(await_shared(rx).await, Err(Error::Tls(_))));
+    }
+}
+
+#[cfg(test)]
+mod buffered_read_regression {
+    use super::*;
+    use h3::quic::{ConnectionErrorIncoming, StreamErrorIncoming, StreamId, WriteBuf};
+    use std::sync::atomic::AtomicUsize;
+    use std::task::{Context, Poll};
+
+    #[derive(Clone, Default)]
+    struct Probe {
+        parked: Arc<AtomicBool>,
+        stops: Arc<AtomicUsize>,
+    }
+
+    // Like h3-quinn 0.0.10: Pending parks the receive half; stopping it
+    // while parked panics. One QUIC chunk contains HEADERS and DATA, so
+    // real h3 frame buffering returns DATA even after the extra Pending poll.
+    struct BufferedThenPending {
+        data: Option<Bytes>,
+        probe: Probe,
+    }
+    impl h3::quic::RecvStream for BufferedThenPending {
+        type Buf = Bytes;
+        fn poll_data(
+            &mut self,
+            _: &mut Context<'_>,
+        ) -> Poll<std::result::Result<Option<Bytes>, StreamErrorIncoming>> {
+            if let Some(data) = self.data.take() {
+                Poll::Ready(Ok(Some(data)))
+            } else {
+                self.probe.parked.store(true, Ordering::SeqCst);
+                Poll::Pending
+            }
+        }
+        fn stop_sending(&mut self, _: u64) {
+            self.probe.stops.fetch_add(1, Ordering::SeqCst);
+            assert!(
+                !self.probe.parked.load(Ordering::SeqCst),
+                "stop_sending with parked receive half"
+            );
+        }
+        fn recv_id(&self) -> StreamId {
+            StreamId::try_from(0).unwrap()
+        }
+    }
+    impl h3::quic::SendStream<Bytes> for BufferedThenPending {
+        fn poll_ready(
+            &mut self,
+            _: &mut Context<'_>,
+        ) -> Poll<std::result::Result<(), StreamErrorIncoming>> {
+            Poll::Ready(Ok(()))
+        }
+        fn send_data<T: Into<WriteBuf<Bytes>>>(
+            &mut self,
+            _: T,
+        ) -> std::result::Result<(), StreamErrorIncoming> {
+            Ok(())
+        }
+        fn poll_finish(
+            &mut self,
+            _: &mut Context<'_>,
+        ) -> Poll<std::result::Result<(), StreamErrorIncoming>> {
+            Poll::Ready(Ok(()))
+        }
+        fn reset(&mut self, _: u64) {}
+        fn send_id(&self) -> StreamId {
+            StreamId::try_from(0).unwrap()
+        }
+    }
+    #[derive(Clone)]
+    struct FakeConnection(Probe);
+    impl h3::quic::OpenStreams<Bytes> for FakeConnection {
+        type BidiStream = BufferedThenPending;
+        type SendStream = BufferedThenPending;
+        fn poll_open_bidi(
+            &mut self,
+            _: &mut Context<'_>,
+        ) -> Poll<std::result::Result<Self::BidiStream, StreamErrorIncoming>> {
+            Poll::Ready(Ok(BufferedThenPending {
+                // HEADERS: QPACK static :status=200, then DATA payload X.
+                data: Some(Bytes::from_static(&[1, 3, 0, 0, 0xd9, 0, 1, b'X'])),
+                probe: self.0.clone(),
+            }))
+        }
+        fn poll_open_send(
+            &mut self,
+            _: &mut Context<'_>,
+        ) -> Poll<std::result::Result<Self::SendStream, StreamErrorIncoming>> {
+            Poll::Ready(Ok(BufferedThenPending {
+                data: None,
+                probe: Probe::default(),
+            }))
+        }
+        fn close(&mut self, _: h3::error::Code, _: &[u8]) {}
+    }
+    impl h3::quic::Connection<Bytes> for FakeConnection {
+        type RecvStream = BufferedThenPending;
+        type OpenStreams = Self;
+        fn poll_accept_recv(
+            &mut self,
+            _: &mut Context<'_>,
+        ) -> Poll<std::result::Result<Self::RecvStream, ConnectionErrorIncoming>> {
+            Poll::Pending
+        }
+        fn poll_accept_bidi(
+            &mut self,
+            _: &mut Context<'_>,
+        ) -> Poll<std::result::Result<Self::BidiStream, ConnectionErrorIncoming>> {
+            Poll::Pending
+        }
+        fn opener(&self) -> Self {
+            self.clone()
+        }
+    }
+
+    // Deterministic extension of the real-QUIC pending-read abort/drop test
+    // in h3_instrumentation. This exercises the same H3Response methods with
+    // a RecvStream double; no socket scheduling can close the regression window.
+    #[tokio::test]
+    async fn abort_or_drop_during_pending_chunk_read_does_not_panic() {
+        for action in ["headers", "abort", "drop"] {
+            let probe = Probe::default();
+            let (_driver, mut sender) = h3::client::builder()
+                .send_grease(false)
+                .build::<_, _, Bytes>(FakeConnection(probe.clone()))
+                .await
+                .unwrap();
+            let mut stream = sender
+                .send_request(http::Request::get("https://localhost/").body(()).unwrap())
+                .await
+                .unwrap();
+            stream.finish().await.unwrap();
+            assert_eq!(
+                stream.recv_response().await.unwrap().status(),
+                StatusCode::OK
+            );
+            let axis = Arc::new(ConnUse {
+                in_use: AtomicU64::new(1),
+                draining: AtomicBool::new(false),
+            });
+            let mut response = H3Response {
+                remote_addr: "127.0.0.1:443".parse().unwrap(),
+                status: StatusCode::OK,
+                headers: HeaderMap::new(),
+                connection_id: 0,
+                stream,
+                use_guard: RequestUse {
+                    axis: axis.clone(),
+                    released: AtomicBool::new(false),
+                },
+                network_done: false,
+                body_read_pending: false,
+            };
+            if action != "headers" {
+                assert_eq!(
+                    response.chunk().await.unwrap(),
+                    Some(Bytes::from_static(b"X"))
+                );
+                assert!(
+                    probe.parked.load(Ordering::SeqCst),
+                    "Ready DATA must leave the receive half parked"
+                );
+                assert_eq!(axis.in_use.load(Ordering::SeqCst), 1);
+            }
+            // Deliberately no further chunk poll between buffered Ready and terminal.
+            if action != "drop" {
+                response.abort();
+                assert_eq!(axis.in_use.load(Ordering::SeqCst), 0);
+            }
+            drop(response);
+            assert_eq!(axis.in_use.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                probe.stops.load(Ordering::SeqCst),
+                usize::from(action == "headers")
+            );
+        }
     }
 }

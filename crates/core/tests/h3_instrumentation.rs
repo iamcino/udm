@@ -388,7 +388,9 @@ async fn abort_or_drop_during_pending_chunk_read_does_not_panic() -> Result<(), 
     let mut dropped = accepted_response(&pool, &url).await?;
     // One poll that returns Pending is the bug's precondition: h3-quinn has
     // moved the recv half into the read future, and dropping this future does
-    // not put it back. A read that already finished would not panic.
+    // not put it back. A Ready result with buffered DATA can leave the half
+    // parked too: the companion buffered_read_regression unit test uses a
+    // RecvStream double to cover that window without socket timing.
     park_pending_chunk(&mut aborted)?;
     park_pending_chunk(&mut dropped)?;
     if pool.in_use_requests() != Some(2) {

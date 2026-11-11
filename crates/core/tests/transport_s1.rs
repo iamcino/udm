@@ -85,7 +85,9 @@ async fn completed(e: &Engine, id: u64) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a1_s1_two_real_families_disjoint_ranges() {
     for repetition in 0..3 {
-        let f = Fixture::start().await;
+        let Some(f) = Fixture::start().await else {
+            return;
+        };
         println!("S1 A1 repetition={repetition} {}", f.manifest());
         for gate in &f.gates[..2] {
             gate.hold();
@@ -148,7 +150,9 @@ async fn a2_a9_s1_join_reclaim_both_directions_three_stages() {
     for repetition in 0..3 {
         for victim in 0..2 {
             for stage in 1..=3 {
-                let f = Fixture::start().await;
+                let Some(f) = Fixture::start().await else {
+                    return;
+                };
                 println!(
                     "S1 A2/A9 rep={repetition} victim={victim} stage={stage} {}",
                     f.manifest()
@@ -235,7 +239,9 @@ async fn a3_a4_a5_s1_reject_bad_family_responses() {
                 "etag", "weak", "missing", "total", "interval", "short", "excess", "200", "416",
                 "coding", "vary",
             ] {
-                let f = Fixture::start().await;
+                let Some(f) = Fixture::start().await else {
+                    return;
+                };
                 *f.gates[victim].fault.lock().unwrap() = Some(fault);
                 let dir = tempfile::tempdir().unwrap();
                 let e = engine(&f, dir.path());
@@ -300,7 +306,9 @@ async fn a3_a4_a5_s1_reject_bad_family_responses() {
 async fn a10_s1_cancel_and_pause_drain_both_writers() {
     for repetition in 0..3 {
         for cancel in [false, true] {
-            let f = Fixture::start().await;
+            let Some(f) = Fixture::start().await else {
+                return;
+            };
             for gate in &f.gates[..2] {
                 gate.hold();
             }
@@ -346,7 +354,9 @@ async fn a10_s1_sync_and_store_failures_stop_without_route_repair() {
             usagi::engine::WorkerFault::CheckpointSync { min_done: 1 },
             usagi::engine::WorkerFault::CheckpointStore { min_done: 1 },
         ] {
-            let f = Fixture::start().await;
+            let Some(f) = Fixture::start().await else {
+                return;
+            };
             let dir = tempfile::tempdir().unwrap();
             let e = engine(&f, dir.path());
             let id = add(&e, &f);
@@ -372,7 +382,9 @@ async fn a10_s1_sync_and_store_failures_stop_without_route_repair() {
 async fn a11_s1_single_family_and_proxy_enabled_ineligible() {
     for repetition in 0..3 {
         for proxy in [false, true] {
-            let f = Fixture::start().await;
+            let Some(f) = Fixture::start().await else {
+                return;
+            };
             let dir = tempfile::tempdir().unwrap();
             let e = engine(&f, dir.path());
             if proxy {
@@ -423,7 +435,9 @@ async fn a9_s1_checkpoint_boundaries_keep_committed_prefix() {
                 ProofPoint::AfterSyncBeforeTransaction,
                 ProofPoint::TransactionCommittedBeforeAcknowledgment,
             ] {
-                let f = Fixture::start().await;
+                let Some(f) = Fixture::start().await else {
+                    return;
+                };
                 println!(
                     "S1 A9 checkpoint rep={repetition} victim={victim} point={point:?} {}",
                     f.manifest()
@@ -508,7 +522,9 @@ async fn a9_s1_checkpoint_boundaries_keep_committed_prefix() {
 async fn a9_s1_complete_unflushed_drain_without_redundant_reclaim() {
     for repetition in 0..3 {
         for victim in 0..2 {
-            let f = Fixture::start().await;
+            let Some(f) = Fixture::start().await else {
+                return;
+            };
             let dir = tempfile::tempdir().unwrap();
             let e = engine(&f, dir.path());
             let id = add(&e, &f);
@@ -632,7 +648,9 @@ async fn a10_s1_process_kill_recovery() {
                 "committed-unacknowledged",
                 "reclaim",
             ] {
-                let f = Fixture::start().await;
+                let Some(f) = Fixture::start().await else {
+                    return;
+                };
                 for gate in &f.gates[..2] {
                     gate.at_bytes
                         .store(16384, std::sync::atomic::Ordering::Relaxed);
@@ -711,7 +729,9 @@ async fn a10_s1_process_kill_recovery() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn s1_two_paths_consume_one_queue_slot() {
-    let f = Fixture::start().await;
+    let Some(f) = Fixture::start().await else {
+        return;
+    };
     for gate in &f.gates[..2] {
         gate.hold();
     }
@@ -751,7 +771,9 @@ async fn a10_s1_periodic_checkpoint_failure_drains_both_paths() {
             usagi::engine::WorkerFault::CheckpointSync { min_done: 1 },
             usagi::engine::WorkerFault::CheckpointStore { min_done: 1 },
         ] {
-            let f = Fixture::start().await;
+            let Some(f) = Fixture::start().await else {
+                return;
+            };
             for gate in &f.gates[..2] {
                 gate.at_bytes
                     .store(16384, std::sync::atomic::Ordering::Relaxed);
@@ -794,7 +816,9 @@ async fn a10_s1_periodic_checkpoint_failure_drains_both_paths() {
 async fn a5_a11_s1_unbound_tasks_never_admit_family_paths() {
     for repetition in 0..3 {
         for fault in ["no-validator", "weak-bound", "vary-bound"] {
-            let f = Fixture::start().await;
+            let Some(f) = Fixture::start().await else {
+                return;
+            };
             for gate in &f.gates[..2] {
                 *gate.fault.lock().unwrap() = Some(fault);
             }
@@ -818,7 +842,9 @@ async fn a5_a11_s1_unbound_tasks_never_admit_family_paths() {
 async fn a9_s1_goaway_and_reset_reclaim_on_other_family() {
     for repetition in 0..3 {
         for victim in 0..2 {
-            let f = Fixture::start().await;
+            let Some(f) = Fixture::start().await else {
+                return;
+            };
             *f.gates[victim].fault.lock().unwrap() = Some("goaway");
             let dir = tempfile::tempdir().unwrap();
             let e = engine(&f, dir.path());
@@ -845,7 +871,9 @@ async fn a9_s1_goaway_and_reset_reclaim_on_other_family() {
 async fn a11_s1_configured_proxy_is_used_without_origin_bypass() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     for repetition in 0..3 {
-        let f = Fixture::start().await;
+        let Some(f) = Fixture::start().await else {
+            return;
+        };
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("fixture.der"), f.ca.ca_der()).unwrap();
         let proxy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -190,15 +190,39 @@ fn event(
 }
 
 impl Fixture {
-    pub async fn start() -> Self {
+    pub async fn start() -> Option<Self> {
         let ca = HarnessCa::generate().unwrap();
-        let l4 = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-            .await
-            .expect("IPv4 fixture");
+        let mut pair = None;
+        for _ in 0..32 {
+            let l4 = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
+                .expect("IPv4 fixture");
+            let port = l4.local_addr().unwrap().port();
+            match TcpListener::bind((Ipv6Addr::LOCALHOST, port)).await {
+                Ok(l6) => {
+                    pair = Some((l4, l6));
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+                    // IPv4's ephemeral choice can still be busy on IPv6.
+                    drop(l4);
+                    tokio::task::yield_now().await;
+                }
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::AddrNotAvailable
+                        // Linux, macOS/BSD, and Windows EAFNOSUPPORT.
+                        || matches!(error.raw_os_error(), Some(97 | 47 | 10047)) =>
+                {
+                    eprintln!("SKIP: IPv6 loopback fixture unavailable: {error}");
+                    return None;
+                }
+                Err(error) => panic!("IPv6 fixture bind failed: {error}"),
+            }
+        }
+        let (l4, l6) = pair.unwrap_or_else(|| {
+            panic!("paired loopback fixture bind exhausted 32 AddrInUse attempts")
+        });
         let v4 = l4.local_addr().unwrap();
-        let l6 = TcpListener::bind((Ipv6Addr::LOCALHOST, v4.port()))
-            .await
-            .expect("NOT RUN: IPv6 loopback fixture unavailable");
         let v6 = l6.local_addr().unwrap();
         let endpoint = quinn::Endpoint::server(
             ca.quic_server_config().unwrap(),
@@ -510,7 +534,7 @@ impl Fixture {
                 });
             }
         }));
-        Self {
+        Some(Self {
             ca,
             v4,
             v6,
@@ -518,7 +542,7 @@ impl Fixture {
             gates,
             endpoint,
             jobs,
-        }
+        })
     }
     /// Close one fixture route including its accepted connections and streams.
     pub fn kill_path(&self, index: usize) {

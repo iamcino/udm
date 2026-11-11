@@ -36,7 +36,9 @@ async fn preflight(f: &Fixture) {
 
 #[tokio::test]
 async fn s0_dual_stack_same_representation_preflight_and_barriers() {
-    let f = Fixture::start().await;
+    let Some(f) = Fixture::start().await else {
+        return;
+    };
     preflight(&f).await;
     for gate in &f.gates {
         gate.events.lock().unwrap().clear();
@@ -148,7 +150,9 @@ async fn s0_h3_fixture_and_single_path_engine_barriers() {
     use usagi::net::h3::H3Pool;
     use usagi::net::stack::RequestSpec;
     use usagi::{AddRequest, EngineBuilder, Paths, Settings};
-    let f = Fixture::start().await;
+    let Some(f) = Fixture::start().await else {
+        return;
+    };
     println!("S0 manifest before requests: {}", f.manifest());
     let pool = H3Pool::with_client_config(
         Duration::from_secs(5),
@@ -281,7 +285,9 @@ async fn s0_fixture_route_loss_controls_both_directions() {
     for repetition in 0..3 {
         for victim in 0..2 {
             for stage in 1..=3 {
-                let f = Fixture::start().await;
+                let Some(f) = Fixture::start().await else {
+                    return;
+                };
                 println!("S0 failure-control manifest: {}", f.manifest());
                 f.gates[victim].hold();
                 let peers = [f.v4, f.v6];

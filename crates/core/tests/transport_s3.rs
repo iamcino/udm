@@ -165,7 +165,9 @@ async fn completed(e: &Engine, id: u64, url: &str) {
 async fn s3_a1_two_sessions_one_path_disjoint_durable_coverage() {
     for rep in 0..3 {
         for family in [Family::V4, Family::V6] {
-            let f = Fixture::start().await;
+            let Some(f) = Fixture::start().await else {
+                return;
+            };
             println!("S3 A1 rep={rep} family={family:?} {}", f.manifest());
             let g = &f.gates[index(family)];
             g.hold();
@@ -218,7 +220,9 @@ async fn s3_a2_a9_join_then_checkpoint_reclaim_both_sessions() {
         for family in [Family::V4, Family::V6] {
             for victim in 0..2 {
                 for stage in 1..=3 {
-                    let f = Fixture::start().await;
+                    let Some(f) = Fixture::start().await else {
+                        return;
+                    };
                     let g = &f.gates[index(family)];
                     g.hold();
                     let dir = tempfile::tempdir().unwrap();
@@ -292,7 +296,9 @@ async fn s3_a3_a4_a5_a6_reject_invalid_representation() {
                     "etag", "weak", "missing", "total", "interval", "short", "excess", "200",
                     "416", "coding", "vary", "redirect",
                 ] {
-                    let f = Fixture::start().await;
+                    let Some(f) = Fixture::start().await else {
+                        return;
+                    };
                     *f.gates[index(family)].fault.lock().unwrap() = Some(fault);
                     f.gates[index(family)].bad_range_start.store(
                         (victim * (SIZE / 4)) as u64,
@@ -353,7 +359,9 @@ async fn s3_a10_pause_cancel_and_storage_failures() {
     for rep in 0..3 {
         for family in [Family::V4, Family::V6] {
             for cancel in [false, true] {
-                let f = Fixture::start().await;
+                let Some(f) = Fixture::start().await else {
+                    return;
+                };
                 let g = &f.gates[index(family)];
                 g.hold();
                 let dir = tempfile::tempdir().unwrap();
@@ -384,7 +392,9 @@ async fn s3_a10_pause_cancel_and_storage_failures() {
                 usagi::engine::WorkerFault::CheckpointSync { min_done: 1 },
                 usagi::engine::WorkerFault::CheckpointStore { min_done: 1 },
             ] {
-                let f = Fixture::start().await;
+                let Some(f) = Fixture::start().await else {
+                    return;
+                };
                 let dir = tempfile::tempdir().unwrap();
                 let e = engine(&f, dir.path(), family);
                 let id = add(&e, &f);
@@ -421,7 +431,9 @@ async fn s3_a10_pause_cancel_and_storage_failures() {
 }
 #[tokio::test]
 async fn s3_a11_proxy_and_policy_fail_closed() {
-    let f = Fixture::start().await;
+    let Some(f) = Fixture::start().await else {
+        return;
+    };
     let dir = tempfile::tempdir().unwrap();
     let e = engine(&f, dir.path(), Family::V4);
     assert!(e.net().install_h2_experiment(Family::V6).is_err());
@@ -454,7 +466,9 @@ async fn s3_a9_checkpoint_boundaries_and_complete_unflushed() {
                     ProofPoint::AfterSyncBeforeTransaction,
                     ProofPoint::TransactionCommittedBeforeAcknowledgment,
                 ] {
-                    let f = Fixture::start().await;
+                    let Some(f) = Fixture::start().await else {
+                        return;
+                    };
                     let g = &f.gates[index(family)];
                     g.hold();
                     g.at_bytes
@@ -506,7 +520,9 @@ async fn s3_a9_checkpoint_boundaries_and_complete_unflushed() {
                     println!("S3 A9 checkpoint PASS rep={rep} family={family:?} victim={victim} point={point:?} {evidence:?}");
                     e.shutdown();
                 }
-                let f = Fixture::start().await;
+                let Some(f) = Fixture::start().await else {
+                    return;
+                };
                 let dir = tempfile::tempdir().unwrap();
                 let e = engine(&f, dir.path(), family);
                 let id = add(&e, &f);
@@ -580,7 +596,9 @@ async fn s3_a10_process_exit_recovery() {
                 "committed-unacknowledged",
                 "reclaim",
             ] {
-                let f = Fixture::start().await;
+                let Some(f) = Fixture::start().await else {
+                    return;
+                };
                 let g = &f.gates[index(family)];
                 g.hold();
                 g.at_bytes
@@ -681,7 +699,9 @@ async fn s3_a10_process_exit_recovery() {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn s3_budget_serializes_experimental_transfers() {
-    let f = Fixture::start().await;
+    let Some(f) = Fixture::start().await else {
+        return;
+    };
     let g = &f.gates[0];
     g.hold();
     let dir = tempfile::tempdir().unwrap();
@@ -720,7 +740,9 @@ async fn s3_a9_goaway_one_session_leaves_sibling_usable() {
     for rep in 0..3 {
         for family in [Family::V4, Family::V6] {
             for victim in 0..2 {
-                let f = Fixture::start().await;
+                let Some(f) = Fixture::start().await else {
+                    return;
+                };
                 let g = &f.gates[index(family)];
                 g.hold();
                 g.goaway_start.store(
@@ -843,7 +865,9 @@ async fn s3_a11_unbound_and_wrong_family_ineligible() {
     for rep in 0..3 {
         for family in [Family::V4, Family::V6] {
             for fault in ["no-validator", "weak-bound", "vary-bound"] {
-                let f = Fixture::start().await;
+                let Some(f) = Fixture::start().await else {
+                    return;
+                };
                 for g in &f.gates[..2] {
                     *g.fault.lock().unwrap() = Some(fault);
                 }
@@ -867,7 +891,9 @@ async fn s3_a11_unbound_and_wrong_family_ineligible() {
         }
     }
     // Explicit v4 URL offered to a v6-only experiment cannot cross families.
-    let f = Fixture::start().await;
+    let Some(f) = Fixture::start().await else {
+        return;
+    };
     let dir = tempfile::tempdir().unwrap();
     let e = engine(&f, dir.path(), Family::V6);
     let id = e

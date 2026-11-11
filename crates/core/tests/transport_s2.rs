@@ -133,7 +133,9 @@ fn logical(e: &Engine, id: u64, url: &str) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a1_a7_a8_s2_mixed_success_keeps_v6_and_frozen_endpoint() {
     for rep in 0..3 {
-        let f = Fixture::start().await;
+        let Some(f) = Fixture::start().await else {
+            return;
+        };
         println!("S2 A1/A7/A8 rep={rep} {}", f.manifest());
         for i in [1, 2] {
             f.gates[i].hold();
@@ -240,7 +242,9 @@ async fn a1_a7_a8_s2_mixed_success_keeps_v6_and_frozen_endpoint() {
 async fn r1_s2_never_h3_h3_only_and_same_family_transport_fallback() {
     for rep in 0..3 {
         for mode in ["never", "only", "fallback"] {
-            let f = Fixture::start().await;
+            let Some(f) = Fixture::start().await else {
+                return;
+            };
             let dir = tempfile::tempdir().unwrap();
             let pref = match mode {
                 "never" => TransportPref::NoHttp3,
@@ -276,7 +280,9 @@ async fn r1_s2_never_h3_h3_only_and_same_family_transport_fallback() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a6_s2_relative_redirect_uses_logical_base_on_every_hop() {
     for rep in 0..3 {
-        let f = Fixture::start().await;
+        let Some(f) = Fixture::start().await else {
+            return;
+        };
         for gate in &f.gates {
             *gate.redirect.lock().unwrap() = Some("proof.bin".into());
         }
@@ -317,7 +323,9 @@ async fn a6_s2_relative_redirect_uses_logical_base_on_every_hop() {
 async fn a6_a7_s2_alternate_port_redirect_and_certificate_fail_closed() {
     for rep in 0..3 {
         for mode in ["absolute-alternate", "certificate", "different-host"] {
-            let f = Fixture::start().await;
+            let Some(f) = Fixture::start().await else {
+                return;
+            };
             let dir = tempfile::tempdir().unwrap();
             let e = engine(&f, dir.path(), TransportPref::Auto, mode != "certificate");
             let url = if mode == "absolute-alternate" {
@@ -410,7 +418,9 @@ async fn a13_s2_synthetic_url_discards_coverage_without_spending_restart() {
     for rep in 0..3 {
         for mismatch in ["none", "etag", "total", "redirect"] {
             for pref in [TransportPref::Auto, TransportPref::NoHttp3] {
-                let f = Fixture::start().await;
+                let Some(f) = Fixture::start().await else {
+                    return;
+                };
                 let dir = tempfile::tempdir().unwrap();
                 seed_legacy(&f, dir.path(), true);
                 for gate in &f.gates {
@@ -485,7 +495,9 @@ async fn r1_s2_mixed_representation_negatives_both_paths() {
     for rep in 0..3 {
         for victim in [1, 2] {
             for fault in ["etag", "missing", "total", "200", "coding", "redirect"] {
-                let f = Fixture::start().await;
+                let Some(f) = Fixture::start().await else {
+                    return;
+                };
                 *f.gates[victim].fault.lock().unwrap() = Some(fault);
                 let dir = tempfile::tempdir().unwrap();
                 let e = engine(&f, dir.path(), TransportPref::Auto, true);
@@ -540,7 +552,9 @@ async fn r1_s2_mixed_representation_negatives_both_paths() {
 async fn a7_s2_committed_checkpoint_fingerprint_uses_logical_url() {
     use usagi::engine::proof::{ProofBarrier, ProofPoint};
     for rep in 0..3 {
-        let f = Fixture::start().await;
+        let Some(f) = Fixture::start().await else {
+            return;
+        };
         for i in [1, 2] {
             f.gates[i]
                 .at_bytes
@@ -584,7 +598,9 @@ async fn a7_s2_committed_checkpoint_fingerprint_uses_logical_url() {
 async fn r1_s2_h3_only_failure_and_disabled_h3_do_not_fallback() {
     for rep in 0..3 {
         for mode in ["dead-endpoint", "disabled"] {
-            let f = Fixture::start().await;
+            let Some(f) = Fixture::start().await else {
+                return;
+            };
             let dir = tempfile::tempdir().unwrap();
             let e = engine(&f, dir.path(), TransportPref::Http3Only, true);
             if mode == "dead-endpoint" {
@@ -612,7 +628,9 @@ async fn r1_s2_h3_only_failure_and_disabled_h3_do_not_fallback() {
 async fn r1_s2_success_then_same_family_fallback_retains_one_path_and_history() {
     use usagi::engine::proof::{ProofBarrier, ProofPoint};
     for rep in 0..3 {
-        let f = Fixture::start().await;
+        let Some(f) = Fixture::start().await else {
+            return;
+        };
         f.gates[1].hold();
         let dir = tempfile::tempdir().unwrap();
         let e = engine(&f, dir.path(), TransportPref::Auto, true);
@@ -667,7 +685,9 @@ async fn r1_s2_success_then_same_family_fallback_retains_one_path_and_history() 
 async fn s2_exact_original_legacy_url_preserves_proven_checkpoint_prefix() {
     for rep in 0..3 {
         for pref in [TransportPref::Auto, TransportPref::NoHttp3] {
-            let f = Fixture::start().await;
+            let Some(f) = Fixture::start().await else {
+                return;
+            };
             let dir = tempfile::tempdir().unwrap();
             seed_legacy(&f, dir.path(), false);
             let e = engine(&f, dir.path(), pref, true);
