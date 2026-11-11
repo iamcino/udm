@@ -68,8 +68,11 @@ check:
     - if ($LASTEXITCODE -ne 0) { exit 1 }
   artifacts:
     name: udm-$CI_COMMIT_SHORT_SHA
-    paths: [dist/]
-    expire_in: 2 weeks
+    when: on_failure
+    paths:
+      - dist/*-setup.exe
+      - dist/*-portable.zip
+    expire_in: 3 days
 
 release:
   stage: release
