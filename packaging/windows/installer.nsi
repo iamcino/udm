@@ -21,6 +21,18 @@ Unicode true
 !define EXE            "udm.exe"
 !define CLIEXE         "udm-cli.exe"
 
+; U2 pin (REV1 sec. 2.5): the installer never generates or fetches a pin.
+; packaging/windows/build.ps1 reads the single source of truth
+; (crates/core/src/update_pin.rs) and passes it as /DUDM_UPDATE_PIN=...
+; and /DUDM_UPDATE_PUBKEY_HEX=... . A direct makensis run without those
+; defines fails here on purpose; no literal pin lives in this file.
+!ifndef UDM_UPDATE_PIN
+!error "UDM_UPDATE_PIN is required: build via packaging/windows/build.ps1, which reads it from crates/core/src/update_pin.rs"
+!endif
+!ifndef UDM_UPDATE_PUBKEY_HEX
+!error "UDM_UPDATE_PUBKEY_HEX is required: build via packaging/windows/build.ps1"
+!endif
+
 Name "${APPNAME} ${VERSION}"
 OutFile "..\..\dist\udm-${VERSION}-setup.exe"
 InstallDir "$LOCALAPPDATA\Programs\${APPNAME}"
@@ -57,6 +69,14 @@ Section "udm" SecMain
     File /oname=PRIVACY.md    "..\..\docs\PRIVACY.md"
     File /oname=CINO-UI-LICENSE.txt "..\..\crates\gui\vendor\cino-ui\LICENSE"
     File /oname=BE-VIETNAM-PRO-OFL.txt "..\..\crates\gui\vendor\cino-ui\ui\fonts\OFL.txt"
+
+    ; U2 first-trust record (REV1 sec. 2.1/2.5): the installer ships the
+    ; same pin the binary was built with, so `udm-cli update pin` output
+    ; can be compared against the installed copy. The pin is public.
+    FileOpen $0 "$INSTDIR\update-pin.txt" w
+    FileWrite $0 "publisher_pin_sha256=${UDM_UPDATE_PIN}$\r$\n"
+    FileWrite $0 "publisher_pubkey_hex=${UDM_UPDATE_PUBKEY_HEX}$\r$\n"
+    FileClose $0
 
     ; Per-user start menu + desktop shortcut (user profile, not all users).
     CreateDirectory "$SMPROGRAMS\${APPNAME}"
@@ -103,6 +123,7 @@ Section "Uninstall"
     Delete "$INSTDIR\PRIVACY.md"
     Delete "$INSTDIR\CINO-UI-LICENSE.txt"
     Delete "$INSTDIR\BE-VIETNAM-PRO-OFL.txt"
+    Delete "$INSTDIR\update-pin.txt"
     Delete "$INSTDIR\uninstall.exe"
     RMDir "$INSTDIR"
 

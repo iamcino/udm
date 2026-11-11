@@ -17,9 +17,12 @@
 //! - [`Engine`] owns its task store. A GUI and CLI cannot independently open
 //!   the same database while it is locked. Browser handoff uses the separate
 //!   local coordinator/pipe boundary and persisted task transaction markers.
-//! - No telemetry, remote crash reporting, metric export or updater is
-//!   implemented. Local instrumentation is not an engine-wide connection
-//!   census; unavailable totals must not be displayed as zero.
+//! - No telemetry, remote crash reporting, or metric export is implemented.
+//!   [`update_pin`] holds the compiled publisher trust root. [`update_manifest`]
+//!   verifies a signed manifest. [`update_fetch`] downloads a manifest and
+//!   payload only when the update flow calls it. There is no polling.
+//!   Local instrumentation is not an engine-wide connection census;
+//!   unavailable totals must not be displayed as zero.
 //! - No administrator rights or services are required. [`Paths`] resolves
 //!   user data to a per-user directory or `data/` beside the executable in
 //!   portable mode; download destinations are selected independently.
@@ -41,16 +44,19 @@
 //! | [`handoff`] | Durable browser ownership transactions and recovery entries. |
 //! | [`handoff_pipe`] | Framing, pairing and Windows per-user named-pipe transport. |
 //! | [`paths`] | Data and default download location discovery, including legacy fallbacks. |
+//! | [`update_pin`] | U2 publisher pin: compiled Ed25519 trust root, no network. |
+//! | [`update_manifest`] | U2 manifest parse and Ed25519 verification. No network. |
+//! | [`update_fetch`] | U3 fetch: two configured origins, verified manifest, payload handoff. |
 //! | [`error`] | Shared errors. |
 //! | [`util`] | Filename, path, byte-count and duration helpers. |
 //!
 //! Internal durability and finalization modules enforce file-sync ordering
 //! and reconcile rename/database boundaries. They are not a public updater
 //! API. Timed scheduling, a global speed limit, torrents and media resolving
-//! are not implemented here. The authenticated updater, N2 dual-stack
-//! (IPv4/IPv6 selection) and N3 multi-family transfers (splitting one download
-//! across address families) are design-only, not built; N2/N3 implementation
-//! remains measurement-gated.
+//! are not implemented here. Manifest verification ([`update_manifest`]) and
+//! fetch ([`update_fetch`]) are implemented. Staging, rename swap, and
+//! rollback are not. N2 dual-stack (IPv4/IPv6 selection) and N3 multi-family
+//! transfers remain measurement-gated and are not built.
 
 pub mod category;
 pub mod config;
@@ -64,6 +70,9 @@ pub mod hash;
 pub mod net;
 pub mod paths;
 pub mod store;
+pub mod update_fetch;
+pub mod update_manifest;
+pub mod update_pin;
 pub mod util;
 
 pub use config::{ConflictPolicy, Settings, TransportPref};

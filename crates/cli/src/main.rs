@@ -3,7 +3,9 @@
 //! Uses the same `usagi` engine as Universal Download Manager's desktop
 //! app. Commands download/probe URLs, import lists, inspect or change tasks,
 //! update supported settings and report local diagnostics. No telemetry,
-//! administrator rights, service or updater is involved.
+//! administrator rights, service or update check is involved. `update pin`
+//! only prints the compiled publisher fingerprint; it downloads, stages
+//! and installs nothing.
 //!
 //! This process opens its own engine/store; it does not control a running
 //! GUI through IPC. Exit the GUI from the tray before using its database,
@@ -17,6 +19,7 @@
 //! udm-cli settings --list
 //! udm-cli settings segments_per_task=12
 //! udm-cli doctor
+//! udm-cli update pin
 //! ```
 //!
 //! Replace example URLs with real file links. Segment limits describe
@@ -101,6 +104,9 @@ enum Command {
     },
     /// Show or change settings.
     Settings(SettingsArgs),
+    /// Update trust: print the pinned publisher fingerprint (first-trust
+    /// check). No network activity; the fingerprint is a compiled constant.
+    Update(UpdateArgs),
     /// Report paths, TLS trust store, QUIC availability and telemetry status.
     Doctor,
 }
@@ -218,6 +224,20 @@ struct SettingsArgs {
     reset: bool,
 }
 
+#[derive(Args, Clone)]
+struct UpdateArgs {
+    #[command(subcommand)]
+    command: UpdateCommand,
+}
+
+#[derive(Subcommand, Clone)]
+enum UpdateCommand {
+    /// Print the pinned publisher fingerprint so it can be compared out of
+    /// band against the fingerprint published in the signed release notes.
+    /// No network activity; nothing is downloaded, staged or installed.
+    Pin,
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -263,6 +283,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Command::Settings(args) => cmd_settings(&cli, args),
+        Command::Update(args) => cmd_update(args),
         Command::Doctor => cmd_doctor(&cli),
     }
 }
@@ -557,6 +578,35 @@ fn cmd_settings(cli: &Cli, args: SettingsArgs) -> Result<ExitCode> {
             util::display_path(&settings.download_dir())
         );
     }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn cmd_update(args: UpdateArgs) -> Result<ExitCode> {
+    match args.command {
+        UpdateCommand::Pin => cmd_update_pin(),
+    }
+}
+
+fn cmd_update_pin() -> Result<ExitCode> {
+    // A failed self-check means the compiled constants were transcribed
+    // wrong; refuse to print a fingerprint that cannot be trusted.
+    if !usagi::update_pin::pins_self_consistent() {
+        return Err(usagi::Error::Other(
+            "update pin self-check failed: the compiled pin does not match the publisher public key".into(),
+        ));
+    }
+    println!(
+        "publisher pin (SHA-256): {}",
+        usagi::update_pin::publisher_pin()
+    );
+    println!(
+        "publisher public key:    {}",
+        usagi::update_pin::publisher_public_key_hex()
+    );
+    println!(
+        "recovery pin (SHA-256):  {}",
+        usagi::update_pin::recovery_pin()
+    );
     Ok(ExitCode::SUCCESS)
 }
 
