@@ -1,4 +1,6 @@
 //! Local S0 proof origin. No OS DNS, trust-store, proxy or network mutation.
+// Integration binaries exercise different fixture controls.
+#![allow(dead_code)]
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -40,11 +42,24 @@ pub struct Event {
 }
 
 #[derive(Clone, Debug)]
+pub struct Accept {
+    pub connection: u64,
+    pub local: SocketAddr,
+    pub peer: SocketAddr,
+    pub alpn: Vec<u8>,
+}
+
+#[derive(Clone, Debug)]
 pub struct Barrier {
     release: watch::Sender<u8>,
+    pub accepts: Arc<Mutex<Vec<Accept>>>,
+    pub closed: Arc<Mutex<Vec<u64>>>,
+    pub connections: Arc<Mutex<std::collections::HashMap<u64, tokio::sync::oneshot::Sender<()>>>>,
     pub events: Arc<Mutex<Vec<Event>>>,
     pub fault: Arc<Mutex<Option<&'static str>>>,
     pub at_bytes: Arc<AtomicU64>,
+    pub goaway_start: Arc<AtomicU64>,
+    pub bad_range_start: Arc<AtomicU64>,
     pub headers: Arc<Mutex<Vec<(String, String)>>>,
     pub redirect: Arc<Mutex<Option<String>>>,
 }
@@ -52,9 +67,14 @@ impl Barrier {
     fn new() -> Self {
         Self {
             release: watch::channel(3).0,
+            accepts: Arc::default(),
+            closed: Arc::default(),
+            connections: Arc::default(),
             events: Arc::default(),
             fault: Arc::default(),
             at_bytes: Arc::new(AtomicU64::new(1024)),
+            goaway_start: Arc::new(AtomicU64::new(u64::MAX)),
+            bad_range_start: Arc::new(AtomicU64::new(u64::MAX)),
             headers: Arc::default(),
             redirect: Arc::default(),
         }
@@ -194,7 +214,9 @@ impl Fixture {
             let acceptor = acceptor.clone();
             jobs.push(tokio::spawn(async move {
                 let mut connections = tokio::task::JoinSet::new();
-                while let Ok((tcp, _)) = listener.accept().await {
+                while let Ok((tcp, peer)) = listener.accept().await {
+                    let local = tcp.local_addr().unwrap();
+                    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
                     let acceptor = acceptor.clone();
                     let gate = gate.clone();
                     connections.spawn(async move {
@@ -202,141 +224,197 @@ impl Fixture {
                             return;
                         };
                         assert_eq!(tls.get_ref().1.alpn_protocol(), Some(b"h2".as_slice()));
-                        let mut conn = h2::server::handshake(tls).await.unwrap();
-                        let mut streams = tokio::task::JoinSet::new();
-                        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-                        while let Some(Ok((request, mut respond))) = conn.accept().await {
-                            let request = request.map(|_| ());
-                            let (mut headers, mut body) = response(&request);
-                            decorate(&gate, &request, &mut headers);
-                            match *gate.fault.lock().unwrap() {
-                                Some("no-validator") => {
-                                    headers.headers_mut().remove("etag");
-                                }
-                                Some("weak-bound") => {
-                                    headers
-                                        .headers_mut()
-                                        .insert("etag", "W/\"fixed\"".parse().unwrap());
-                                }
-                                Some("vary-bound") => {
-                                    headers
-                                        .headers_mut()
-                                        .insert("vary", "Cookie".parse().unwrap());
-                                }
-                                _ => {}
-                            }
-                            let small = request
-                                .headers()
-                                .get("range")
-                                .is_some_and(|r| r == "bytes=0-0");
-                            if !small && request.method() != http::Method::HEAD {
+                        gate.accepts.lock().unwrap().push(Accept {
+                            connection: id,
+                            local,
+                            peer,
+                            alpn: tls.get_ref().1.alpn_protocol().unwrap().to_vec(),
+                        });
+                        let (kill, killed) = tokio::sync::oneshot::channel();
+                        gate.connections.lock().unwrap().insert(id, kill);
+                        let serve = async {
+                            let mut conn = h2::server::handshake(tls).await.unwrap();
+                            let mut streams = tokio::task::JoinSet::new();
+                            while let Some(Ok((request, mut respond))) = conn.accept().await {
+                                let request = request.map(|_| ());
+                                let (mut headers, mut body) = response(&request);
+                                decorate(&gate, &request, &mut headers);
                                 match *gate.fault.lock().unwrap() {
-                                    Some("redirect") if request.uri().path() == "/proof.bin" => {
-                                        *headers.status_mut() = http::StatusCode::FOUND;
-                                        headers
-                                            .headers_mut()
-                                            .insert("location", "/changed.bin".parse().unwrap());
+                                    Some("no-validator") => {
+                                        headers.headers_mut().remove("etag");
                                     }
-                                    Some("etag") => {
-                                        headers
-                                            .headers_mut()
-                                            .insert("etag", "\"changed\"".parse().unwrap());
-                                    }
-                                    Some("weak") => {
+                                    Some("weak-bound") => {
                                         headers
                                             .headers_mut()
                                             .insert("etag", "W/\"fixed\"".parse().unwrap());
                                     }
-                                    Some("missing") => {
-                                        headers.headers_mut().remove("etag");
-                                    }
-                                    Some("total") => {
-                                        let range = headers.headers()["content-range"]
-                                            .to_str()
-                                            .unwrap()
-                                            .rsplit_once('/')
-                                            .unwrap()
-                                            .0;
-                                        let changed =
-                                            format!("{range}/{}", SIZE + 1).parse().unwrap();
-                                        headers.headers_mut().insert("content-range", changed);
-                                    }
-                                    Some("interval") => {
-                                        headers.headers_mut().insert(
-                                            "content-range",
-                                            format!("bytes 1-1/{SIZE}").parse().unwrap(),
-                                        );
-                                    }
-                                    Some("short") => {
-                                        body = body.slice(..body.len() / 2);
-                                    }
-                                    Some("excess") => {
-                                        let mut b = body.to_vec();
-                                        b.push(42);
-                                        body = b.into();
-                                    }
-                                    Some("200") => {
-                                        *headers.status_mut() = http::StatusCode::OK;
-                                    }
-                                    Some("416") => {
-                                        *headers.status_mut() =
-                                            http::StatusCode::RANGE_NOT_SATISFIABLE;
-                                    }
-                                    Some("coding") => {
-                                        headers
-                                            .headers_mut()
-                                            .insert("content-encoding", "gzip".parse().unwrap());
-                                    }
-                                    Some("vary") => {
+                                    Some("vary-bound") => {
                                         headers
                                             .headers_mut()
                                             .insert("vary", "Cookie".parse().unwrap());
                                     }
                                     _ => {}
                                 }
-                            }
-                            let evidence = event(&request, id, family, "h2");
-                            let head = request.method() == http::Method::HEAD;
-                            let mut send = respond.send_response(headers, head).unwrap();
-                            let goaway = !small && *gate.fault.lock().unwrap() == Some("goaway");
-                            if goaway {
-                                conn.graceful_shutdown();
-                            }
-                            if head {
-                                continue;
-                            }
-                            let gate = gate.clone();
-                            streams.spawn(async move {
-                                gate.arrive(evidence.clone(), 1, 0).await;
-                                let total = body.len();
-                                let mut offset = 0;
-                                while offset < total {
-                                    let end = (offset + 1024).min(total);
-                                    send.reserve_capacity(end - offset);
-                                    let capacity =
-                                        futures_util::future::poll_fn(|cx| send.poll_capacity(cx))
-                                            .await;
-                                    let Some(Ok(capacity)) = capacity else { return };
-                                    let end = end.min(offset + capacity);
-                                    if end == offset {
-                                        continue;
-                                    }
-                                    if send.send_data(body.slice(offset..end), false).is_err() {
-                                        return;
-                                    }
-                                    offset = end;
-                                    if goaway && offset >= 1024 {
-                                        send.send_reset(h2::Reason::CANCEL);
-                                        return;
-                                    }
-                                    if offset == gate.at_bytes.load(Ordering::Relaxed) as usize {
-                                        gate.arrive(evidence.clone(), 2, offset).await;
+                                let small = request
+                                    .headers()
+                                    .get("range")
+                                    .is_some_and(|r| r == "bytes=0-0");
+                                if !small && request.method() != http::Method::HEAD {
+                                    let target = gate.bad_range_start.load(Ordering::SeqCst);
+                                    let targeted = target == u64::MAX
+                                        || request
+                                            .headers()
+                                            .get("range")
+                                            .and_then(|v| v.to_str().ok())
+                                            .is_some_and(|v| {
+                                                v.starts_with(&format!("bytes={target}-"))
+                                            });
+                                    let fault = if targeted {
+                                        *gate.fault.lock().unwrap()
+                                    } else {
+                                        None
+                                    };
+                                    match fault {
+                                        Some("redirect")
+                                            if request.uri().path() == "/proof.bin" =>
+                                        {
+                                            *headers.status_mut() = http::StatusCode::FOUND;
+                                            headers.headers_mut().insert(
+                                                "location",
+                                                "/changed.bin".parse().unwrap(),
+                                            );
+                                        }
+                                        Some("etag") => {
+                                            headers
+                                                .headers_mut()
+                                                .insert("etag", "\"changed\"".parse().unwrap());
+                                        }
+                                        Some("weak") => {
+                                            headers
+                                                .headers_mut()
+                                                .insert("etag", "W/\"fixed\"".parse().unwrap());
+                                        }
+                                        Some("missing") => {
+                                            headers.headers_mut().remove("etag");
+                                        }
+                                        Some("total") => {
+                                            let range = headers.headers()["content-range"]
+                                                .to_str()
+                                                .unwrap()
+                                                .rsplit_once('/')
+                                                .unwrap()
+                                                .0;
+                                            let changed =
+                                                format!("{range}/{}", SIZE + 1).parse().unwrap();
+                                            headers.headers_mut().insert("content-range", changed);
+                                        }
+                                        Some("interval") => {
+                                            headers.headers_mut().insert(
+                                                "content-range",
+                                                format!("bytes 1-1/{SIZE}").parse().unwrap(),
+                                            );
+                                        }
+                                        Some("short") => {
+                                            body = body.slice(..body.len() / 2);
+                                        }
+                                        Some("excess") => {
+                                            let mut b = body.to_vec();
+                                            b.push(42);
+                                            body = b.into();
+                                        }
+                                        Some("200") => {
+                                            *headers.status_mut() = http::StatusCode::OK;
+                                        }
+                                        Some("416") => {
+                                            *headers.status_mut() =
+                                                http::StatusCode::RANGE_NOT_SATISFIABLE;
+                                        }
+                                        Some("coding") => {
+                                            headers.headers_mut().insert(
+                                                "content-encoding",
+                                                "gzip".parse().unwrap(),
+                                            );
+                                        }
+                                        Some("vary") => {
+                                            headers
+                                                .headers_mut()
+                                                .insert("vary", "Cookie".parse().unwrap());
+                                        }
+                                        _ => {}
                                     }
                                 }
-                                gate.arrive(evidence, 3, total).await;
-                                let _ = send.send_data(Bytes::new(), true);
-                            });
-                        }
+                                let evidence = event(&request, id, family, "h2");
+                                let head = request.method() == http::Method::HEAD;
+                                let Ok(mut send) = respond.send_response(headers, head) else {
+                                    // Cancellation or an injected malformed response can
+                                    // reset a stream while the fixture prepares headers.
+                                    continue;
+                                };
+                                let targeted = request
+                                    .headers()
+                                    .get("range")
+                                    .and_then(|r| r.to_str().ok())
+                                    .and_then(|r| r.strip_prefix("bytes="))
+                                    .and_then(|r| r.split_once('-'))
+                                    .and_then(|(start, _)| start.parse::<u64>().ok())
+                                    .is_some_and(|start| {
+                                        !small
+                                            && gate
+                                                .goaway_start
+                                                .compare_exchange(
+                                                    start,
+                                                    u64::MAX,
+                                                    Ordering::SeqCst,
+                                                    Ordering::SeqCst,
+                                                )
+                                                .is_ok()
+                                    });
+                                let goaway = !small
+                                    && (targeted || *gate.fault.lock().unwrap() == Some("goaway"));
+                                if goaway {
+                                    conn.graceful_shutdown();
+                                }
+                                if head {
+                                    continue;
+                                }
+                                let gate = gate.clone();
+                                streams.spawn(async move {
+                                    gate.arrive(evidence.clone(), 1, 0).await;
+                                    let total = body.len();
+                                    let mut offset = 0;
+                                    while offset < total {
+                                        let end = (offset + 1024).min(total);
+                                        send.reserve_capacity(end - offset);
+                                        let capacity = futures_util::future::poll_fn(|cx| {
+                                            send.poll_capacity(cx)
+                                        })
+                                        .await;
+                                        let Some(Ok(capacity)) = capacity else { return };
+                                        let end = end.min(offset + capacity);
+                                        if end == offset {
+                                            continue;
+                                        }
+                                        if send.send_data(body.slice(offset..end), false).is_err() {
+                                            return;
+                                        }
+                                        offset = end;
+                                        if goaway && offset >= 1024 {
+                                            send.send_reset(h2::Reason::CANCEL);
+                                            return;
+                                        }
+                                        if offset == gate.at_bytes.load(Ordering::Relaxed) as usize
+                                        {
+                                            gate.arrive(evidence.clone(), 2, offset).await;
+                                        }
+                                    }
+                                    gate.arrive(evidence, 3, total).await;
+                                    let _ = send.send_data(Bytes::new(), true);
+                                });
+                            }
+                        };
+                        tokio::select! { _ = serve => {}, _ = killed => {} }
+                        gate.connections.lock().unwrap().remove(&id);
+                        gate.closed.lock().unwrap().push(id);
                     });
                 }
             }));
@@ -483,6 +561,7 @@ impl Fixture {
             "tests/transport_proof_a.rs",
             "tests/transport_s1.rs",
             "tests/transport_s2.rs",
+            "tests/transport_s3.rs",
             "tests/common/transport_fixture.rs",
         ]
         .into_iter()
@@ -494,10 +573,11 @@ impl Fixture {
         .collect();
         serde_json::json!({"seed":17,"size":SIZE,"sha256":hex::encode(Sha256::digest(payload())),
             "etag":ETAG,"coding":"identity","allowed_vary":[],"logical_url":self.url(),
-            "a":self.v4,"aaaa":self.v6,"h3_v4":self.h3,"ranges":RANGES,
+            "a":self.v4,"aaaa":self.v6,"h3_v4":self.h3,"fixture_control_ranges":RANGES,
+            "four_segment_planner_ranges":[[0,65569],[65570,131139],[131140,196709],[196710,262280]],
             "certificate_sha256":hex::encode(Sha256::digest(self.ca.ca_der())),
             "failure_schedule":"headers,1024 bytes,body complete; explicit release",
-            "source_base":"08b2607","source_head":String::from_utf8_lossy(&source.stdout).trim(),"source_files":source_hashes,"binary_sha256":hex::encode(Sha256::digest(std::fs::read(std::env::current_exe().unwrap()).unwrap()))})
+            "fixture_origin_base":"08b2607","source_head":String::from_utf8_lossy(&source.stdout).trim(),"source_files":source_hashes,"binary_sha256":hex::encode(Sha256::digest(std::fs::read(std::env::current_exe().unwrap()).unwrap()))})
     }
 }
 impl Drop for Fixture {

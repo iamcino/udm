@@ -5966,6 +5966,7 @@ name = "udm-host"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+ "tempfile",
  "usagi",
  "windows-sys 0.52.0",
 ]

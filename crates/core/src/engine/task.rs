@@ -154,7 +154,8 @@ pub(super) async fn run(ctx: Arc<RunCtx>, id: u64, token: CancellationToken) {
                 // are definitive. Pause or shutdown must not drop them:
                 // publication step 5 wins over step 6. Cancel still wins
                 // inside `publish_exit`.
-                let storage_failure = ctx.settings.dual_stack_paths
+                let storage_failure = (ctx.settings.dual_stack_paths
+                    || cell.uses_family_paths.load(Ordering::Acquire))
                     && matches!(e, Error::Io(_) | Error::IoPath { .. } | Error::Storage(_));
                 let definitive =
                     storage_failure || e.is_fatal() || next_attempt > ctx.settings.max_retries;
@@ -673,6 +674,10 @@ async fn transfer(
     token: &CancellationToken,
 ) -> Result<Outcome> {
     let mut plan = plan.clone();
+    let experiment = tokio::select! {
+        _ = token.cancelled() => return Ok(Outcome::Stopped),
+        lease = ctx.state.net.h2_experiment_lease() => lease,
+    };
     let epochs = cell
         .segments
         .read()
@@ -680,7 +685,7 @@ async fn transfer(
         .map(|s| s.allocation_epoch)
         .collect();
     *cell.allocation_epochs.lock() = epochs;
-    if ctx.settings.dual_stack_paths {
+    if ctx.settings.dual_stack_paths || experiment.is_some() {
         let settings = ctx.state.net.settings();
         let eligible = !ctx.settings.use_system_proxy
             && !settings.use_system_proxy
@@ -688,7 +693,14 @@ async fn transfer(
             && plan.bound.is_some()
             && plan.total.is_some();
         if eligible {
-            let paths = ctx.state.net.family_paths(&plan.request_url, plan.pref)?;
+            let paths = if let Some((paths, _lease)) = &experiment {
+                if settings.http3_enabled {
+                    return Err(Error::Unsupported("H2 experiment settings changed".into()));
+                }
+                paths.clone()
+            } else {
+                ctx.state.net.family_paths(&plan.request_url, plan.pref)?
+            };
             // Conditional small range probes admit no coverage. All headers,
             // bound and actual peers are checked before any writer is granted.
             let mut admitted = true;
@@ -763,6 +775,11 @@ async fn transfer(
             );
         }
     }
+    if experiment.is_some() && plan.family_paths.is_none() {
+        return Err(Error::Unsupported(
+            "H2 experiment representation/route ineligible".into(),
+        ));
+    }
     if plan.family_paths.is_some() {
         cell.uses_family_paths.store(true, Ordering::Release);
         return transfer_families(ctx, cell, &plan, token).await;
@@ -815,8 +832,9 @@ async fn transfer(
     Err(err)
 }
 
-/// One scheduler owns all leases. A family has at most one worker; a failed
-/// range is queued to the surviving family only after join and checkpoint read.
+/// One scheduler owns all leases. Each admitted slot has at most one worker;
+/// normally slots are distinct families, in S3 they are two pools on ONE path.
+/// Failed ranges move only after join and committed-checkpoint read.
 async fn transfer_families(
     ctx: &Arc<RunCtx>,
     cell: &Arc<TaskCell>,

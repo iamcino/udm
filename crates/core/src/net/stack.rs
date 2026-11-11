@@ -288,6 +288,8 @@ impl Opened {
 }
 
 struct Inner {
+    h2_experiment: RwLock<Option<FamilyPaths>>,
+    h2_experiment_task: Arc<tokio::sync::Mutex<()>>,
     http: RwLock<Http12Client>,
     test_roots: RwLock<Vec<Vec<u8>>>,
     h3: RwLock<Option<Arc<H3Pool>>>,
@@ -377,6 +379,8 @@ impl NetStack {
         };
         Ok(NetStack {
             inner: Arc::new(Inner {
+                h2_experiment: RwLock::new(None),
+                h2_experiment_task: Arc::new(tokio::sync::Mutex::new(())),
                 http: RwLock::new(http),
                 test_roots: RwLock::new(Vec::new()),
                 h3: RwLock::new(h3),
@@ -449,6 +453,56 @@ impl NetStack {
         ]))
     }
 
+    /// Explicit S3 local-proof adapter, never enabled by settings or application
+    /// code. Use an isolated engine with H3 and proxy disabled. The experiment
+    /// keeps ONE family path and permits two requests, one per independent pool.
+    /// This is neither a production multi-session policy nor a socket census.
+    #[doc(hidden)]
+    pub fn install_h2_experiment(&self, family: Family) -> Result<()> {
+        let settings = self.settings();
+        if settings.use_system_proxy || settings.http3_enabled {
+            return Err(Error::Unsupported(
+                "H2 experiment requires direct Http12-only engine".into(),
+            ));
+        }
+        let mut experiment = self.inner.h2_experiment.write();
+        if experiment.is_some() {
+            return Err(Error::Unsupported(
+                "H2 experiment family is immutable".into(),
+            ));
+        }
+        *experiment = Some(self.build_h2_experiment_paths(family)?);
+        Ok(())
+    }
+
+    pub(crate) async fn h2_experiment_lease(
+        &self,
+    ) -> Option<(FamilyPaths, tokio::sync::OwnedMutexGuard<()>)> {
+        let paths = self.inner.h2_experiment.read().clone()?;
+        // One experimental transfer per engine. The existing queue/per-origin
+        // task limits still apply on top; no cross-task dial policy is invented.
+        let lease = self.inner.h2_experiment_task.clone().lock_owned().await;
+        Some((paths, lease))
+    }
+
+    fn build_h2_experiment_paths(&self, family: Family) -> Result<FamilyPaths> {
+        let settings = self.settings();
+        if settings.use_system_proxy || settings.http3_enabled {
+            return Err(Error::Unsupported("H2 experiment settings changed".into()));
+        }
+        let roots = self.inner.test_roots.read();
+        let roots: Vec<_> = roots.iter().map(Vec::as_slice).collect();
+        let build = || -> Result<FamilyRoute> {
+            Ok(FamilyRoute {
+                family,
+                h3: None,
+                client: Http12Client::h2_experiment(&settings, &roots, family)?,
+            })
+        };
+        // Two BUILDS. Cloning here would silently collapse to one session.
+        Ok(FamilyPaths([build()?, build()?]))
+    }
+
     /// Hold the next tail flush until [`TailFlushGate::release`].
     ///
     /// The worker drops the response body before it waits, so a test can
@@ -517,6 +571,24 @@ impl NetStack {
         let parsed = validate(url)?;
         let effective = self.effective_pref(pref);
 
+        let experiment = self.inner.h2_experiment.read().clone();
+        if let Some(paths) = experiment {
+            let settings = self.settings();
+            if settings.use_system_proxy
+                || settings.http3_enabled
+                || effective == TransportPref::Http3Only
+            {
+                return Err(Error::Unsupported(
+                    "H2 experiment settings/policy ineligible".into(),
+                ));
+            }
+            // Metadata uses the first of the SAME two pools: no third client,
+            // Happy Eyeballs family change or H1 observation inside the proof.
+            return self
+                .probe_http12_client(&parsed, paths.0[0].client.clone())
+                .await;
+        }
+
         if let Some(entry) = self.h3_target(&parsed, effective) {
             match self.probe_h3(&parsed, &entry).await {
                 Ok(info) => {
@@ -548,6 +620,10 @@ impl NetStack {
 
     async fn probe_http12(&self, url: &Url) -> Result<ProbeInfo> {
         let client = self.inner.http.read().clone();
+        self.probe_http12_client(url, client).await
+    }
+
+    async fn probe_http12_client(&self, url: &Url, client: Http12Client) -> Result<ProbeInfo> {
         let settings = self.settings();
         let cap = settings
             .connect_timeout

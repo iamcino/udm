@@ -63,6 +63,7 @@ use crate::net::ACCEPT_ENCODING_IDENTITY;
 pub struct Http12Client {
     client: Client,
     family: Option<Family>,
+    h2_only: bool,
     redirect_limit: u32,
     // Serial entry through headers also bounds cold pre-ALPN opens.
     // This is a request-entry bound, never a socket census.
@@ -81,6 +82,21 @@ impl Http12Client {
             ));
         }
         Self::build(settings, roots, Some(family))
+    }
+
+    /// S3 local experiment: each call builds an independent H2-only pool.
+    /// Never reinterpret an H1 fallback as evidence of a second H2 session.
+    pub(crate) fn h2_experiment(
+        settings: &NetSettings,
+        roots: &[&[u8]],
+        family: Family,
+    ) -> Result<Self> {
+        if settings.use_system_proxy {
+            return Err(Error::Unsupported(
+                "H2 experiment ineligible with proxy".into(),
+            ));
+        }
+        Self::build_protocol(settings, roots, Some(family), true)
     }
 
     /// Rebuild with new settings (called when the user edits them).
@@ -105,6 +121,15 @@ impl Http12Client {
         settings: &NetSettings,
         extra_roots: &[&[u8]],
         family: Option<Family>,
+    ) -> Result<Self> {
+        Self::build_protocol(settings, extra_roots, family, false)
+    }
+
+    fn build_protocol(
+        settings: &NetSettings,
+        extra_roots: &[&[u8]],
+        family: Option<Family>,
+        h2_only: bool,
     ) -> Result<Self> {
         crate::net::tls::install_default_provider();
 
@@ -145,6 +170,9 @@ impl Http12Client {
         if !settings.use_system_proxy {
             builder = builder.no_proxy();
         }
+        if h2_only {
+            builder = builder.http2_prior_knowledge();
+        }
         for der in extra_roots {
             let cert = reqwest::Certificate::from_der(der)
                 .map_err(|e| Error::Tls(format!("cannot load the extra trust anchor ({e})")))?;
@@ -159,6 +187,7 @@ impl Http12Client {
         Ok(Http12Client {
             client,
             family,
+            h2_only,
             redirect_limit: settings.max_redirects,
             headers_gate: Arc::new(tokio::sync::Mutex::new(())),
         })
@@ -228,6 +257,11 @@ impl Http12Client {
         }
 
         let response = builder.send().await?;
+        if self.h2_only && response.version() != http::Version::HTTP_2 {
+            return Err(Error::InvalidResponse(
+                "H2 experiment requires negotiated H2".into(),
+            ));
+        }
         Ok(response)
     }
 

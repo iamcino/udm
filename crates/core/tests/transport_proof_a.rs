@@ -134,6 +134,9 @@ macro_rules! deferred {
 // S2 A1 mixed, A6/A7/A8/A13 executable drivers: transport_s2.rs.
 // Mixed A2-A5/A9-A11 lifecycle extensions remain NOT RUN except the named
 // representation and policy controls exercised in that file; see S2 evidence.
+// S3 two independent H2 sessions on ONE fixed family/path, with accept-id/ALPN
+// proof and named lifecycle/representation/checkpoint controls: transport_s3.rs.
+// S4 multi-QUIC, S5 mux and WAN/benefit campaigns remain NOT RUN.
 deferred!(
     a12_probe_not_pass_case,
     "NOT RUN: historical Http12-only option b probe; countersigned option a retained"
