@@ -5972,6 +5972,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "udm-publisher-tool"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "hex",
+ "ring",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "url",
+ "usagi",
+]
+
+[[package]]
 name = "uds_windows"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

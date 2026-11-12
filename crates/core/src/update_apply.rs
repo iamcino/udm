@@ -58,6 +58,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::update_fetch::VerifiedPayload;
+use crate::update_records::{ClientTrust, StagingRefusal};
 
 /// Journal table in the install's `udm.redb`: one swap transaction.
 const SWAP_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("updater_swap.v1");
@@ -135,6 +136,14 @@ pub struct StagedCandidate {
     pub version: String,
     /// Files of the staged build, as verified at staging time.
     pub files: Vec<FileEntry>,
+    /// Manifest epoch of the signed candidate. Zero for a candidate
+    /// staged by [`stage_files`], which carries no publisher signature.
+    #[serde(default)]
+    pub manifest_epoch: u64,
+    /// Signature key ids from the manifest. Empty for [`stage_files`].
+    /// A non-empty list is re-checked against trust state before apply.
+    #[serde(default)]
+    pub signature_key_ids: Vec<String>,
 }
 
 /// One file to stage: a verified source file on disk plus the hash and
@@ -224,6 +233,16 @@ pub enum ApplyError {
     /// Test-only fault injection at a named cut point.
     #[error("injected fault")]
     FaultInjected,
+    /// A signed candidate cannot be staged or applied under the current
+    /// trust state. The installed build is left unchanged.
+    #[error("{0}; the installed build is unchanged")]
+    StagingRefused(StagingRefusal),
+    /// A signed candidate has no readable trust state to check.
+    #[error("updater trust state is missing or unusable: {0}; the installed build is unchanged")]
+    TrustState(String),
+    /// The system clock could not be read while checking a signed candidate.
+    #[error("system clock is unavailable; refusing to apply; the installed build is unchanged")]
+    Clock,
 }
 
 /// The install directory layout the updater works on. The per-user
@@ -283,6 +302,11 @@ impl InstallLayout {
     /// The trampoline helper's path.
     pub fn helper_path(&self) -> PathBuf {
         self.base.join(HELPER_NAME)
+    }
+
+    /// Durable rotation and revocation state for this install.
+    pub fn updater_trust_file(&self) -> PathBuf {
+        self.base.join("updater-trust.json")
     }
 }
 
@@ -470,14 +494,32 @@ fn journal_clear(layout: &InstallLayout) -> Result<(), ApplyError> {
 
 /// Stage a verified payload: copy its files into the held staging
 /// area, re-verifying every file against the signed manifest's records
-/// before and after the copy. The live install is not touched. Refuses
-/// when a swap is in flight, when a candidate is already staged, or
-/// when the payload's file set differs from the manifest's.
+/// before and after the copy. The live install is not touched.
+///
+/// `trust` is consulted before any copy. A revoked signer, a recovery
+/// key, or a key this install does not currently trust refuses the
+/// stage and leaves the install unchanged.
 pub fn stage(
     layout: &InstallLayout,
     payload: &VerifiedPayload,
+    trust: &ClientTrust,
+    now_unix: i64,
 ) -> Result<StagedCandidate, ApplyError> {
     let manifest = payload.manifest.manifest();
+    let key_ids: Vec<String> = manifest
+        .signatures
+        .iter()
+        .map(|sig| sig.key_id.clone())
+        .collect();
+    trust
+        .allows_staging(now_unix, manifest.manifest_epoch, &key_ids)
+        .map_err(|err| {
+            tracing::warn!(
+                error = %err,
+                "refusing to stage a signed update; the installed build is unchanged"
+            );
+            ApplyError::StagingRefused(err)
+        })?;
     let mut manifest_paths: Vec<&str> = manifest.files.iter().map(|f| f.path.as_str()).collect();
     let mut payload_paths: Vec<&str> = payload.files.iter().map(|f| f.path.as_str()).collect();
     manifest_paths.sort_unstable();
@@ -510,7 +552,13 @@ pub fn stage(
             size: file.size,
         })
         .collect();
-    stage_files(layout, &manifest.version, &inputs)
+    stage_files_with(
+        layout,
+        &manifest.version,
+        &inputs,
+        manifest.manifest_epoch,
+        &key_ids,
+    )
 }
 
 /// Attempts for the copy half of one file's staging step when a
@@ -669,6 +717,16 @@ pub fn stage_files(
     version: &str,
     inputs: &[StageInput],
 ) -> Result<StagedCandidate, ApplyError> {
+    stage_files_with(layout, version, inputs, 0, &[])
+}
+
+fn stage_files_with(
+    layout: &InstallLayout,
+    version: &str,
+    inputs: &[StageInput],
+    manifest_epoch: u64,
+    signature_key_ids: &[String],
+) -> Result<StagedCandidate, ApplyError> {
     if current_journal(layout)?.is_some() {
         return Err(ApplyError::SwapInFlight);
     }
@@ -709,6 +767,8 @@ pub fn stage_files(
     let candidate = StagedCandidate {
         version: version.to_owned(),
         files: entries,
+        manifest_epoch,
+        signature_key_ids: signature_key_ids.to_vec(),
     };
     // The metadata lands last: its presence is what makes the staging
     // area a held candidate.
@@ -859,14 +919,48 @@ fn swap_rank(path: &str) -> u8 {
 /// the caller exits and relaunches the new build, whose first
 /// successful start is recorded through [`confirm_successful_start`].
 pub fn apply_staged(layout: &InstallLayout) -> Result<SwapJournal, ApplyError> {
-    apply_staged_at(layout, None)
+    apply_staged_at(layout, None, None)
+}
+
+/// Apply a staged candidate after checking `trust` at `now_unix`.
+///
+/// A candidate that carries signature key ids is refused when those keys
+/// are revoked or no longer authorize. The live install is not renamed
+/// when the check fails.
+pub fn apply_staged_with_trust(
+    layout: &InstallLayout,
+    trust: &ClientTrust,
+    now_unix: i64,
+) -> Result<SwapJournal, ApplyError> {
+    apply_staged_at(layout, None, Some((trust, now_unix)))
 }
 
 pub(crate) fn apply_staged_at(
     layout: &InstallLayout,
     fail: Option<FailPoint>,
+    trust: Option<(&ClientTrust, i64)>,
 ) -> Result<SwapJournal, ApplyError> {
     let candidate = staged_candidate(layout)?.ok_or(ApplyError::NotStaged)?;
+    if !candidate.signature_key_ids.is_empty() {
+        let (trust, now_unix) = trust.ok_or_else(|| {
+            ApplyError::TrustState(
+                "signed candidate requires an explicit trust check before apply".to_owned(),
+            )
+        })?;
+        trust
+            .allows_staging(
+                now_unix,
+                candidate.manifest_epoch,
+                &candidate.signature_key_ids,
+            )
+            .map_err(|err| {
+                tracing::warn!(
+                    error = %err,
+                    "refusing to apply a signed update; the installed build is unchanged"
+                );
+                ApplyError::StagingRefused(err)
+            })?;
+    }
     if current_journal(layout)?.is_some() {
         return Err(ApplyError::SwapInFlight);
     }

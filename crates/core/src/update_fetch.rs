@@ -5,10 +5,15 @@
 //! caller, in the order to try first (GitHub, then GitLab, when the caller
 //! follows the O2 order). There is no built-in origin and no third origin.
 //!
-//! A manifest is verified with [`Manifest::verify`] against the trust root
-//! the caller supplies. Production uses [`TrustRoot::pinned`], the publisher
-//! key. The recovery key is not a trust root here. On acceptance the epoch
-//! file is replaced durably before any payload byte is requested. The
+//! A manifest is verified with [`Manifest::verify_governed`] against the
+//! publisher keys the session currently trusts. Production starts from
+//! [`TrustRoot::pinned`]. A rotation adopted through
+//! [`FetchSession::accept_rotation_record`] can add the successor key
+//! during its dual-signature window. The recovery key is never a manifest
+//! trust root; [`FetchSession::accept_revocation_record`] uses it only to
+//! verify a revocation, which then removes that publisher key. On
+//! acceptance the epoch file is replaced durably before any payload byte
+//! is requested. The
 //! payload archive is hashed in full against the `sha256` query parameter
 //! carried on the signed manifest URLs (`urls` is inside the signed
 //! canonical bytes; the landed manifest has no separate archive-hash
@@ -39,6 +44,8 @@ use url::Url;
 
 use crate::net::tls;
 use crate::update_manifest::{Manifest, Refusal, TrustRoot, VerifiedManifest};
+use crate::update_pin;
+use crate::update_records::{ClientTrust, Ed25519Identity};
 use crate::DEFAULT_USER_AGENT;
 
 /// Per-request budget: connect and read together (REV1 section 2.1).
@@ -194,6 +201,9 @@ pub enum FetchError {
     /// The OS trust store could not build a TLS config.
     #[error("TLS configuration failed: {0}")]
     Tls(String),
+    /// A rotation, revocation, or trust-state operation was refused.
+    #[error("updater trust state refused: {0}")]
+    Trust(String),
     /// The HTTP client could not be built.
     #[error("HTTP client configuration failed: {0}")]
     Client(String),
@@ -260,6 +270,14 @@ pub struct FetchSession {
     client: reqwest::Client,
     trust: TrustRoot,
     pause: Pause,
+    /// Recovery identity used to verify revocation records. Absent until
+    /// [`Self::open`] or [`Self::set_recovery_key`] sets it. Manifests are
+    /// never verified with this key.
+    recovery: Mutex<Option<Ed25519Identity>>,
+    /// Rotation and revocation state for this session.
+    client_trust: Mutex<ClientTrust>,
+    /// When set, accepting a record persists the trust state here.
+    trust_path: Mutex<Option<PathBuf>>,
 }
 
 impl FetchSession {
@@ -268,13 +286,20 @@ impl FetchSession {
     /// The publisher pin is not installed as a TLS root. `origins[0]` is tried
     /// first until a fetch in this session succeeds on the other origin.
     pub fn open(origins: [Origin; 2]) -> Result<Self, FetchError> {
-        Self::build(
+        let session = Self::build(
             origins,
             os_trust_config()?,
             TrustRoot::pinned(),
             Pause::real(),
             true,
+        )?;
+        let recovery = Ed25519Identity::from_pinning(
+            update_pin::recovery_public_key(),
+            update_pin::recovery_pin(),
         )
+        .map_err(|err| FetchError::Trust(err.to_string()))?;
+        session.set_recovery(recovery);
+        Ok(session)
     }
 
     /// Session with an explicit TLS config and trust root.
@@ -296,13 +321,151 @@ impl FetchSession {
         pause: Pause,
         system_proxy: bool,
     ) -> Result<Self, FetchError> {
+        let identity = Ed25519Identity::from_pinning(trust.public_key, &trust.pin)
+            .map_err(|err| FetchError::Trust(err.to_string()))?;
+        let client_trust =
+            ClientTrust::bootstrap(identity).map_err(|err| FetchError::Trust(err.to_string()))?;
         Ok(Self {
             origins,
             preferred: Mutex::new(0),
             client: build_client(tls, system_proxy)?,
             trust,
             pause,
+            recovery: Mutex::new(None),
+            client_trust: Mutex::new(client_trust),
+            trust_path: Mutex::new(None),
         })
+    }
+
+    /// Install the recovery identity used to verify revocation records.
+    ///
+    /// Tests pass a freshly generated key. Production [`Self::open`] passes
+    /// the compiled recovery pin. This does not make the recovery key a
+    /// manifest trust root.
+    pub fn set_recovery_key(&self, public_key: [u8; 32], pin: &str) -> Result<(), FetchError> {
+        let recovery = Ed25519Identity::from_pinning(public_key, pin)
+            .map_err(|err| FetchError::Trust(err.to_string()))?;
+        self.set_recovery(recovery);
+        Ok(())
+    }
+
+    fn set_recovery(&self, recovery: Ed25519Identity) {
+        self.client_trust
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .bind_recovery(&recovery);
+        *self
+            .recovery
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(recovery);
+    }
+
+    /// Load trust state from `path` and persist later adoptions there.
+    ///
+    /// A missing file keeps the current in-memory state. A corrupt file or
+    /// a file written for a different publisher pin refuses the load and
+    /// does not clear a revocation already in memory.
+    pub fn bind_trust_file(&self, path: &Path) -> Result<(), FetchError> {
+        self.client_trust
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .load_into(path)
+            .map_err(|err| FetchError::Trust(err.to_string()))?;
+        *self
+            .trust_path
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(path.to_owned());
+        Ok(())
+    }
+
+    /// Verify and adopt a rotation announcement.
+    ///
+    /// The record must be seen strictly before its cutover. A client that
+    /// calls this at or after cutover does not start trusting the new key.
+    pub fn accept_rotation_record(
+        &self,
+        bytes: &[u8],
+        now_unix: i64,
+        last_seen_epoch: u64,
+    ) -> Result<(), FetchError> {
+        let recovery = self.recovery_identity()?;
+        let mut trust = self
+            .client_trust
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let mut next = trust.clone();
+        next.accept_rotation(bytes, now_unix, last_seen_epoch, &recovery)
+            .map_err(|err| FetchError::Trust(err.to_string()))?;
+        self.persist_trust(&next)?;
+        *trust = next;
+        Ok(())
+    }
+
+    /// Verify a revocation and stop trusting the named publisher key.
+    ///
+    /// The installed build is left where it is: this method does not
+    /// download or stage anything.
+    pub fn accept_revocation_record(&self, bytes: &[u8], now_unix: i64) -> Result<(), FetchError> {
+        let recovery = self.recovery_identity()?;
+        let mut trust = self
+            .client_trust
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let mut next = trust.clone();
+        next.accept_revocation(bytes, now_unix, &recovery)
+            .map_err(|err| FetchError::Trust(err.to_string()))?;
+        self.persist_trust(&next)?;
+        *trust = next;
+        Ok(())
+    }
+
+    /// A copy of the session's trust state.
+    pub fn client_trust(&self) -> ClientTrust {
+        self.client_trust
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
+    }
+
+    fn recovery_identity(&self) -> Result<Ed25519Identity, FetchError> {
+        self.recovery
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
+            .ok_or_else(|| {
+                FetchError::Trust(
+                    "recovery key is not configured; refusing to adopt a trust record".to_owned(),
+                )
+            })
+    }
+
+    fn recovery_pins(&self) -> Vec<String> {
+        let mut pins = vec![update_pin::recovery_pin().to_owned()];
+        if let Some(recovery) = self
+            .recovery
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .as_ref()
+        {
+            if !pins.iter().any(|pin| pin == recovery.pin()) {
+                pins.push(recovery.pin().to_owned());
+            }
+        }
+        pins
+    }
+
+    fn persist_trust(&self, trust: &ClientTrust) -> Result<(), FetchError> {
+        let path = self
+            .trust_path
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone();
+        if let Some(path) = path {
+            trust
+                .store(&path)
+                .map_err(|err| FetchError::Trust(err.to_string()))?;
+        }
+        Ok(())
     }
 
     /// Fetch a manifest from the configured origins, then the payload.
@@ -348,8 +511,21 @@ impl FetchSession {
         }
         let manifest = Manifest::from_json(&downloaded.body)?;
         let stored = load_epoch(input.epoch_path)?;
-        let verified = manifest.verify(
-            &self.trust,
+        let decision = {
+            let trust_state = self
+                .client_trust
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            if trust_state.compiled_pin() != self.trust.pin {
+                return Err(FetchError::Trust(
+                    "session publisher pin does not match the trust state".to_owned(),
+                ));
+            }
+            trust_state.decision(input.now_unix, manifest.manifest_epoch)
+        };
+        let verified = manifest.verify_governed(
+            &decision,
+            &self.recovery_pins(),
             &crate::update_manifest::VerifyContext {
                 now_unix: input.now_unix,
                 last_seen_epoch: stored,

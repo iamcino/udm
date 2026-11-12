@@ -1245,3 +1245,38 @@ async fn https_redirect_to_the_asset_host_is_followed() {
     assert_eq!(counts(&secondary.log, "/manifest"), 1);
     assert_eq!(counts(&secondary.log, "/payload"), 1);
 }
+
+#[test]
+fn accepting_a_revocation_drops_the_publisher_before_any_fetch() {
+    let certs = fixture_certs();
+    let (publisher, recovery) = (publisher(), publisher());
+    let primary = SocketAddr::from((Ipv4Addr::LOCALHOST, 9));
+    let (session, _) = open_recorded(
+        origins_for(primary, primary),
+        certs.client,
+        publisher.trust.clone(),
+    );
+    session
+        .set_recovery_key(recovery.trust.public_key, &recovery.trust.pin)
+        .unwrap();
+    let issued = NOW - 60;
+    let canonical = format!(
+        "{{\"issued_at\":{issued},\"key_id\":\"{}\",\"kind\":\"revocation\"}}",
+        publisher.trust.pin
+    );
+    let signature = hex::encode(recovery.key.sign(canonical.as_bytes()).as_ref());
+    let record = format!(
+        "{{\"issued_at\":{issued},\"key_id\":\"{}\",\"kind\":\"revocation\",\"signatures\":[{{\"key_id\":\"{}\",\"signature\":\"{signature}\"}}]}}",
+        publisher.trust.pin,
+        recovery.trust.pin
+    );
+    session
+        .accept_revocation_record(record.as_bytes(), NOW)
+        .unwrap();
+    let decision = session.client_trust().decision(NOW, 7);
+    assert!(decision.authorizing.is_empty());
+    assert!(decision
+        .revoked
+        .iter()
+        .any(|pin| pin == &publisher.trust.pin));
+}

@@ -20,10 +20,13 @@
 //! is the signer's pin: the lowercase hex SHA-256 fingerprint of its Ed25519
 //! public key, the same identifier the pin module publishes.
 
+use std::collections::BTreeSet;
+
 use ring::signature;
 use serde::Deserialize;
 
 use crate::update_pin;
+use crate::update_records::{TrustDecision, TrustPhase};
 
 /// Maximum span between `issued_at` and `valid_until`: 14 days (design
 /// section 2.1, freshness window).
@@ -123,6 +126,10 @@ pub struct VerifyContext<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedManifest {
     manifest: Manifest,
+    /// Pins whose signatures verified and were allowed to authorize this
+    /// manifest. Empty only if a future constructor forgets to set it;
+    /// [`Manifest::verify`] and [`Manifest::verify_governed`] always set it.
+    signer_pins: Vec<String>,
 }
 
 impl VerifiedManifest {
@@ -140,6 +147,11 @@ impl VerifiedManifest {
     /// Consume the wrapper and return the manifest.
     pub fn into_manifest(self) -> Manifest {
         self.manifest
+    }
+
+    /// Pins of the signatures that authorized this manifest.
+    pub fn signer_pins(&self) -> &[String] {
+        &self.signer_pins
     }
 }
 
@@ -218,6 +230,36 @@ pub enum Refusal {
         /// Local time at verification, Unix seconds.
         now: i64,
     },
+    /// The recovery key signed, or was named on, a regular manifest.
+    #[error("recovery key never signs a regular manifest")]
+    RecoveryKeyForbidden,
+    /// A signature names a revoked publisher key.
+    #[error(
+        "publisher key {key_id} is revoked; refusing the manifest and leaving the installed build unchanged"
+    )]
+    RevokedKey {
+        /// Revoked pin named by a signature.
+        key_id: String,
+    },
+    /// No publisher key is currently trusted.
+    #[error(
+        "no publisher key is trusted; refusing the manifest and leaving the installed build unchanged"
+    )]
+    NoTrustedPublisher,
+    /// The manifest is not signed by the compiled publisher and this
+    /// install never adopted a rotation announcement.
+    #[error(
+        "manifest is not signed by the pinned publisher key and this install has no rotation announcement; download a fresh installer manually"
+    )]
+    UnannouncedPublisher,
+    /// The successor key signed before cutover.
+    #[error(
+        "manifest is signed by a publisher key whose cutover has not started; this install will not trust it early"
+    )]
+    CutoverNotStarted,
+    /// A signature names a key outside the keys this install currently knows.
+    #[error("manifest signature is not from a publisher key this install currently trusts")]
+    SignerNotTrusted,
 }
 
 impl Manifest {
@@ -304,9 +346,21 @@ impl Manifest {
         if trust.pin == update_pin::publisher_pin() && !update_pin::pins_self_consistent() {
             return Err(Refusal::PinsInconsistent);
         }
+        // The recovery key is not a publisher, even if a caller passes it
+        // as the trust root or a manifest names it.
+        if trust.public_key == update_pin::recovery_public_key()
+            || trust.pin == update_pin::recovery_pin()
+            || self
+                .signatures
+                .iter()
+                .any(|sig| sig.key_id == update_pin::recovery_pin())
+        {
+            return Err(Refusal::RecoveryKeyForbidden);
+        }
 
         // Signature: an entry must name the pinned key and verify over
-        // the canonical bytes.
+        // the canonical bytes. Extra signatures are ignored by this
+        // single-root path; [`Self::verify_governed`] refuses them.
         if self.signatures.is_empty() {
             return Err(Refusal::Unsigned);
         }
@@ -315,12 +369,125 @@ impl Manifest {
             .iter()
             .find(|s| s.key_id == trust.pin)
             .ok_or(Refusal::UnknownKey)?;
-        let sig_bytes = hex::decode(&entry.signature).map_err(|_| Refusal::BadSignature)?;
-        let public = signature::UnparsedPublicKey::new(&signature::ED25519, trust.public_key);
-        public
-            .verify(&self.canonical_bytes(), &sig_bytes)
-            .map_err(|_| Refusal::BadSignature)?;
+        verify_pinned(&self.canonical_bytes(), &trust.public_key, &entry.signature)?;
 
+        self.accept_body(
+            ctx,
+            manifest_version,
+            min_version,
+            installed_version,
+            vec![trust.pin.clone()],
+        )
+    }
+
+    /// Verify a manifest against a rotation/revocation decision.
+    ///
+    /// Every signature must name a known publisher key and verify. At
+    /// least one must name a key that currently authorizes. The recovery
+    /// key and any revoked pin refuse the manifest even when another
+    /// signature would have verified. At most two signatures are accepted,
+    /// which is the dual-signature window.
+    pub fn verify_governed(
+        &self,
+        decision: &TrustDecision,
+        recovery_pins: &[String],
+        ctx: &VerifyContext<'_>,
+    ) -> Result<VerifiedManifest, Refusal> {
+        if self.issued_at < 0 || self.valid_until < 0 {
+            return Err(Refusal::Malformed("negative timestamp".to_owned()));
+        }
+        for file in &self.files {
+            if !is_lower_hex(&file.sha256, 64) {
+                return Err(Refusal::Malformed(format!(
+                    "file {} has a sha256 that is not 64 lowercase hex characters",
+                    file.path
+                )));
+            }
+        }
+        let manifest_version = SemVer::parse(&self.version)
+            .map_err(|err| Refusal::Malformed(format!("version: {err}")))?;
+        let min_version = SemVer::parse(&self.min_version)
+            .map_err(|err| Refusal::Malformed(format!("min_version: {err}")))?;
+        let installed_version = SemVer::parse(ctx.installed_version)
+            .map_err(|err| Refusal::Malformed(format!("installed version: {err}")))?;
+
+        if decision
+            .authorizing
+            .iter()
+            .chain(decision.known.iter())
+            .any(|key| key.pin() == update_pin::publisher_pin())
+            && !update_pin::pins_self_consistent()
+        {
+            return Err(Refusal::PinsInconsistent);
+        }
+
+        if self.signatures.is_empty() {
+            return Err(Refusal::Unsigned);
+        }
+        if self.signatures.len() > 2 {
+            return Err(Refusal::Malformed(
+                "manifest has more than two signatures".to_owned(),
+            ));
+        }
+        let mut seen = BTreeSet::new();
+        for sig in &self.signatures {
+            if !seen.insert(sig.key_id.as_str()) {
+                return Err(Refusal::Malformed("duplicate signature key_id".to_owned()));
+            }
+            if sig.key_id == update_pin::recovery_pin()
+                || recovery_pins.iter().any(|pin| pin == &sig.key_id)
+            {
+                return Err(Refusal::RecoveryKeyForbidden);
+            }
+            if decision.revoked.iter().any(|pin| pin == &sig.key_id) {
+                return Err(Refusal::RevokedKey {
+                    key_id: sig.key_id.clone(),
+                });
+            }
+            if !is_lower_hex(&sig.key_id, 64) || !is_lower_hex(&sig.signature, 128) {
+                return Err(Refusal::BadSignature);
+            }
+        }
+        if decision.authorizing.is_empty() {
+            return Err(Refusal::NoTrustedPublisher);
+        }
+
+        let canonical = self.canonical_bytes();
+        let mut signer_pins = Vec::new();
+        for sig in &self.signatures {
+            let Some(key) = decision.known.iter().find(|key| key.pin() == sig.key_id) else {
+                return Err(unknown_signer(decision, &sig.key_id));
+            };
+            verify_pinned(&canonical, key.public_key(), &sig.signature)?;
+            if decision
+                .authorizing
+                .iter()
+                .any(|key| key.pin() == sig.key_id)
+            {
+                signer_pins.push(sig.key_id.clone());
+            }
+        }
+        if signer_pins.is_empty() {
+            return Err(unknown_signer(decision, &self.signatures[0].key_id));
+        }
+
+        self.accept_body(
+            ctx,
+            manifest_version,
+            min_version,
+            installed_version,
+            signer_pins,
+        )
+    }
+
+    fn accept_body(
+        &self,
+        ctx: &VerifyContext<'_>,
+        manifest_version: SemVer,
+        min_version: SemVer,
+        installed_version: SemVer,
+        signer_pins: Vec<String>,
+    ) -> Result<VerifiedManifest, Refusal> {
         // Epoch monotonicity: strictly greater than the stored epoch.
         // Epochs start at 1, so 0 never passes either.
         if self.manifest_epoch == 0 || self.manifest_epoch <= ctx.last_seen_epoch {
@@ -367,8 +534,39 @@ impl Manifest {
 
         Ok(VerifiedManifest {
             manifest: self.clone(),
+            signer_pins,
         })
     }
+}
+
+fn verify_pinned(
+    message: &[u8],
+    public_key: &[u8; 32],
+    signature_hex: &str,
+) -> Result<(), Refusal> {
+    let sig_bytes = hex::decode(signature_hex).map_err(|_| Refusal::BadSignature)?;
+    if sig_bytes.len() != 64 {
+        return Err(Refusal::BadSignature);
+    }
+    let public = signature::UnparsedPublicKey::new(&signature::ED25519, public_key);
+    public
+        .verify(message, &sig_bytes)
+        .map_err(|_| Refusal::BadSignature)
+}
+
+fn unknown_signer(decision: &TrustDecision, key_id: &str) -> Refusal {
+    if decision.authorizing.is_empty() {
+        return Refusal::NoTrustedPublisher;
+    }
+    if !decision.has_rotation {
+        return Refusal::UnannouncedPublisher;
+    }
+    if decision.phase == TrustPhase::AwaitingCutover
+        && decision.successor_pin.as_deref() == Some(key_id)
+    {
+        return Refusal::CutoverNotStarted;
+    }
+    Refusal::SignerNotTrusted
 }
 
 /// Append `s` to `out` as a JSON string literal (quoted, escaped). Uses

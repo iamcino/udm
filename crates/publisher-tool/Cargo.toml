@@ -1,0 +1,28 @@
+[package]
+name = "udm-publisher-tool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Offline publisher tool for the udm authenticated updater: TEST-key generation and manifest signing (design section 2.5)"
+
+[[bin]]
+name = "udm-publisher-tool"
+path = "src/main.rs"
+
+[dependencies]
+usagi = { workspace = true }
+ring = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+url = { workspace = true }
+flate2 = "1"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+usagi = { workspace = true }
+hex = { workspace = true }
+
+[lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"

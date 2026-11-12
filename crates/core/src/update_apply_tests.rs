@@ -8,6 +8,7 @@ use ring::signature::{Ed25519KeyPair, KeyPair as _};
 
 use crate::update_fetch::VerifiedFile;
 use crate::update_manifest::{Manifest, ManifestFile, TrustRoot, VerifyContext};
+use crate::update_records::{ClientTrust, Ed25519Identity};
 
 const NOW: i64 = 1_700_100_000;
 
@@ -150,7 +151,7 @@ fn prepared_record_carries_version_hashes_and_targets_before_any_rename() {
     let dir = tempfile::tempdir().unwrap();
     let layout = fixture(dir.path());
     stage_set(&layout, dir.path(), "0.2.0", NEW_FILES);
-    let err = apply_staged_at(&layout, Some(FailPoint::AfterPrepared)).unwrap_err();
+    let err = apply_staged_at(&layout, Some(FailPoint::AfterPrepared), None).unwrap_err();
     assert!(matches!(err, ApplyError::FaultInjected));
 
     let journal = current_journal(&layout).unwrap().unwrap();
@@ -173,7 +174,7 @@ fn kill_after_prepared_discards_the_journal_and_keeps_the_old_build() {
     let dir = tempfile::tempdir().unwrap();
     let layout = fixture(dir.path());
     stage_set(&layout, dir.path(), "0.2.0", NEW_FILES);
-    let _ = apply_staged_at(&layout, Some(FailPoint::AfterPrepared));
+    let _ = apply_staged_at(&layout, Some(FailPoint::AfterPrepared), None);
 
     let report = recover_updater(&layout, NOW).unwrap();
     assert_eq!(
@@ -232,7 +233,7 @@ fn kill_after_old_renamed_completes_forward_when_hashes_verify() {
     let dir = tempfile::tempdir().unwrap();
     let layout = fixture(dir.path());
     stage_set(&layout, dir.path(), "0.2.0", NEW_FILES);
-    let _ = apply_staged_at(&layout, Some(FailPoint::AfterOldRenamed));
+    let _ = apply_staged_at(&layout, Some(FailPoint::AfterOldRenamed), None);
     assert_eq!(
         current_journal(&layout).unwrap().unwrap().step,
         Step::OldRenamed
@@ -268,7 +269,7 @@ fn kill_after_old_renamed_rolls_back_when_the_staged_candidate_is_corrupt() {
     let dir = tempfile::tempdir().unwrap();
     let layout = fixture(dir.path());
     stage_set(&layout, dir.path(), "0.2.0", NEW_FILES);
-    let _ = apply_staged_at(&layout, Some(FailPoint::AfterOldRenamed));
+    let _ = apply_staged_at(&layout, Some(FailPoint::AfterOldRenamed), None);
     fs::write(layout.staged_file(CLI_PATH), b"corrupted cli").unwrap();
 
     let report = recover_updater(&layout, NOW).unwrap();
@@ -297,7 +298,7 @@ fn kill_during_cli_move_and_during_asset_moves_complete_forward() {
         let dir = tempfile::tempdir().unwrap();
         let layout = fixture(dir.path());
         stage_set(&layout, dir.path(), "0.2.0", NEW_FILES);
-        let _ = apply_staged_at(&layout, Some(fail));
+        let _ = apply_staged_at(&layout, Some(fail), None);
         let report = recover_updater(&layout, NOW).unwrap();
         assert_eq!(
             report.outcome,
@@ -315,7 +316,7 @@ fn kill_after_new_staged_awaits_the_first_start_receipt() {
     let dir = tempfile::tempdir().unwrap();
     let layout = fixture(dir.path());
     stage_set(&layout, dir.path(), "0.2.0", NEW_FILES);
-    let _ = apply_staged_at(&layout, Some(FailPoint::AfterNewStaged));
+    let _ = apply_staged_at(&layout, Some(FailPoint::AfterNewStaged), None);
 
     let report = recover_updater(&layout, NOW).unwrap();
     assert_eq!(
@@ -503,7 +504,11 @@ fn stage_adapter_accepts_a_verified_payload_and_refuses_a_set_mismatch() {
         archive_sha256: sha(b"archive"),
         files: files.clone(),
     };
-    let candidate = stage(&layout, &payload).unwrap();
+    let client_trust = ClientTrust::bootstrap(
+        Ed25519Identity::from_pinning(trust.public_key, &trust.pin).unwrap(),
+    )
+    .unwrap();
+    let candidate = stage(&layout, &payload, &client_trust, NOW).unwrap();
     assert_eq!(candidate.version, "0.2.0");
     assert_live(&layout, OLD_FILES);
 
@@ -519,7 +524,7 @@ fn stage_adapter_accepts_a_verified_payload_and_refuses_a_set_mismatch() {
         files: short,
     };
     assert!(matches!(
-        stage(&layout2, &payload2),
+        stage(&layout2, &payload2, &client_trust, NOW),
         Err(ApplyError::SetMismatch(_))
     ));
     assert!(staged_candidate(&layout2).unwrap().is_none());
@@ -578,4 +583,95 @@ fn copy_failure_names_the_side_that_cannot_open() {
         err,
         ApplyError::Io { ref path, .. } if *path == blocked
     ));
+}
+
+#[test]
+fn a_revoked_signer_is_not_staged_and_the_live_build_stays() {
+    let pkcs8 = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
+    let key = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+    let mut public_key = [0u8; 32];
+    public_key.copy_from_slice(key.public_key().as_ref());
+    let root = TrustRoot {
+        public_key,
+        pin: sha(&public_key),
+    };
+    let recovery_pkcs8 = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
+    let recovery_key = Ed25519KeyPair::from_pkcs8(recovery_pkcs8.as_ref()).unwrap();
+    let mut recovery_public = [0u8; 32];
+    recovery_public.copy_from_slice(recovery_key.public_key().as_ref());
+    let recovery = Ed25519Identity::from_public_key(recovery_public);
+    let issued = NOW - 60;
+    let mut manifest = Manifest {
+        version: "0.2.0".to_owned(),
+        manifest_epoch: 7,
+        issued_at: issued,
+        valid_until: issued + 7 * 86_400,
+        files: NEW_FILES
+            .iter()
+            .map(|(rel, bytes)| ManifestFile {
+                path: (*rel).to_owned(),
+                sha256: sha(bytes),
+                size: bytes.len() as u64,
+            })
+            .collect(),
+        min_version: "0.1.0".to_owned(),
+        urls: vec!["https://127.0.0.1:9/payload.zip".to_owned()],
+        signatures: Vec::new(),
+    };
+    let signature = key.sign(&manifest.canonical_bytes());
+    manifest.signatures = vec![crate::update_manifest::ManifestSignature {
+        key_id: root.pin.clone(),
+        signature: hex::encode(signature.as_ref()),
+    }];
+    let verified = manifest
+        .verify(
+            &root,
+            &VerifyContext {
+                now_unix: NOW,
+                last_seen_epoch: 6,
+                installed_version: "0.1.0",
+            },
+        )
+        .unwrap();
+    let mut trust =
+        ClientTrust::bootstrap(Ed25519Identity::from_pinning(root.public_key, &root.pin).unwrap())
+            .unwrap();
+    let canonical = format!(
+        "{{\"issued_at\":{issued},\"key_id\":\"{}\",\"kind\":\"revocation\"}}",
+        root.pin
+    );
+    let revocation_sig = hex::encode(recovery_key.sign(canonical.as_bytes()).as_ref());
+    let revocation = format!(
+        "{{\"issued_at\":{issued},\"key_id\":\"{}\",\"kind\":\"revocation\",\"signatures\":[{{\"key_id\":\"{}\",\"signature\":\"{revocation_sig}\"}}]}}",
+        root.pin,
+        recovery.pin()
+    );
+    trust
+        .accept_revocation(revocation.as_bytes(), NOW, &recovery)
+        .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let layout = fixture(dir.path());
+    let src = dir.path().join("extracted");
+    write_tree(&src, NEW_FILES);
+    let files: Vec<VerifiedFile> = NEW_FILES
+        .iter()
+        .map(|(rel, bytes)| VerifiedFile {
+            path: (*rel).to_owned(),
+            absolute: join_rel(&src, rel),
+            sha256: sha(bytes),
+            size: bytes.len() as u64,
+        })
+        .collect();
+    let payload = VerifiedPayload {
+        manifest: verified,
+        archive_sha256: sha(b"archive"),
+        files,
+    };
+    assert!(matches!(
+        stage(&layout, &payload, &trust, NOW),
+        Err(ApplyError::StagingRefused(_))
+    ));
+    assert_live(&layout, OLD_FILES);
+    assert!(staged_candidate(&layout).unwrap().is_none());
 }

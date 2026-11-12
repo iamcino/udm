@@ -76,6 +76,7 @@ pub mod update_apply;
 pub mod update_fetch;
 pub mod update_manifest;
 pub mod update_pin;
+pub mod update_records;
 pub mod util;
 
 pub use config::{ConflictPolicy, Settings, TransportPref};
