@@ -5,7 +5,7 @@ files you request and keeps its working data under your control. No account,
 licence server or cloud service is needed to use it.
 
 This policy describes the application and browser integration implemented at
-`241f550`, source version 0.1.0. It distinguishes network downloads from local
+`5f08efd`, source version 0.1.0. It distinguishes network downloads from local
 diagnostics and the optional Windows registrations.
 
 ## What leaves your computer
@@ -28,9 +28,10 @@ direct QUIC/UDP and bypasses HTTP proxies. Select the separate Never HTTP/3
 switch when your network requires proxy-only access.
 
 UDM sends no usage counts, machine fingerprint, feature analytics, advertising
-identifiers or remote crash reports. There is **no version-check or updater
-network path** in this revision. Local task/history/settings management works
+identifiers or remote crash reports. Local task/history/settings management works
 offline; downloads and explicit probes require their destination networks.
+The built-in updater has its own section below; in ordinary use it makes no
+connections at all.
 
 ## Idle does not mean no socket exists
 
@@ -43,6 +44,79 @@ Protocol connection maintenance can also persist while a pool is alive.
 The privacy claim is absence of telemetry and unsolicited project-service
 traffic, not a guarantee of zero socket handles whenever the queue is empty.
 `udm-cli doctor` itself initializes a network stack to check QUIC availability.
+
+## Updates and the built-in updater
+
+The engine contains a complete authenticated updater: it can fetch a signed
+update manifest and payload, verify them, stage the files and swap them into
+the install directory with a rollback journal. **No part of the application
+you run invokes it.** The graphical interface has no update control, and the
+only update command, `udm-cli update pin`, prints the compiled publisher pin,
+the publisher public key and the recovery pin, so you can compare them with a
+release you downloaded by hand; it opens no update socket and does not
+download, stage or install anything. There is no automatic check, no polling
+and no background timer, and the running application opens no update socket
+while idle. Updates reach your machine the way they always have: you download
+a new version from the release pages and install it yourself.
+
+Rotation and revocation records — the signed records that replace or retire a
+publisher key — are verified only when a caller passes their bytes to the
+engine. The fetch flow does not download those records, and no command in
+this version passes them.
+
+### If the engine's fetch is invoked
+
+The updater's fetch takes exactly two HTTPS manifest addresses from its
+caller. It has no built-in origin and no third slot. A caller that follows
+the project's release layout passes the GitHub (`iamcino/udm`) and GitLab
+(`cino-group/udm`) release manifests, GitHub first; if a fetch succeeds on
+the second origin, that origin is tried first for the rest of that session,
+in memory only. The running application has no caller, so ordinary use
+contacts neither host. The payload addresses are the HTTPS URLs inside the
+signed manifest, not a compiled host list; the `sha256` query parameter on
+them is stripped before the payload request. HTTPS redirects are followed,
+so a release CDN can be contacted. A manifest, payload or redirect address
+that is not HTTPS is refused.
+
+A fetch sends one manifest request per origin tried, then the payload
+requests. Every manifest request carries a `nonce` query parameter: 16
+random bytes written as hex. It is a cache-buster, not an identity, and
+payload requests do not carry it. Payload requests send `Range: bytes=N-`
+only when a partial file already holds bytes; otherwise they start at
+byte 0. The User-Agent is the built-in `udm/<version>` string, not the
+configurable download User-Agent. The updater uses the system HTTP proxy and
+does not consult the download setting that turns that proxy off. Its TLS is
+rustls with the operating-system trust store, over HTTP/1.1 and HTTP/2 only —
+not the download engine's HTTP/3 path — and the publisher pin is not a TLS
+root. No account, machine fingerprint, usage data or telemetry is added.
+
+Before any payload is downloaded, the engine checks, in order: the manifest
+signature against the publisher keys the trust state currently allows (a
+revoked key is refused); the manifest epoch, strictly greater than the stored
+last-seen epoch; the manifest version, strictly greater than the installed
+version; the installed version, at or above the manifest's `min_version`; and
+the validity window (not expired, at most 14 days, `issued_at` at most one
+day ahead). On acceptance the new epoch is stored before any payload byte is
+requested, and a later payload failure does not undo that store. The whole
+archive is then checked against the SHA-256 named in the signed payload URLs,
+and every extracted file is checked against the manifest's path, hash and
+size, both ways. Staging and the rollback journal run only when a caller
+invokes them, and startup does not run updater recovery.
+
+### What the updater can write
+
+The engine writes updater files only when a caller invokes it, and neither
+the graphical interface nor the command line does, so ordinary use creates
+none. When a caller does invoke it: the last-seen epoch is a JSON file at a
+path the caller chooses; the trust state is `updater-trust.json` on the
+install base (`%LOCALAPPDATA%\Programs\UDM`, or the portable executable's
+directory); and the rollback journal is a table in `udm.redb` on that same
+install base — not the application database under `%LOCALAPPDATA%\udm`.
+Staging files, `updater-recovery.log` and `.old` copies sit on that install
+base too, and a payload partial sits in the destination directory the caller
+supplied. None of this is sent anywhere. Removing the application data
+directory does not remove the install base; removing the install directory,
+or the portable folder, is what removes these files.
 
 ## What stays on your computer
 
@@ -158,8 +232,10 @@ local endpoint, an idle pooled connection and an actual outbound request.
 
 ## Future designs
 
-The authenticated updater, N2 dual-stack (IPv4/IPv6 selection) and N3
-multi-family transfers (splitting one download across address families) are
+The authenticated updater described above is built into the engine; a
+user-facing update check and apply surface is a later package, not part of
+this version. N2 dual-stack (IPv4/IPv6 selection) and N3 multi-family
+transfers (splitting one download across address families) are
 **design-only, not built**. N2/N3 implementation remains measurement-gated.
 A future network feature needs its own documented network behaviour and a
 policy update alongside implementation; a design does not change what this

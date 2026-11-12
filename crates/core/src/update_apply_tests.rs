@@ -225,7 +225,10 @@ fn kill_between_exe_rename_and_journal_write_still_keeps_the_old_build() {
             version: "0.2.0".to_owned()
         }
     );
+    assert!(report.notice.is_none());
     assert_live(&layout, OLD_FILES);
+    let log = fs::read_to_string(layout.recovery_log()).unwrap();
+    assert!(log.contains("discarded_prepared"), "log: {log}");
 }
 
 #[test]
@@ -247,7 +250,10 @@ fn kill_after_old_renamed_completes_forward_when_hashes_verify() {
             version: "0.2.0".to_owned()
         }
     );
+    assert!(report.notice.is_none());
     assert_live(&layout, NEW_FILES);
+    let log = fs::read_to_string(layout.recovery_log()).unwrap();
+    assert!(log.contains("completed_forward"), "log: {log}");
     assert_eq!(
         current_journal(&layout).unwrap().unwrap().step,
         Step::NewStaged
@@ -307,7 +313,18 @@ fn kill_during_cli_move_and_during_asset_moves_complete_forward() {
             },
             "failpoint {fail:?}"
         );
+        assert!(report.notice.is_none(), "failpoint {fail:?}");
         assert_live(&layout, NEW_FILES);
+        assert_eq!(
+            current_journal(&layout).unwrap().unwrap().step,
+            Step::NewStaged,
+            "failpoint {fail:?}"
+        );
+        let log = fs::read_to_string(layout.recovery_log()).unwrap();
+        assert!(
+            log.contains("completed_forward"),
+            "failpoint {fail:?}; log: {log}"
+        );
     }
 }
 
@@ -325,6 +342,7 @@ fn kill_after_new_staged_awaits_the_first_start_receipt() {
             version: "0.2.0".to_owned()
         }
     );
+    assert!(report.notice.is_none());
     assert_live(&layout, NEW_FILES);
     // Not completed, not reclaimed: the receipt is still owed.
     assert_eq!(
@@ -332,6 +350,8 @@ fn kill_after_new_staged_awaits_the_first_start_receipt() {
         Step::NewStaged
     );
     assert_eq!(old_siblings(&layout).len(), OLD_FILES.len());
+    let log = fs::read_to_string(layout.recovery_log()).unwrap();
+    assert!(log.contains("awaiting_first_start"), "log: {log}");
 }
 
 #[test]
@@ -355,6 +375,8 @@ fn new_staged_with_a_corrupt_live_file_rolls_back_to_the_previous_build() {
     assert!(!layout.target_for("assets/c.txt").exists());
     assert!(old_siblings(&layout).is_empty());
     assert!(current_journal(&layout).unwrap().is_none());
+    let log = fs::read_to_string(layout.recovery_log()).unwrap();
+    assert!(log.contains("rolled_back"), "log: {log}");
 }
 
 #[test]

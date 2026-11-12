@@ -3,3 +3,4 @@
 //! Nothing here is part of the library `udm` and `udm-cli` link.
 
 pub mod dev_tls;
+pub mod u8_fixture;

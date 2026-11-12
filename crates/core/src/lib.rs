@@ -48,6 +48,7 @@
 //! | [`update_manifest`] | U2 manifest parse and Ed25519 verification. No network. |
 //! | [`update_fetch`] | U3 fetch: two configured origins, verified manifest, payload handoff. |
 //! | [`update_apply`] | U4 staging, rename swap and rollback journal. Held until applied. |
+//! | [`update_records`] | U5 rotation and revocation records, verified from caller-supplied bytes. No network. |
 //! | [`error`] | Shared errors. |
 //! | [`util`] | Filename, path, byte-count and duration helpers. |
 //!
@@ -56,7 +57,8 @@
 //! API. Timed scheduling, a global speed limit, torrents and media resolving
 //! are not implemented here. Manifest verification ([`update_manifest`]) and
 //! fetch ([`update_fetch`]) are implemented. Staging, rename swap, and
-//! rollback are implemented in [`update_apply`]. N2 dual-stack
+//! rollback are implemented in [`update_apply`]. Rotation and revocation
+//! records are implemented in [`update_records`]. N2 dual-stack
 //! (IPv4/IPv6 selection) and N3 multi-family transfers remain
 //! measurement-gated and are not built.
 

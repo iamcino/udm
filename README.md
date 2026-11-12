@@ -46,7 +46,7 @@ menu to quit. If Windows shows a warning, see
 | ✅ **Checksums** | Give the publisher's SHA-256, SHA-512, SHA-1, MD5 or BLAKE3 and UDM checks the file before calling it complete. |
 | 🗂️ **Files kept in order** | Optional category routing puts downloads into subfolders by file type. Off by default. |
 | 🌐 **Browser handoff** | A Chrome or Firefox extension hands downloads to the running app through a local native messaging host. You opt in. |
-| 🔒 **Private and per-user** | No analytics, ads, crash reporting or update checks. No services and no administrator rights; settings and history stay in your user folder. |
+| 🔒 **Private and per-user** | No analytics, ads or crash reporting, and no automatic or background update checks — new versions are installed manually from the release pages. No services and no administrator rights; settings and history stay in your user folder. |
 | 🪶 **Light and native** | One Rust app with a [Slint](https://slint.dev) interface, plus a command-line tool on the same engine. |
 
 ## Features
@@ -134,16 +134,19 @@ tray before using the CLI on its data.
 
 ## Updates
 
-UDM does not check for updates on its own; this version makes no background
-connections. New versions are published on
+UDM never checks for updates automatically and makes no background update
+connections. The engine contains an authenticated updater, but nothing in the
+app invokes it: there is no graphical updater, and the one update command,
+`udm-cli update pin`, only prints the compiled publisher fingerprints and
+uses no network. New versions are published on
 [GitHub](https://github.com/iamcino/udm/releases) and [GitLab](https://gitlab.com/cino-group/udm/-/releases). Install the new
-version over the old one; your settings, history and downloads are kept.
+version over the old one yourself; your settings, history and downloads are kept.
 
 ## FAQ
 
 **Does UDM collect any data?**
-No. There are no analytics, ads, remote crash reports or update checks. UDM only
-contacts the servers of the downloads you create. Logs and download URLs stay on
+No. There are no analytics, ads or remote crash reports, and no automatic
+update checks. UDM only contacts the servers of the downloads you create. Logs and download URLs stay on
 your machine but can contain sensitive information, so review them before
 sharing. See the [privacy policy](docs/PRIVACY.md).
 
@@ -188,7 +191,9 @@ interrupted download, browser recovery and common problems.
   resolving. The queue only limits how many downloads run at once.
 - Segments are concurrent requests, not physical connections: HTTP/2 and HTTP/3
   can carry several on one connection.
-- No in-app updater, no simultaneous IPv4 and IPv6, and no splitting one
+- No graphical updater and no automatic update checks in this version: the
+  built-in updater engine has no user-facing surface yet, so updates are
+  installed manually. No simultaneous IPv4 and IPv6, and no splitting one
   download across address families in this version.
 
 ## For developers
