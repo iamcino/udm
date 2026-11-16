@@ -1,5 +1,6 @@
 //! Offline publisher tooling for the authenticated updater (design
-//! section 2.5): TEST-key generation and manifest signing.
+//! section 2.5): TEST-key generation, manifest signing, and rotation /
+//! revocation record signing for the U5 trust records.
 //!
 //! This crate is the only piece of the updater chain that ever touches a
 //! private key, and it runs offline, by hand, at release time. It has no
@@ -30,6 +31,7 @@ use sha2::{Digest, Sha256};
 use usagi::update_manifest::{
     Manifest, ManifestFile, ManifestSignature, SemVer, MAX_VALIDITY_SECS,
 };
+use usagi::update_records::{Ed25519Identity, RevocationRecord, RotationRecord};
 
 /// Name of the private-key file `keygen` writes inside `--out`.
 pub const PRIVATE_KEY_FILE: &str = "publisher.key";
@@ -502,4 +504,175 @@ fn u32_at(data: &[u8], index: usize) -> Result<u32, ToolError> {
         .try_into()
         .map_err(|_| refuse("payload archive has a truncated field"))?;
     Ok(u32::from_le_bytes(bytes))
+}
+
+// ---------------------------------------------------------------------------
+// Trust records: rotation and revocation (U5 client semantics, envelope
+// rev.2). The tool conforms to the landed client: it builds the record,
+// signs the client's canonical bytes, and then runs the client's own
+// `verify` as the refusal oracle — whatever the client verifier refuses,
+// the tool refuses, and nothing is written. TEST keys only in tests; the
+// compiled-pin refusals inside `verify` cannot be reached with a TEST
+// seed, by design.
+// ---------------------------------------------------------------------------
+
+/// Load an Ed25519 public key from a public-key file (the `keygen`
+/// format: the 32 raw bytes as 64 lowercase hex characters). A pin is
+/// never read from a file anywhere in this tool; it is computed from
+/// the key bytes.
+pub fn load_public_key(pub_path: &Path) -> Result<[u8; 32], ToolError> {
+    let text = fs::read_to_string(pub_path).map_err(|e| io(pub_path, e))?;
+    let text = text.trim();
+    if !is_lower_hex(text, 64) {
+        return Err(refuse(format!(
+            "public key file {} does not hold 64 lowercase hex characters",
+            pub_path.display()
+        )));
+    }
+    let bytes = hex::decode(text).map_err(|_| refuse("public key file is not hexadecimal"))?;
+    bytes
+        .try_into()
+        .map_err(|_| refuse("public key file does not hold a 32-byte Ed25519 public key"))
+}
+
+/// `sign-rotation`: write one signed rotation record to `out_path`.
+///
+/// The signing key is the current publisher key file; the successor is
+/// a public-key file (the `keygen` `.pub` format) — the tool writes
+/// those key bytes as `new_public_key` and computes the successor pin
+/// itself; it never accepts a declared pin in place of the key.
+/// `issued_at` is `now_unix`, the signing clock supplied by the caller
+/// (the CLI passes the system clock); it is not an operator input.
+///
+/// The record is refused, and no file is written, whenever the landed
+/// client's [`RotationRecord::verify`] refuses it: a cutover less than
+/// 30 days after issue (exactly 30 days is accepted), a `cutover_epoch`
+/// less than `announced_epoch + 1`, `announced_epoch` equal to 0, a
+/// `window_until` at or before `cutover_at` or more than 30 days after
+/// it (exactly 30 days is accepted), a negative timestamp, a successor
+/// equal to the signing key, a successor equal to the compiled recovery
+/// key, or a signing key that is the compiled recovery key
+/// (`RecoveryKeyForbidden`). Adoption-time refusals (epoch binding,
+/// first-seen-after-cutover, not-newer, retiring-key-closed, revoked
+/// signer or successor) stay in the client and are not decided here.
+/// An existing `out_path` is never overwritten.
+#[allow(clippy::too_many_arguments)]
+pub fn sign_rotation(
+    key_path: &Path,
+    successor_pub_path: &Path,
+    out_path: &Path,
+    announced_epoch: u64,
+    cutover_epoch: u64,
+    cutover_at: i64,
+    window_until: i64,
+    now_unix: i64,
+) -> Result<RotationRecord, ToolError> {
+    if out_path.exists() {
+        return Err(refuse(format!(
+            "output file {} already exists; refusing to overwrite",
+            out_path.display()
+        )));
+    }
+    let signer = load_keypair(key_path)?;
+    let successor_bytes = load_public_key(successor_pub_path)?;
+    let signer_identity = Ed25519Identity::from_public_key(signer.public_key);
+    let mut record = RotationRecord {
+        successor: Ed25519Identity::from_public_key(successor_bytes),
+        issued_at: now_unix,
+        cutover_at,
+        window_until,
+        announced_epoch,
+        cutover_epoch,
+        signer_key_id: signer.pin(),
+        signature: String::new(),
+    };
+    let signature = signer.ring().sign(&record.canonical_bytes());
+    record.signature = hex::encode(signature.as_ref());
+    record.verify(&signer_identity, now_unix).map_err(|err| {
+        refuse(format!(
+            "client verifier refuses this rotation record: {err}"
+        ))
+    })?;
+    fs::write(out_path, format!("{}\n", rotation_to_json(&record))).map_err(|e| io(out_path, e))?;
+    Ok(record)
+}
+
+/// `sign-revocation`: write one signed revocation record to `out_path`,
+/// signed with the recovery key file, naming `revoked_key_id` (the pin
+/// of the publisher key to revoke).
+///
+/// The record is refused, and no file is written, when `revoked_key_id`
+/// is not 64 lowercase hex characters, or whenever the landed client's
+/// [`RevocationRecord::verify`] refuses it: the named key is the
+/// signing key itself, the named key is the compiled recovery pin
+/// (`RevokesRecoveryKey`), or the signing key is the compiled publisher
+/// key. `issued_at` is `now_unix`, the signing clock, not an operator
+/// input. An existing `out_path` is never overwritten.
+pub fn sign_revocation(
+    key_path: &Path,
+    revoked_key_id: &str,
+    out_path: &Path,
+    now_unix: i64,
+) -> Result<RevocationRecord, ToolError> {
+    if out_path.exists() {
+        return Err(refuse(format!(
+            "output file {} already exists; refusing to overwrite",
+            out_path.display()
+        )));
+    }
+    if !is_lower_hex(revoked_key_id, 64) {
+        return Err(refuse("revoked key id is not 64 lowercase hex characters"));
+    }
+    let signer = load_keypair(key_path)?;
+    let signer_identity = Ed25519Identity::from_public_key(signer.public_key);
+    let mut record = RevocationRecord {
+        key_id: revoked_key_id.to_owned(),
+        issued_at: now_unix,
+        signer_key_id: signer.pin(),
+        signature: String::new(),
+    };
+    let signature = signer.ring().sign(&record.canonical_bytes());
+    record.signature = hex::encode(signature.as_ref());
+    record.verify(&signer_identity, now_unix).map_err(|err| {
+        refuse(format!(
+            "client verifier refuses this revocation record: {err}"
+        ))
+    })?;
+    fs::write(out_path, format!("{}\n", revocation_to_json(&record)))
+        .map_err(|e| io(out_path, e))?;
+    Ok(record)
+}
+
+/// Serialize a rotation record with exactly the fields the client's
+/// closed-format parser accepts.
+fn rotation_to_json(record: &RotationRecord) -> String {
+    let value = serde_json::json!({
+        "kind": "rotation",
+        "new_public_key": hex::encode(record.successor.public_key()),
+        "issued_at": record.issued_at,
+        "cutover_at": record.cutover_at,
+        "window_until": record.window_until,
+        "announced_epoch": record.announced_epoch,
+        "cutover_epoch": record.cutover_epoch,
+        "signatures": [{
+            "key_id": record.signer_key_id,
+            "signature": record.signature,
+        }],
+    });
+    serde_json::to_string_pretty(&value).expect("serializing plain values cannot fail")
+}
+
+/// Serialize a revocation record with exactly the fields the client's
+/// closed-format parser accepts.
+fn revocation_to_json(record: &RevocationRecord) -> String {
+    let value = serde_json::json!({
+        "kind": "revocation",
+        "key_id": record.key_id,
+        "issued_at": record.issued_at,
+        "signatures": [{
+            "key_id": record.signer_key_id,
+            "signature": record.signature,
+        }],
+    });
+    serde_json::to_string_pretty(&value).expect("serializing plain values cannot fail")
 }

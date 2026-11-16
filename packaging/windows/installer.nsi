@@ -9,17 +9,18 @@
 ;   4. Silent, reboot-free, and fully reversible.
 ;
 ; Build on Windows:  makensis packaging\windows\installer.nsi
-; (expects ..\..\target\x86_64-pc-windows-msvc\release\udm.exe and udm-cli.exe,
+; (expects ..\..\target\x86_64-pc-windows-msvc\release\udm.exe, udm-cli.exe and udm-host.exe,
 ;  or set QUIET_EXE_DIR / see build.ps1 which stages dist\ first)
 
 Unicode true
 !define APPNAME        "udm"
 !ifndef VERSION
-!define VERSION        "0.1.0"
+!define VERSION        "0.2.0"
 !endif
 !define PUBLISHER      "udm contributors"
 !define EXE            "udm.exe"
 !define CLIEXE         "udm-cli.exe"
+!define HOSTEXE        "udm-host.exe"
 
 ; U2 pin (REV1 sec. 2.5): the installer never generates or fetches a pin.
 ; packaging/windows/build.ps1 reads the single source of truth
@@ -65,6 +66,7 @@ Section "udm" SecMain
     ; If an older copy is running, ask politely instead of failing midway.
     File /oname=${EXE}        "..\..\dist\${EXE}"
     File /oname=${CLIEXE}     "..\..\dist\${CLIEXE}"
+    File /oname=${HOSTEXE}    "..\..\dist\${HOSTEXE}"
     File /oname=LICENSE.txt   "..\..\LICENSE"
     File /oname=PRIVACY.md    "..\..\docs\PRIVACY.md"
     File /oname=CINO-UI-LICENSE.txt "..\..\crates\gui\vendor\cino-ui\LICENSE"
@@ -117,8 +119,29 @@ Section "Uninstall"
 
     DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}"
 
+    ; Browser handoff sweep (item 5): unregister both browsers through
+    ; the installed host while it still exists. That deletes exactly
+    ; this build's host key, strips the browser's entries from
+    ; <data>\handoff\callers.json (per-user data root, and the portable
+    ; data folder when the host runs from one), and removes
+    ; udm-host.caller when it names that browser. The two DeleteRegKey
+    ; lines are the guarantee behind it: they remove the keys even if
+    ; the host binary is missing or its unregister fails. Each key is
+    ; the leaf host key itself - never a parent key, never another
+    ; product's key. The journal, udm.redb and downloads are user data
+    ; and stay behind, like the rest of %LOCALAPPDATA%\udm.
+    IfFileExists "$INSTDIR\${HOSTEXE}" host_exists host_missing
+    host_exists:
+    ExecWait '"$INSTDIR\${HOSTEXE}" --unregister chrome'
+    ExecWait '"$INSTDIR\${HOSTEXE}" --unregister firefox'
+    host_missing:
+    DeleteRegKey HKCU "Software\Google\Chrome\NativeMessagingHosts\pw.cino.udm.handoff.chrome"
+    DeleteRegKey HKCU "Software\Mozilla\NativeMessagingHosts\pw.cino.udm.handoff.firefox"
+
     Delete "$INSTDIR\${EXE}"
     Delete "$INSTDIR\${CLIEXE}"
+    Delete "$INSTDIR\${HOSTEXE}"
+    Delete "$INSTDIR\udm-host.caller"
     Delete "$INSTDIR\LICENSE.txt"
     Delete "$INSTDIR\PRIVACY.md"
     Delete "$INSTDIR\CINO-UI-LICENSE.txt"

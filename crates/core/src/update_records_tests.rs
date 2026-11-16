@@ -85,8 +85,20 @@ fn revocation_bytes(recovery: &TestKey, key_id: &str, issued_at: i64) -> Vec<u8>
 }
 
 fn signed_manifest(signers: &[&TestKey], epoch: u64, issued_at: i64) -> Manifest {
+    signed_manifest_version(signers, epoch, issued_at, "0.2.0", "0.1.0")
+}
+
+/// A signed manifest at a chosen version and minimum, re-signed over
+/// the canonical bytes of the edited manifest.
+fn signed_manifest_version(
+    signers: &[&TestKey],
+    epoch: u64,
+    issued_at: i64,
+    version: &str,
+    min_version: &str,
+) -> Manifest {
     let mut manifest = Manifest {
-        version: "0.2.0".to_owned(),
+        version: version.to_owned(),
         manifest_epoch: epoch,
         issued_at,
         valid_until: issued_at + 7 * DAY,
@@ -95,7 +107,7 @@ fn signed_manifest(signers: &[&TestKey], epoch: u64, issued_at: i64) -> Manifest
             sha256: "ab".repeat(32),
             size: 4,
         }],
-        min_version: "0.1.0".to_owned(),
+        min_version: min_version.to_owned(),
         urls: vec!["https://example.invalid/udm.zip".to_owned()],
         signatures: Vec::new(),
     };
@@ -635,4 +647,39 @@ fn an_issued_at_more_than_one_day_ahead_is_refused() {
             .verify(&publisher.id, ISSUED),
         Err(RecordError::IssuedTooFarAhead { .. })
     ));
+}
+
+#[test]
+fn governed_verify_refuses_a_manifest_below_the_version_floor() {
+    let publisher = test_key();
+    let recovery = test_key();
+    let trust = trust_with(&publisher, &recovery);
+    let recovery_pins = vec![recovery.id.pin().to_owned()];
+    let now = ISSUED + DAY;
+    let floor_ctx = VerifyContext {
+        now_unix: now,
+        last_seen_epoch: 6,
+        installed_version: "0.0.5",
+    };
+
+    // Installed below the floor, manifest above the installed
+    // version but below the floor, fresh epoch, valid signature:
+    // only the floor can refuse it, on the governed path too.
+    let manifest = signed_manifest_version(&[&publisher], 7, ISSUED, "0.0.9", "0.0.1");
+    let err = manifest
+        .verify_governed(&trust.decision(now, 7), &recovery_pins, &floor_ctx)
+        .unwrap_err();
+    assert_eq!(
+        err,
+        crate::update_manifest::Refusal::BelowVersionFloor {
+            manifest: "0.0.9".to_owned(),
+            floor: "0.1.0".to_owned(),
+        }
+    );
+
+    // The floor version itself passes the governed path.
+    let at_floor = signed_manifest_version(&[&publisher], 7, ISSUED, "0.1.0", "0.0.1");
+    at_floor
+        .verify_governed(&trust.decision(now, 7), &recovery_pins, &floor_ctx)
+        .expect("floor version passes governed verify");
 }

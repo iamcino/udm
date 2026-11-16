@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/gui", "crates/cli", "crates/host", "crates/publisher-tool"]
+members = ["crates/core", "crates/gui", "crates/cli", "crates/host", "crates/publisher-tool", "crates/helper"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.92"
 license = "MIT OR Apache-2.0"
@@ -74,7 +74,7 @@ tempfile = "3.27"
 # slint / slint-build / rfd / embed-resource are declared by crates/gui itself
 # (version-pinned there); they are not shared with the other members.
 
-usagi = { path = "crates/core", version = "0.1.0" }
+usagi = { path = "crates/core", version = "0.2.0" }
 
 # The CI/sandbox boxes are memory-starved; debug info is what makes rustc
 # balloon. Release builds are unaffected.

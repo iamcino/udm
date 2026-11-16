@@ -30,34 +30,62 @@ switch when your network requires proxy-only access.
 UDM sends no usage counts, machine fingerprint, feature analytics, advertising
 identifiers or remote crash reports. Local task/history/settings management works
 offline; downloads and explicit probes require their destination networks.
-The built-in updater has its own section below; in ordinary use it makes no
-connections at all.
+The built-in updater has its own section below. When update checks are enabled
+(the default), the desktop app checks at startup and every 6 hours while it
+runs; with checks turned off it opens no new update connection.
 
 ## Idle does not mean no socket exists
 
-UDM does not poll a project endpoint or send an idle telemetry beacon. Its
-transport stack can create a local QUIC UDP endpoint during initialization
-and retain pooled connections after requests finish. Such endpoints or idle
-sockets can appear in operating-system tools even with no active download.
-Protocol connection maintenance can also persist while a pool is alive.
+UDM sends no idle telemetry beacon. The only periodic project traffic is the
+update check described below, which runs at startup and every 6 hours while
+the desktop app is running and checks are enabled. Its transport stack can
+create a local QUIC UDP endpoint during initialization and retain pooled
+connections after requests finish. Such endpoints or idle sockets can appear
+in operating-system tools even with no active download. Protocol connection
+maintenance can also persist while a pool is alive.
 
-The privacy claim is absence of telemetry and unsolicited project-service
-traffic, not a guarantee of zero socket handles whenever the queue is empty.
-`udm-cli doctor` itself initializes a network stack to check QUIC availability.
+The privacy claim is absence of telemetry and of any project-service traffic
+beyond the disclosed update checks, not a guarantee of zero socket handles
+whenever the queue is empty. `udm-cli doctor` itself initializes a network
+stack to check QUIC availability.
 
 ## Updates and the built-in updater
 
 The engine contains a complete authenticated updater: it can fetch a signed
 update manifest and payload, verify them, stage the files and swap them into
-the install directory with a rollback journal. **No part of the application
-you run invokes it.** The graphical interface has no update control, and the
-only update command, `udm-cli update pin`, prints the compiled publisher pin,
-the publisher public key and the recovery pin, so you can compare them with a
-release you downloaded by hand; it opens no update socket and does not
-download, stage or install anything. There is no automatic check, no polling
-and no background timer, and the running application opens no update socket
-while idle. Updates reach your machine the way they always have: you download
-a new version from the release pages and install it yourself.
+the install directory with a rollback journal. Three surfaces invoke its
+fetch and staging, all only when update checks resolve on: the desktop app's
+automatic check (once at startup and every 6 hours while it runs), the
+graphical interface's Check for Updates button, and `udm-cli update check`.
+Checks resolve on by default: an absent flag file means on. `udm-cli update
+checks on` writes the flag file on the install base, and `udm-cli update
+checks off` writes durable opt-out content to that same file rather than
+deleting it; the settings page's Enable update checks checkbox reads and
+writes the flag directly — it is not a field of the saved settings form.
+Turning checks off stops new checks from starting; a check already running
+finishes, and no new check opens an update socket while checks are off.
+A successful check only stages the verified update; applying it is a
+separate, explicit action: the graphical interface's Apply Update button and
+`udm-cli update apply` each swap the staged files into the install directory
+and start the new build. Applying is always manual — nothing is installed
+until you press Apply, and neither apply action fetches anything. If the
+running executable refuses to be renamed, the graphical interface hands the
+swap to a small per-user
+helper (`udm-updater-helper.exe`) that waits for UDM to exit, completes the
+swap and starts the new build; the helper never fetches anything, needs
+no administrator rights, and leaves local breadcrumbs in
+`updater-helper.log` on the install base. If that helper file is absent,
+UDM reports it and keeps running; the next start clears the pending
+swap. The command-line apply never starts the helper: it reports the
+refusal and leaves the pending swap for the next graphical start, which
+reconciles it.
+At startup the graphical interface reconciles a swap journal an interrupted
+apply left behind, and then runs its first automatic check when checks
+resolve on. `udm-cli update pin` prints the compiled publisher pin, the
+publisher public key and the recovery pin, so you can compare them with a
+release you downloaded by hand; it opens no update socket. The CLI itself
+never schedules a check; only the desktop app runs the automatic startup and
+6-hour checks, and applying an update is always your explicit Apply.
 
 Rotation and revocation records — the signed records that replace or retire a
 publisher key — are verified only when a caller passes their bytes to the
@@ -71,8 +99,10 @@ caller. It has no built-in origin and no third slot. A caller that follows
 the project's release layout passes the GitHub (`iamcino/udm`) and GitLab
 (`cino-group/udm`) release manifests, GitHub first; if a fetch succeeds on
 the second origin, that origin is tried first for the rest of that session,
-in memory only. The running application has no caller, so ordinary use
-contacts neither host. The payload addresses are the HTTPS URLs inside the
+in memory only. The callers in this version are the desktop app's automatic
+startup and 6-hour checks, the graphical Check for Updates button, and
+`udm-cli update check`, all only with checks resolved on, as described
+above. The payload addresses are the HTTPS URLs inside the
 signed manifest, not a compiled host list; the `sha256` query parameter on
 them is stripped before the payload request. HTTPS redirects are followed,
 so a release CDN can be contacted. A manifest, payload or redirect address
@@ -101,19 +131,27 @@ requested, and a later payload failure does not undo that store. The whole
 archive is then checked against the SHA-256 named in the signed payload URLs,
 and every extracted file is checked against the manifest's path, hash and
 size, both ways. Staging and the rollback journal run only when a caller
-invokes them, and startup does not run updater recovery.
+invokes them; startup reconciles a journal left behind by an interrupted
+apply but never fetches.
 
 ### What the updater can write
 
-The engine writes updater files only when a caller invokes it, and neither
-the graphical interface nor the command line does, so ordinary use creates
-none. When a caller does invoke it: the last-seen epoch is a JSON file at a
-path the caller chooses; the trust state is `updater-trust.json` on the
+The engine writes updater files when a check or apply runs: the command line
+when you enable checks, run `udm-cli update check` or run `udm-cli update
+apply`, and the graphical interface during its automatic startup and 6-hour
+checks (with checks resolved on), when you press Check for Updates, or when
+you press Apply Update. With checks turned off, ordinary use creates none of
+these. The checks flag itself is the file `update-checks-enabled` on the
+install base. When a check runs: the last-seen epoch is a JSON file named
+`update-epoch` on the install base; the scratch download directory is
+`update-download` there; each check outcome appends one line to
+`update-check.log` there; the trust state is `updater-trust.json` on the
 install base (`%LOCALAPPDATA%\Programs\UDM`, or the portable executable's
 directory); and the rollback journal is a table in `udm.redb` on that same
 install base — not the application database under `%LOCALAPPDATA%\udm`.
-Staging files, `updater-recovery.log` and `.old` copies sit on that install
-base too, and a payload partial sits in the destination directory the caller
+Staging files, `updater-recovery.log`, `updater-helper.log` (the trampoline
+helper's local breadcrumbs) and `.old` copies sit on that install base too,
+and a payload partial sits in the destination directory the caller
 supplied. None of this is sent anywhere. Removing the application data
 directory does not remove the install base; removing the install directory,
 or the portable folder, is what removes these files.
@@ -127,7 +165,7 @@ or the portable folder, is what removes these files.
 | Download files | Completed files and `<filename>.udm.part` partials in your selected download destination. |
 | Desktop log | `logs\udm.log`: local tracing output, errors and GUI panic diagnostics/backtraces. |
 | Browser handoff files | `handoff\records.json`, `callers.json`, `pairing.key`, host manifests and `host.log` under the application data root. |
-| Host identity sidecar | `udm-host.caller` beside the registered host executable. |
+| Host identity sidecar | `udm-host.caller` beside the registered host executable. It is the bare-launch identity only; browser launches are checked against each browser's own host manifest, so Chrome and Firefox beside one executable are independent. |
 | Extension storage | Browser-local capture settings/exclusions and the 20 most recent handoff log entries. |
 
 These records are not an encrypted secret store. URLs, filenames, errors and
@@ -170,7 +208,9 @@ This separation means a URL that needs the browser's login session may fail
 in UDM even if the browser could download it.
 
 Capture defaults on while the extension is enabled, subject to its toggle
-and exclusions. Host registration is a separate explicit opt-in. Fresh UDM
+and exclusions. Host registration is a separate explicit opt-in, done from
+Settings → Browser integration (one toggle per browser, applied
+immediately, no restart) or with `udm-host --register`. Fresh UDM
 settings carry a 60-second prepare lease, but no coordinator starts without
 registered callers; an explicitly stored `null` lease remains disabled.
 The journal preserves intents and ownership transitions locally for recovery.
@@ -187,7 +227,7 @@ There are three narrow, disclosed registry uses under the current user:
 | Integration | What it writes | How to undo it |
 |---|---|---|
 | Per-user installation | UDM uninstall metadata under HKCU, plus user shortcuts/files. | Run the uninstaller. |
-| Native Messaging host | The Chrome or Firefox HKCU host key and local registration files. | `udm-host --unregister chrome` or `--unregister firefox`. |
+| Native Messaging host | The Chrome or Firefox HKCU host key and local registration files. | Turn the browser off in Settings → Browser integration, run `udm-host --unregister chrome` / `--unregister firefox`, or run the app uninstaller (it sweeps both browsers). |
 | Start with Windows | `UDM` under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, pointing to the current executable. | Disable Start with Windows in UDM. |
 
 Startup is off by default. Once selected, the saved setting synchronizes
@@ -196,8 +236,8 @@ toggle. Auto theme also reads Windows' app-mode registry preference; it
 does not change that preference.
 
 Portable mode does not silently register a browser host or enable startup.
-At this revision the uninstaller only cleans up its own installation entry;
-undo optional startup and host registration before deleting the program.
+The uninstaller sweeps the browser-host registration for both browsers;
+undo optional startup before deleting the program.
 
 ## Deleting your data
 
@@ -206,9 +246,9 @@ uninstaller leaves application data and downloaded files intact. To erase
 them, remove the data directory and the download files you choose separately.
 Deleting a portable folder can include its `data\` directory.
 
-Unregister browser hosts and disable startup first. Browser extension settings
-and recent outcomes live in browser-local storage; removing desktop data
-does not clear that storage. Removing task records can also delete an owned
+Disable startup first (the uninstaller unregisters the browser hosts for
+you). Browser extension settings and recent outcomes live in browser-local
+storage; removing desktop data does not clear that storage. Removing task records can also delete an owned
 partial under the default removal policy. See [Operations](OPERATIONS.md).
 
 ## How to inspect the claim
@@ -232,9 +272,11 @@ local endpoint, an idle pooled connection and an actual outbound request.
 
 ## Future designs
 
-The authenticated updater described above is built into the engine; a
-user-facing update check and apply surface is a later package, not part of
-this version. N2 dual-stack (IPv4/IPv6 selection) and N3 multi-family
+The authenticated updater described above is built into the engine; the
+user-facing check surfaces (the desktop app's automatic startup and 6-hour
+checks, `udm-cli update checks` and `update check`, and the graphical Check
+for Updates button) and both apply surfaces (the graphical Apply Update
+action and `udm-cli update apply`) are part of this version. N2 dual-stack (IPv4/IPv6 selection) and N3 multi-family
 transfers (splitting one download across address families) are
 **design-only, not built**. N2/N3 implementation remains measurement-gated.
 A future network feature needs its own documented network behaviour and a

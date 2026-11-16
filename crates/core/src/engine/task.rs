@@ -2294,7 +2294,7 @@ mod tests {
     }
 
     /// A resume that lands while the revoked run is still draining must
-    /// survive that run's own stop publication (garen-pc 2/20 race).
+    /// survive that run's own stop publication.
     #[tokio::test(flavor = "multi_thread")]
     async fn resume_during_drain_is_not_overwritten_by_stop() {
         let dir = tempfile::tempdir().unwrap();

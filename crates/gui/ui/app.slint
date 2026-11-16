@@ -246,6 +246,28 @@ export component AppWindow inherits Window {
     in-out property <string> set-user-agent;
     in-out property <int> set-log-index: 3;
 
+    // updater surface (wiring W2). The checkbox mirrors the flag file on
+    // the install base; it is not a Settings field and Save never writes it.
+    in-out property <bool> set-checks-enabled: false;
+    in-out property <bool> update-available: false;
+    in-out property <bool> update-check-busy: false;
+    in-out property <string> update-result: "";
+
+    // Browser integration (envelope rev.5 items 1-2): mirror of the
+    // SettingsView browser rows. Toggles are immediate callbacks.
+    in-out property <bool> set-chrome-enabled: false;
+    in-out property <bool> set-firefox-enabled: false;
+    in-out property <string> set-chrome-extension-id;
+    in property <int> set-chrome-status: 1;
+    in property <int> set-firefox-status: 1;
+    in property <string> set-chrome-last-connected;
+    in property <string> set-firefox-last-connected;
+    in property <bool> set-chrome-broken: false;
+    in property <bool> set-firefox-broken: false;
+    in-out property <bool> set-chrome-guide-visible: false;
+    in-out property <bool> set-firefox-guide-visible: false;
+    in property <bool> set-browser-hint-visible: false;
+
     // notifications
     in-out property <string> toast: "";
     in-out property <bool> toast-error: false;
@@ -267,6 +289,11 @@ export component AppWindow inherits Window {
     callback settings-pick-dir;
     callback settings-saved;
     callback settings-reset;
+    callback set-checks-toggled(bool);
+    callback set-browser-toggled(string, bool);
+    callback set-browser-hint-dismissed;
+    callback update-check-clicked;
+    callback update-apply-clicked;
     callback open-data-dir;
     callback open-log;
     callback clear-finished;
@@ -590,6 +617,27 @@ export component AppWindow inherits Window {
                             pick-dir => { root.settings-pick-dir(); }
                             saved => { root.settings-saved(); }
                             reset => { root.settings-reset(); }
+                            checks-enabled <=> root.set-checks-enabled;
+                            update-available <=> root.update-available;
+                            update-check-busy <=> root.update-check-busy;
+                            update-result <=> root.update-result;
+                            checks-toggled(on) => { root.set-checks-toggled(on); }
+                            check-clicked => { root.update-check-clicked(); }
+                            apply-clicked => { root.update-apply-clicked(); }
+                            chrome-enabled <=> root.set-chrome-enabled;
+                            firefox-enabled <=> root.set-firefox-enabled;
+                            chrome-extension-id <=> root.set-chrome-extension-id;
+                            chrome-status: root.set-chrome-status;
+                            firefox-status: root.set-firefox-status;
+                            chrome-last-connected: root.set-chrome-last-connected;
+                            firefox-last-connected: root.set-firefox-last-connected;
+                            chrome-broken: root.set-chrome-broken;
+                            firefox-broken: root.set-firefox-broken;
+                            chrome-guide-visible <=> root.set-chrome-guide-visible;
+                            firefox-guide-visible <=> root.set-firefox-guide-visible;
+                            browser-hint-visible: root.set-browser-hint-visible;
+                            browser-toggled(browser, on) => { root.set-browser-toggled(browser, on); }
+                            browser-hint-dismissed => { root.set-browser-hint-dismissed(); }
                         }
                         AboutView {
                             width: 100%;

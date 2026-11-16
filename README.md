@@ -46,7 +46,7 @@ menu to quit. If Windows shows a warning, see
 | ✅ **Checksums** | Give the publisher's SHA-256, SHA-512, SHA-1, MD5 or BLAKE3 and UDM checks the file before calling it complete. |
 | 🗂️ **Files kept in order** | Optional category routing puts downloads into subfolders by file type. Off by default. |
 | 🌐 **Browser handoff** | A Chrome or Firefox extension hands downloads to the running app through a local native messaging host. You opt in. |
-| 🔒 **Private and per-user** | No analytics, ads or crash reporting, and no automatic or background update checks — new versions are installed manually from the release pages. No services and no administrator rights; settings and history stay in your user folder. |
+| 🔒 **Private and per-user** | No analytics, ads or crash reporting. Update checks are on by default and run at startup and every 6 hours; applying an update is always your explicit Apply. No services and no administrator rights; settings and history stay in your user folder. |
 | 🪶 **Light and native** | One Rust app with a [Slint](https://slint.dev) interface, plus a command-line tool on the same engine. |
 
 ## Features
@@ -74,14 +74,29 @@ menu to quit. If Windows shows a warning, see
   settings, all off by default. Start with Windows writes only UDM's entry in
   `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` and removes it when you
   turn it off.
+- **Update checks** at startup and every 6 hours while UDM runs (on by
+  default), with a green tray arrow when an update is staged. Applying an
+  update is always your explicit Apply; turn checks off in Settings.
 
 ### Browser handoff
 
-Follow [the extension setup guide](extension/README.md). The installer and the
-portable zip do **not** include `udm-host` or the extension yet; build the host
-separately. Handoff uses durable prepare/commit records, and anything that could
-not be matched to a task shows as a read-only **Needs recovery** row in the
-**All** view.
+The installer and the portable zip include `udm-host.exe` beside the app.
+Turn a browser on in **Settings → Browser**:
+
+- **Firefox**: load the extension as a temporary add-on (see
+  [the extension setup guide](extension/README.md)), then flip the Firefox
+  toggle. No ID to copy — Firefox uses a fixed extension ID.
+- **Chrome**: load the extension unpacked, open the extension's options
+  page and copy the extension ID it shows, paste it into the Chrome row in
+  Settings, then flip the toggle.
+
+The toggle registers the native messaging host immediately; there is no
+Save step, and moving the app folder is repaired automatically the next
+time UDM starts. Each row shows **last connected** once that browser has
+handed off a download. Turn the toggle off and the browser keeps its own
+downloads again. Handoff uses durable prepare/commit records, and anything
+that could not be matched to a task shows as a read-only **Needs recovery**
+row in the **All** view.
 
 ## Quick tips
 
@@ -134,21 +149,33 @@ tray before using the CLI on its data.
 
 ## Updates
 
-UDM never checks for updates automatically and makes no background update
-connections. The engine contains an authenticated updater, but nothing in the
-app invokes it: there is no graphical updater, and the one update command,
-`udm-cli update pin`, only prints the compiled publisher fingerprints and
-uses no network. New versions are published on
-[GitHub](https://github.com/iamcino/udm/releases) and [GitLab](https://gitlab.com/cino-group/udm/-/releases). Install the new
-version over the old one yourself; your settings, history and downloads are kept.
+UDM checks for updates automatically: once at startup and every 6 hours while
+it runs, as well as when you press **Check for Updates**. Checks are on by
+default. A check fetches the signed update manifest from the two release hosts
+([GitHub](https://github.com/iamcino/udm/releases) first, then
+[GitLab](https://gitlab.com/cino-group/udm/-/releases)); the request carries the
+app version in its User-Agent and a random nonce as a cache-buster, and nothing
+else. If a newer build verifies, it is staged and offered; **applying an update
+is always your explicit Apply** — nothing is installed until you press it, and
+your settings, history and downloads are kept.
+
+Turn checks off with **Settings › Enable update checks**, or
+`udm-cli update checks off`. Turning checks off stops new checks from starting;
+a check already running finishes. No new check opens an update socket while
+checks are off. You can still install a new version over the old one yourself
+from the release pages. `udm-cli update pin` only prints the compiled publisher
+fingerprints and uses no network. Every release also carries a
+`virustotal-<tag>.json` report (for example `virustotal-v0.1.0.json`) linking to
+the VirusTotal scan of the published installer.
 
 ## FAQ
 
 **Does UDM collect any data?**
-No. There are no analytics, ads or remote crash reports, and no automatic
-update checks. UDM only contacts the servers of the downloads you create. Logs and download URLs stay on
-your machine but can contain sensitive information, so review them before
-sharing. See the [privacy policy](docs/PRIVACY.md).
+No. There are no analytics, ads or remote crash reports. UDM contacts the
+servers of the downloads you create and, for update checks, the two release
+hosts (the signed manifest only — see [Updates](#updates)). Logs and download
+URLs stay on your machine but can contain sensitive information, so review them
+before sharing. See the [privacy policy](docs/PRIVACY.md).
 
 **Is it a torrent client or a video grabber?**
 No. UDM downloads files from HTTP and HTTPS links. Browser handoff passes a
@@ -191,10 +218,9 @@ interrupted download, browser recovery and common problems.
   resolving. The queue only limits how many downloads run at once.
 - Segments are concurrent requests, not physical connections: HTTP/2 and HTTP/3
   can carry several on one connection.
-- No graphical updater and no automatic update checks in this version: the
-  built-in updater engine has no user-facing surface yet, so updates are
-  installed manually. No simultaneous IPv4 and IPv6, and no splitting one
-  download across address families in this version.
+- Update checks run at startup and every 6 hours, but applying an update is
+  always manual; there is no silent install. No simultaneous IPv4 and IPv6,
+  and no splitting one download across address families in this version.
 
 ## For developers
 

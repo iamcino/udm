@@ -2,6 +2,22 @@
 
 Các thay đổi đáng chú ý của UDM. Tiếng Anh: [CHANGELOG.md](CHANGELOG.md).
 
+## 0.2.0
+
+- **Nhận lượt tải từ trình duyệt, tích hợp sẵn**: bộ cài và bản portable nay
+  kèm `udm-host.exe`, và mỗi trình duyệt được bật từ **Cài đặt → Trình duyệt**
+  (Chrome và Firefox). Nạp tiện ích thủ công (xem hướng dẫn cài tiện ích),
+  bật công tắc, và các lượt tải bạn bắt đầu trong trình duyệt sẽ được chuyển
+  cho UDM; tắt công tắc thì trình duyệt tự giữ lượt tải của mình. Hàng cài
+  đặt trình duyệt hiển thị lần kết nối gần nhất của trình duyệt.
+- **Tự động kiểm tra cập nhật**: UDM nay kiểm tra cập nhật lúc khởi động và
+  mỗi 6 giờ (mặc định bật; tắt tại **Cài đặt → Bật kiểm tra cập nhật**). Bản
+  cập nhật đã sẵn sàng sẽ hiện huy hiệu trên biểu tượng khay. Việc áp dụng
+  cập nhật vẫn luôn là thao tác **Áp dụng** chủ động của bạn.
+- **Xác thực cập nhật chặt hơn**: manifest cập nhật phải qua kiểm tra nhà
+  phát hành và phiên bản nghiêm ngặt hơn trước khi được xếp chờ, nên
+  manifest cũ hoặc bị thay thế sẽ bị từ chối thay vì được chào cài.
+
 ## 0.1.0
 
 Bản phát hành công khai đầu tiên của Universal Download Manager cho Windows 11 x64.

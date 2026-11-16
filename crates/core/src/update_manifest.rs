@@ -197,6 +197,16 @@ pub enum Refusal {
         /// The installed version it failed to exceed.
         installed: String,
     },
+    /// The manifest version is below the compiled minimum accepted
+    /// version: the target build is too old to ever be an update
+    /// target, whatever the installed version is.
+    #[error("manifest version {manifest} is below the minimum accepted version {floor}")]
+    BelowVersionFloor {
+        /// The version carried by the refused manifest.
+        manifest: String,
+        /// The compiled minimum accepted version.
+        floor: String,
+    },
     /// The installed version is older than the manifest's `min_version`;
     /// the install must update stepwise or be reinstalled manually.
     #[error("installed version {installed} is below the manifest minimum {min_version}")]
@@ -314,9 +324,10 @@ impl Manifest {
 
     /// Verify this manifest end to end, in the design's order of trust:
     /// well-formedness of the security fields, pin self-consistency,
-    /// signature, epoch monotonicity, version monotonicity, then the
-    /// freshness window. On success the caller must durably store
-    /// [`VerifiedManifest::epoch`] before any payload download.
+    /// signature, epoch monotonicity, version monotonicity and the
+    /// version floor, then the freshness window. On success the caller
+    /// must durably store [`VerifiedManifest::epoch`] before any payload
+    /// download.
     pub fn verify(
         &self,
         trust: &TrustRoot,
@@ -502,6 +513,21 @@ impl Manifest {
             return Err(Refusal::VersionNotIncreasing {
                 manifest: self.version.clone(),
                 installed: ctx.installed_version.to_owned(),
+            });
+        }
+        // Absolute version floor: the target version must meet the
+        // compiled minimum accepted version, whatever the installed
+        // version is. An unparseable floor refuses everything,
+        // mirroring the pin self-consistency discipline. Checked
+        // right after version monotonicity and before the manifest's
+        // own minimum: a target below the floor is never an update
+        // target, even for an install that could otherwise apply it.
+        let floor = SemVer::parse(update_pin::min_accepted_version())
+            .map_err(|_| Refusal::PinsInconsistent)?;
+        if manifest_version < floor {
+            return Err(Refusal::BelowVersionFloor {
+                manifest: self.version.clone(),
+                floor: update_pin::min_accepted_version().to_owned(),
             });
         }
         if installed_version < min_version {
@@ -907,6 +933,52 @@ mod tests {
             manifest.verify(&key.trust, &too_old),
             Err(Refusal::BelowMinVersion { .. })
         ));
+    }
+
+    /// A manifest at a given version with a minimum the test install
+    /// always meets, so only the version floor can refuse it.
+    fn manifest_at(version: &str) -> Manifest {
+        let mut manifest = base_manifest();
+        manifest.version = version.to_owned();
+        manifest.min_version = "0.0.1".to_owned();
+        manifest
+    }
+
+    #[test]
+    fn version_floor_equal_and_above_are_accepted() {
+        let key = test_key();
+        let mut below_floor_install = ctx();
+        below_floor_install.installed_version = "0.0.5";
+        // Exactly at the floor: passes.
+        let at_floor = sign(manifest_at("0.1.0"), &key);
+        at_floor
+            .verify(&key.trust, &below_floor_install)
+            .expect("floor version is accepted");
+        // Above the floor: passes.
+        let above = sign(manifest_at("0.2.0"), &key);
+        above
+            .verify(&key.trust, &below_floor_install)
+            .expect("above-floor version is accepted");
+    }
+
+    #[test]
+    fn version_floor_is_the_only_refusal_for_an_isolated_below_floor_manifest() {
+        // Installed below the floor, manifest above the installed
+        // version but below the floor, fresh epoch, valid signature:
+        // epoch, monotonicity, minimum, and freshness all pass, so
+        // only the floor can refuse this manifest.
+        let key = test_key();
+        let manifest = sign(manifest_at("0.0.9"), &key);
+        let mut isolated = ctx();
+        isolated.installed_version = "0.0.5";
+        let err = manifest.verify(&key.trust, &isolated).unwrap_err();
+        assert_eq!(
+            err,
+            Refusal::BelowVersionFloor {
+                manifest: "0.0.9".to_owned(),
+                floor: "0.1.0".to_owned(),
+            }
+        );
     }
 
     #[test]

@@ -17,7 +17,7 @@
   Release notes: -NotesFile, or the "## <version>" section of CHANGELOG.md (and CHANGELOG.vi.md
   when it exists).
 
-  Signing is required. udm.exe, udm-cli.exe and the installer are signed with the pinned UDM
+  Signing is required. udm.exe, udm-cli.exe, udm-host.exe and the installer are signed with the pinned UDM
   certificate (docs\signing\UDM-codesign.cer) and checked against its thumbprint; the .cer and
   signature reports are published with the release. Key, first match wins:
     1. the pinned certificate in Cert:\CurrentUser\My
@@ -216,6 +216,7 @@ try {
         $verify = Join-Path $work 'tools\signing\verify.ps1'
         & $verify -Path (Join-Path $dist 'udm.exe') -ExpectedThumbprint $thumb -ProjectName UDM -JsonPath (Join-Path $out 'udm-signature.json')
         & $verify -Path (Join-Path $dist 'udm-cli.exe') -ExpectedThumbprint $thumb -ProjectName UDM
+        & $verify -Path (Join-Path $dist 'udm-host.exe') -ExpectedThumbprint $thumb -ProjectName UDM
         & $verify -Path (Join-Path $out $setup) -ExpectedThumbprint $thumb -ProjectName UDM -JsonPath (Join-Path $out "udm-$version-setup-signature.json")
         # the portable zip must carry the signed executables, not a stale copy
         $check = Join-Path $work 'zip-check'
@@ -231,7 +232,6 @@ try {
     [IO.File]::WriteAllText("$out\SHA256SUMS.txt", ($lines -join "`n") + "`n")
     $lines | ForEach-Object { Write-Host "  $_" }
 
-    $blob = "$GitLab/$Project/-/blob/$tag"
     $notes += "`n`n---`n`nRun ``$setup`` to install for the current user (no administrator rights needed), " +
         "or unzip ``$zip`` and run ``udm.exe`` (portable: data stays next to the program). Windows 11 x64.`n`n" +
         $(if ($thumb) {
@@ -240,8 +240,7 @@ try {
         } else {
             "**This release is not code signed.** Windows SmartScreen may warn the first time. "
         }) +
-        "Check the files against ``SHA256SUMS.txt``. The browser extension host is not packaged yet; " +
-        "see [docs/BUILD.md]($blob/docs/BUILD.md).`n"
+        "Check the files against ``SHA256SUMS.txt``.`n"
     [IO.File]::WriteAllText("$out\release-notes.md", $notes, (New-Object Text.UTF8Encoding $false))
 
     $files = @(Get-ChildItem $out -File | Where-Object Name -ne 'release-notes.md' | ForEach-Object Name)

@@ -7,6 +7,7 @@
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -17,6 +18,10 @@ use usagi::engine::{AddRequest, Engine, Event, TaskSnapshot};
 use usagi::handoff::{Coordinator, RecoveryEntry};
 use usagi::hash::ExpectedHash;
 use usagi::store::records::TaskState;
+use usagi::update_apply::{ApplyError, InstallLayout};
+use usagi::update_check::CheckKind;
+use usagi::update_manifest::TrustRoot;
+use usagi::update_records::{ClientTrust, Ed25519Identity};
 use usagi::util;
 
 use crate::{AppWindow, EndpointRow, StatusInfo, TaskDetail, TaskRow};
@@ -69,8 +74,106 @@ pub struct Gui {
     /// G5-closing: the live handoff coordinator, when one is serving.
     /// Read-only here: the task list renders its recovery entries as
     /// rows (owner decision 2026-11-09); the GUI never mutates handoff
-    /// records.
-    pub handoff: Option<Arc<Coordinator>>,
+    /// records. Behind interior mutability (browser integration item
+    /// 1) so a later register can publish a freshly started
+    /// coordinator into the same Gui.
+    pub handoff: RefCell<Option<Arc<Coordinator>>>,
+    /// Browser integration (items 1-3): the data root the browser
+    /// rows read (registry keys, journal, manifests); the browsers
+    /// the startup repair could not repoint (their rows show the
+    /// registration-broken fault); and the poll throttle for the
+    /// row refresh.
+    pub paths: usagi::Paths,
+    pub browser_broken: RefCell<Vec<String>>,
+    browser_refresh_at: RefCell<Instant>,
+    /// Wiring W2: the install layout the updater surface acts on (None
+    /// when the executable's directory is unknown), the single-flight
+    /// guard for the background check thread, and the relaunch request
+    /// the Apply flow raises before quitting the event loop.
+    pub update_layout: Option<InstallLayout>,
+    pub update_check_running: Arc<AtomicBool>,
+    pub relaunch_after_apply: Arc<AtomicBool>,
+    /// Autocheck window: the single 6-hour clock and the one-shot startup
+    /// flag, plus the poll bookkeeping that recognises the first ready
+    /// evaluation and the OFF->ON flip (see `UpdateSchedule`).
+    pub update_schedule: RefCell<UpdateSchedule>,
+    /// The previous poll's single-flight guard value, so the poll can spot
+    /// a check completion (running true->false) and recompute the tray
+    /// badge. The completion closure cannot touch the tray itself: the GUI
+    /// handle is not `Send`.
+    pub was_check_running: RefCell<bool>,
+}
+
+/// The automatic-check window. There is one clock instant (`clock_base`,
+/// the start of the current 6-hour window) and one `startup_pending` flag;
+/// the due decision is the pure [`update_check_due`] function. `armed` and
+/// `last_on` are not a second clock: they let [`UpdateSchedule::observe`]
+/// recognise the two events that rewrite `clock_base` without a check
+/// starting — the first ready evaluation and an OFF->ON flip.
+pub struct UpdateSchedule {
+    pub clock_base: Instant,
+    pub startup_pending: bool,
+    armed: bool,
+    last_on: bool,
+}
+
+/// The periodic check interval: every 6 hours while the app runs.
+const CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// Pure due decision. A check is due only when checks resolve ON, nothing
+/// is in flight, and either the one-shot startup check is still owed or a
+/// full 6-hour window has elapsed since `clock_base`.
+pub(crate) fn update_check_due(
+    now: Instant,
+    clock_base: Instant,
+    startup_pending: bool,
+    running: bool,
+    resolved_on: bool,
+) -> bool {
+    resolved_on && !running && (startup_pending || now.duration_since(clock_base) >= CHECK_INTERVAL)
+}
+
+impl UpdateSchedule {
+    fn new(now: Instant) -> Self {
+        UpdateSchedule {
+            clock_base: now,
+            startup_pending: false,
+            armed: false,
+            last_on: false,
+        }
+    }
+
+    /// Poll observation. The first ready evaluation arms the clock and sets
+    /// the startup flag to the resolved state at that moment. An OFF->ON
+    /// flip rewrites the clock to now and leaves the startup flag alone:
+    /// enabling starts the 6-hour window, it never fires a check by itself.
+    fn observe(&mut self, now: Instant, resolved_on: bool) {
+        if !self.armed {
+            self.armed = true;
+            self.clock_base = now;
+            self.startup_pending = resolved_on;
+        } else if !self.last_on && resolved_on {
+            self.clock_base = now;
+        }
+        self.last_on = resolved_on;
+    }
+
+    /// Any check start (manual, startup or periodic) rewrites the clock to
+    /// the start instant and consumes the one-shot startup flag.
+    fn note_check_start(&mut self, now: Instant) {
+        self.clock_base = now;
+        self.startup_pending = false;
+    }
+
+    fn due(&self, now: Instant, running: bool, resolved_on: bool) -> bool {
+        update_check_due(
+            now,
+            self.clock_base,
+            self.startup_pending,
+            running,
+            resolved_on,
+        )
+    }
 }
 
 pub fn setup(
@@ -78,6 +181,9 @@ pub fn setup(
     engine: Arc<Engine>,
     handoff: Option<Arc<Coordinator>>,
     start_hidden: bool,
+    startup_notice: Option<String>,
+    update_layout: Option<InstallLayout>,
+    relaunch_after_apply: Arc<AtomicBool>,
 ) {
     ui.global::<crate::I18n>().on_translate(|key, language| {
         if language == 1 {
@@ -112,11 +218,33 @@ pub fn setup(
         repaint_pulses: RefCell::new(0),
         popup: RefCell::new(None),
         popup_open: RefCell::new(false),
-        handoff,
+        handoff: RefCell::new(handoff),
+        paths: engine.paths().clone(),
+        browser_broken: RefCell::new(Vec::new()),
+        browser_refresh_at: RefCell::new(Instant::now()),
+        update_layout,
+        update_check_running: Arc::new(AtomicBool::new(false)),
+        relaunch_after_apply,
+        update_schedule: RefCell::new(UpdateSchedule::new(Instant::now())),
+        was_check_running: RefCell::new(false),
     });
 
-    push_settings_to_ui(ui, &engine.settings());
+    // Wiring W1: a rollback at startup reconciliation surfaces its
+    // notice in the first UI (design section 2.3).
+    if let Some(notice) = startup_notice {
+        toast(&gui, notice, true);
+    }
+
+    push_settings_to_ui(ui, &engine.settings(), gui.update_layout.as_ref());
     refresh(&gui);
+
+    // Initialise the update offer and the tray badge from durable state at
+    // launch. A candidate staged by an earlier session is still held on
+    // disk, so it is offered again now rather than waiting for a fresh
+    // check to return Available; the badge mirrors the same probe.
+    let held = held_candidate(&gui);
+    ui.set_update_available(held);
+    refresh_update_badge(&gui);
 
     // G3 lifecycle: the window close button hides to the tray when the
     // setting is on and a tray exists; Exit in the tray menu always quits
@@ -157,6 +285,21 @@ pub fn setup(
             tracing::warn!(error = %e, "start-with-windows sync failed at startup");
         }
     }
+
+    // Browser integration item 3: portable relocation repair, from
+    // the same startup call site as the Run-entry sync above, but
+    // NOT gated on the autostart setting. A moved portable folder
+    // repoints its HKCU host keys on the next launch; a browser the
+    // repair cannot place keeps its key and shows registration-broken
+    // until re-toggled.
+    {
+        let broken = crate::browser::repair_on_start(&gui.paths);
+        if !broken.is_empty() {
+            tracing::warn!(browsers = ?broken, "browser host repair could not place the exe or manifest");
+        }
+        *gui.browser_broken.borrow_mut() = broken;
+    }
+    refresh_browser_rows(&gui);
 
     // G3 C1: the sidebar popup choice.
     let g = gui.clone();
@@ -378,11 +521,33 @@ pub fn setup(
     ui.on_settings_reset(move || {
         let defaults = Settings::default();
         if let Some(ui) = g.ui.upgrade() {
-            push_settings_to_ui(&ui, &defaults);
+            push_settings_to_ui(&ui, &defaults, g.update_layout.as_ref());
         }
         act(&g, || g.engine.update_settings(defaults.clone()));
         toast(&g, "defaults restored".into(), false);
     });
+
+    // Wiring W2 (design section 2.2): the updater surface. The checkbox
+    // writes the install-base flag file directly - never through
+    // Settings/engine.update_settings - and the check button is the only
+    // GUI path that can open an update socket. Apply is the only GUI
+    // path that swaps anything.
+    let g = gui.clone();
+    ui.on_set_checks_toggled(move |enabled| set_update_checks(&g, enabled));
+
+    // Browser integration (item 1): the toggles are immediate
+    // callbacks like checks-toggled, never values waiting on Save.
+    // The Install buttons only reveal the built-in guide, in .slint.
+    let g = gui.clone();
+    ui.on_set_browser_toggled(move |browser, enabled| {
+        set_browser_toggle(&g, browser.as_str(), enabled)
+    });
+    let g = gui.clone();
+    ui.on_set_browser_hint_dismissed(move || dismiss_browser_hint(&g));
+    let g = gui.clone();
+    ui.on_update_check_clicked(move || start_update_check(&g));
+    let g = gui.clone();
+    ui.on_update_apply_clicked(move || apply_update(&g));
 
     let g = gui.clone();
     ui.on_clear_finished(move || {
@@ -412,6 +577,8 @@ pub fn setup(
         move || {
             tray_poll(&gui);
             repaint_guard(&gui);
+            poll_update_checks(&gui);
+            poll_browser_rows(&gui);
             refresh(&gui);
         },
     );
@@ -906,7 +1073,7 @@ fn refresh(g: &Rc<Gui>) {
     // through parse_key, which rejects the recovery: keys, so clicks on
     // them are inert. The text filter applies to them like any row.
     if library == 0 {
-        if let Some(coordinator) = &g.handoff {
+        if let Some(coordinator) = g.handoff.borrow().as_ref() {
             let vietnamese = ui.get_language_index() == 1;
             for entry in coordinator.recovery_entries() {
                 let row = recovery_row(&entry, vietnamese);
@@ -1619,6 +1786,7 @@ fn save_settings(g: &Rc<Gui>) {
     s.start_minimized = ui.get_set_start_minimized();
     s.start_with_windows = ui.get_set_start_with_windows();
     s.user_agent = ui.get_set_user_agent().to_string();
+    s.chrome_extension_id = ui.get_set_chrome_extension_id().to_string();
     s.log_level = match ui.get_set_log_index() {
         0 => "off".into(),
         1 => "error".into(),
@@ -1638,8 +1806,475 @@ fn save_settings(g: &Rc<Gui>) {
         }
         Err(e) => toast(g, e.to_string(), true),
     }
-    push_settings_to_ui(&ui, &s);
+    push_settings_to_ui(&ui, &s, g.update_layout.as_ref());
+    refresh_browser_rows(g);
     ui.set_http3_available(g.engine.net().http3_available());
+}
+
+// ------------------------------------------------- updater surface (W2)
+
+/// Write the checks flag on the install base. Checks resolve on by default;
+/// turning them off writes durable `off` content rather than deleting the
+/// file (a deletion would resurrect the default). The scheduler reads the
+/// resolved state in its poll: enabling starts the 6-hour clock but fires no
+/// check by itself, and off stops new checks from starting while a check
+/// already running finishes. On failure the checkbox reverts.
+fn set_update_checks(g: &Rc<Gui>, enabled: bool) {
+    let Some(layout) = g.update_layout.as_ref() else {
+        if let Some(ui) = g.ui.upgrade() {
+            ui.set_set_checks_enabled(!enabled);
+        }
+        toast(g, "cannot locate the install directory".into(), true);
+        return;
+    };
+    match usagi::update_check::set_checks_enabled(layout, enabled) {
+        Ok(()) => {
+            if let Some(ui) = g.ui.upgrade() {
+                ui.set_set_checks_enabled(enabled);
+            }
+            toast(
+                g,
+                if enabled {
+                    "update checks enabled"
+                } else {
+                    "update checks disabled"
+                }
+                .into(),
+                false,
+            );
+        }
+        Err(e) => {
+            if let Some(ui) = g.ui.upgrade() {
+                ui.set_set_checks_enabled(!enabled);
+            }
+            toast(g, e.to_string(), true);
+        }
+    }
+}
+
+// ------------------------------------------------- browser integration (items 1-3)
+
+/// Push the browser rows' live state into the Settings view (item 2):
+/// toggle from the HKCU host key, status tier from the journal, the
+/// registration-broken fault from the startup repair. Called at setup,
+/// after every toggle, after Save, and (throttled) from the poll while
+/// the Settings view is open. The Chrome ID field shows the stored
+/// setting, or the registered caller when the setting is empty (the
+/// user registered from the host CLI, or an earlier session did).
+fn refresh_browser_rows(g: &Rc<Gui>) {
+    let Some(ui) = g.ui.upgrade() else { return };
+    let settings = g.engine.settings();
+    let chrome_id = if settings.chrome_extension_id.is_empty() {
+        crate::browser::registered_caller_ext_id(&g.paths, "chrome").unwrap_or_default()
+    } else {
+        settings.chrome_extension_id.clone()
+    };
+    ui.set_set_chrome_extension_id(SharedString::from(chrome_id));
+    ui.set_set_browser_hint_visible(!settings.browser_hint_dismissed);
+    let broken = g.browser_broken.borrow();
+    for browser in crate::browser::BROWSERS {
+        let is_broken = broken.iter().any(|b| b == browser);
+        let state = crate::browser::row_state(&g.paths, browser, is_broken);
+        let enabled = !matches!(state.status, crate::browser::Status::NotRegistered);
+        let (tier, last_ms) = match state.status {
+            crate::browser::Status::NotRegistered => (1, 0),
+            crate::browser::Status::Registered => (2, 0),
+            crate::browser::Status::Connected { last_ms } => (3, last_ms),
+        };
+        let last_text = if last_ms > 0 {
+            util::format_timestamp(last_ms)
+        } else {
+            String::new()
+        };
+        match browser {
+            "chrome" => {
+                ui.set_set_chrome_enabled(enabled);
+                ui.set_set_chrome_status(tier);
+                ui.set_set_chrome_last_connected(SharedString::from(last_text));
+                ui.set_set_chrome_broken(state.broken);
+            }
+            _ => {
+                ui.set_set_firefox_enabled(enabled);
+                ui.set_set_firefox_status(tier);
+                ui.set_set_firefox_last_connected(SharedString::from(last_text));
+                ui.set_set_firefox_broken(state.broken);
+            }
+        }
+    }
+}
+
+/// Throttled row refresh from the 150 ms poll, only while the
+/// Settings view is open: an out-of-band register/unregister (the
+/// host CLI, another UDM copy) shows up without a restart.
+fn poll_browser_rows(g: &Rc<Gui>) {
+    let Some(ui) = g.ui.upgrade() else { return };
+    if ui.get_view() != 2 {
+        return;
+    }
+    let mut at = g.browser_refresh_at.borrow_mut();
+    if at.elapsed() < Duration::from_secs(2) {
+        return;
+    }
+    *at = Instant::now();
+    drop(at);
+    refresh_browser_rows(g);
+}
+
+/// The toggle handler (item 1), an immediate callback like
+/// checks-toggled: ON spawns the sibling udm-host.exe --register,
+/// OFF spawns --unregister, never registering inside the GUI
+/// process. Chrome needs a valid extension ID from the row's field;
+/// an empty or illegal ID leaves the toggle off and writes nothing.
+/// On a failed spawn the toggle reverts and the error is toasted.
+fn set_browser_toggle(g: &Rc<Gui>, browser: &str, enabled: bool) {
+    let Some(ui) = g.ui.upgrade() else { return };
+    let revert = |g: &Rc<Gui>, browser: &str, enabled: bool| {
+        if let Some(ui) = g.ui.upgrade() {
+            match browser {
+                "chrome" => ui.set_set_chrome_enabled(!enabled),
+                _ => ui.set_set_firefox_enabled(!enabled),
+            }
+        }
+    };
+    let ext_id = if browser == "chrome" {
+        let id = ui.get_set_chrome_extension_id().to_string();
+        if enabled && !crate::browser::valid_extension_id(&id) {
+            revert(g, browser, enabled);
+            toast(
+                g,
+                "enter a Chrome extension ID first - copy it from the extension options page"
+                    .into(),
+                true,
+            );
+            return;
+        }
+        id
+    } else {
+        crate::browser::FIREFOX_EXTENSION_ID.to_string()
+    };
+    let result = if enabled {
+        crate::browser::spawn_register(browser, &ext_id)
+    } else {
+        crate::browser::spawn_unregister(browser)
+    };
+    if let Err(e) = result {
+        revert(g, browser, enabled);
+        toast(g, e, true);
+        return;
+    }
+    // Persist the Chrome ID that just registered, so the field
+    // survives a restart even without a Save.
+    if browser == "chrome" && enabled {
+        let mut settings = g.engine.settings();
+        if settings.chrome_extension_id != ext_id {
+            settings.chrome_extension_id = ext_id;
+            if let Err(e) = g.engine.update_settings(settings) {
+                tracing::warn!(error = %e, "could not persist the Chrome extension ID");
+            }
+        }
+    }
+    apply_browser_session_effect(g);
+    refresh_browser_rows(g);
+    // Fixed strings, so the toast goes through the i18n catalog
+    // (a format!() interpolation would miss it and stay English).
+    toast(
+        g,
+        match (browser, enabled) {
+            ("chrome", true) => "Chrome handoff registered".to_string(),
+            ("chrome", false) => "Chrome handoff unregistered".to_string(),
+            (_, true) => "Firefox handoff registered".to_string(),
+            (_, false) => "Firefox handoff unregistered".to_string(),
+        },
+        false,
+    );
+}
+
+/// Running-session effect (item 1), exactly this mechanism: keep both
+/// boot conditions. After a successful register, if the lease is
+/// Some(n>0) and no coordinator is up, start it the same way startup
+/// does (never a second pipe, never rotate the pairing secret outside
+/// start). If a coordinator is up, hand it the freshly read caller
+/// list; pairing refuses a removed caller on the next connection. A
+/// stored null lease stays fully inert: the key is written, the pipe
+/// does not start, and the row promises no live connection.
+fn apply_browser_session_effect(g: &Rc<Gui>) {
+    let lease = match g.engine.settings().handoff_lease_secs {
+        Some(n) if n > 0 => n,
+        _ => return,
+    };
+    let _ = lease;
+    if g.handoff.borrow().is_none() {
+        if let Some(coordinator) = crate::handoff_boot::start(&g.paths, g.engine.clone()) {
+            *g.handoff.borrow_mut() = Some(coordinator);
+        }
+    } else if let Some(coordinator) = g.handoff.borrow().as_ref() {
+        let callers = usagi::handoff::read_callers(&g.paths);
+        coordinator.set_allowed_callers(callers);
+    }
+}
+
+/// The one-time first-run hint: dismissing it persists the dismissal
+/// at once (it is not a Save-gated setting).
+fn dismiss_browser_hint(g: &Rc<Gui>) {
+    let mut settings = g.engine.settings();
+    settings.browser_hint_dismissed = true;
+    if let Err(e) = g.engine.update_settings(settings) {
+        toast(g, e.to_string(), true);
+        return;
+    }
+    refresh_browser_rows(g);
+}
+
+/// The manual check (the Check for Updates button): the same factored
+/// check the CLI runs, on a background thread so the UI never blocks.
+/// Unlike the automatic path it clears the offer and result at start, and
+/// its completion sets the offer from the outcome kind. A click while any
+/// check is in flight is refused by the shared single-flight guard. Both
+/// paths rewrite the same window clock when they start.
+fn start_update_check(g: &Rc<Gui>) {
+    let Some(layout) = g.update_layout.clone() else {
+        toast(g, "cannot locate the install directory".into(), true);
+        return;
+    };
+    if g.update_check_running
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+    let Some(ui) = g.ui.upgrade() else {
+        g.update_check_running.store(false, Ordering::SeqCst);
+        return;
+    };
+    g.update_schedule
+        .borrow_mut()
+        .note_check_start(Instant::now());
+    ui.set_update_check_busy(true);
+    ui.set_update_available(false);
+    ui.set_update_result(SharedString::default());
+    let weak = g.ui.clone();
+    let running = g.update_check_running.clone();
+    std::thread::spawn(move || {
+        let outcome = run_check_blocking(&layout);
+        let _ = slint::invoke_from_event_loop(move || {
+            running.store(false, Ordering::SeqCst);
+            let Some(ui) = weak.upgrade() else { return };
+            ui.set_update_check_busy(false);
+            ui.set_update_available(outcome.kind == CheckKind::Available);
+            ui.set_update_result(ui.invoke_translate(SharedString::from(outcome.notice)));
+        });
+    });
+}
+
+fn run_check_blocking(layout: &InstallLayout) -> usagi::update_check::CheckOutcome {
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            return usagi::update_check::CheckOutcome {
+                kind: CheckKind::Failed,
+                notice: format!("Update check failed: {e}"),
+            };
+        }
+    };
+    runtime.block_on(usagi::update_check::run_update_check(
+        layout,
+        now_unix,
+        || usagi::update_fetch::FetchSession::open(usagi::update_check::release_origins()?),
+    ))
+}
+
+/// Whether a verified candidate is held on this install right now. The
+/// durable probe behind both the update offer and the tray badge; it opens
+/// no socket and never stages or applies anything.
+fn held_candidate(g: &Rc<Gui>) -> bool {
+    g.update_layout
+        .as_ref()
+        .and_then(|layout| usagi::update_apply::staged_candidate(layout).ok().flatten())
+        .is_some()
+}
+
+/// Recompute the tray update badge from durable state: ON exactly when a
+/// candidate is held, OFF otherwise. Called at launch, on every check
+/// completion of any path, and after apply. Display-only — no click
+/// behaviour, no toast, no settings toggle.
+fn refresh_update_badge(g: &Rc<Gui>) {
+    let held = held_candidate(g);
+    if let Some(tray) = g.tray.borrow_mut().as_mut() {
+        tray.set_update_badge(held);
+    }
+}
+
+/// The automatic-check scheduler. It runs in the 150 ms timer callback
+/// itself, never inside `tray_poll` and never gated on the tray handle
+/// existing, so a launch with no tray still performs its startup and
+/// 6-hour checks. Each tick reads the resolved flag, observes the window
+/// clock, recomputes the badge when a check has just completed, and fires
+/// a check when the pure due rule says so.
+fn poll_update_checks(g: &Rc<Gui>) {
+    let resolved_on = g
+        .update_layout
+        .as_ref()
+        .is_some_and(|layout| usagi::update_check::checks_enabled(layout));
+    let running = g.update_check_running.load(Ordering::SeqCst);
+
+    // A check completion (running true->false) recomputes the badge from
+    // durable state. The completion closure cannot touch the tray itself
+    // (the GUI handle is not Send), so the poll detects the transition.
+    let was_running = *g.was_check_running.borrow();
+    if was_running && !running {
+        refresh_update_badge(g);
+    }
+    *g.was_check_running.borrow_mut() = running;
+
+    let now = Instant::now();
+    let due = {
+        let mut schedule = g.update_schedule.borrow_mut();
+        schedule.observe(now, resolved_on);
+        schedule.due(now, running, resolved_on)
+    };
+    if due {
+        start_automatic_check(g);
+    }
+}
+
+/// The automatic check: the same factored check and single-flight guard as
+/// the manual path, but it does NOT clear an offer or result already on
+/// screen, and on completion only an Available outcome changes the offer
+/// UI. Any other kind leaves a previously staged candidate offered (its
+/// files are still on disk). It never applies; apply stays a manual act.
+fn start_automatic_check(g: &Rc<Gui>) {
+    let Some(layout) = g.update_layout.clone() else {
+        return;
+    };
+    if g.update_check_running
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+    let Some(ui) = g.ui.upgrade() else {
+        g.update_check_running.store(false, Ordering::SeqCst);
+        return;
+    };
+    g.update_schedule
+        .borrow_mut()
+        .note_check_start(Instant::now());
+    ui.set_update_check_busy(true);
+    let weak = g.ui.clone();
+    let running = g.update_check_running.clone();
+    std::thread::spawn(move || {
+        let outcome = run_check_blocking(&layout);
+        let _ = slint::invoke_from_event_loop(move || {
+            running.store(false, Ordering::SeqCst);
+            let Some(ui) = weak.upgrade() else { return };
+            ui.set_update_check_busy(false);
+            if outcome.kind == CheckKind::Available {
+                ui.set_update_available(true);
+                ui.set_update_result(ui.invoke_translate(SharedString::from(outcome.notice)));
+            }
+        });
+    });
+}
+
+/// The explicit Apply action (design section 2.3): swap the held
+/// candidate, then relaunch into the new build. Never fetches, never
+/// opens a session. On a refused exe rename the running GUI hands the
+/// swap to the per-user helper and exits; a missing helper is reported
+/// and the GUI keeps running (startup reconciliation clears the
+/// Prepared journal on the next start, keeping the old build).
+fn apply_update(g: &Rc<Gui>) {
+    let Some(layout) = g.update_layout.as_ref() else {
+        toast(g, "cannot locate the install directory".into(), true);
+        return;
+    };
+    match usagi::update_apply::staged_candidate(layout) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            if let Some(ui) = g.ui.upgrade() {
+                ui.set_update_available(false);
+            }
+            toast(g, "no update is staged".into(), false);
+            return;
+        }
+        Err(e) => {
+            toast(g, e.to_string(), true);
+            return;
+        }
+    }
+    let trust = match apply_trust(layout) {
+        Ok(trust) => trust,
+        Err(e) => {
+            toast(g, format!("Update apply failed: {e}"), true);
+            return;
+        }
+    };
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    match usagi::update_apply::apply_staged_with_trust(layout, &trust, now_unix) {
+        Ok(journal) => {
+            tracing::info!(
+                version = %journal.new_version,
+                step = ?journal.step,
+                "update applied; relaunching into the new build"
+            );
+            // main.rs starts the new exe only after the engine has shut
+            // down, so both databases are released first. The new
+            // process's startup confirmation is the receipt.
+            g.relaunch_after_apply.store(true, Ordering::SeqCst);
+            let _ = slint::quit_event_loop();
+        }
+        Err(ApplyError::ExeRenameRefused { path, source }) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %source,
+                "exe rename refused; handing the swap to the updater helper"
+            );
+            match usagi::update_apply::spawn_helper(layout) {
+                Ok(_child) => {
+                    // The helper waits for this process to exit, completes
+                    // the swap and starts the new build itself.
+                    let _ = slint::quit_event_loop();
+                }
+                Err(ApplyError::HelperMissing(missing)) => {
+                    toast(
+                        g,
+                        format!(
+                            "Update apply failed: the updater helper is missing ({}). \
+                             Restart UDM to clear the pending swap, then apply again.",
+                            missing.display()
+                        ),
+                        true,
+                    );
+                }
+                Err(e) => toast(g, format!("Update apply failed: {e}"), true),
+            }
+        }
+        Err(e) => toast(g, format!("Update apply failed: {e}"), true),
+    }
+    // The GUI kept running (a refused or failed apply): recompute the badge
+    // from durable state, since a partial apply may have changed what is
+    // held. The success and helper paths quit and re-initialise at launch.
+    refresh_update_badge(g);
+}
+
+/// Trust for an apply without a fetch session: bootstrap from the
+/// compiled pin, then load any rotation/revocation state already stored
+/// on this install (envelope W2 item 6). Opens no socket.
+fn apply_trust(layout: &InstallLayout) -> Result<ClientTrust, usagi::update_records::RecordError> {
+    let root = TrustRoot::pinned();
+    let identity = Ed25519Identity::from_pinning(root.public_key, &root.pin)?;
+    let mut trust = ClientTrust::bootstrap(identity)?;
+    trust.load_into(&layout.updater_trust_file())?;
+    Ok(trust)
 }
 
 /// OS dark-mode preference for the Auto theme (Windows: the per-user
@@ -1713,7 +2348,7 @@ fn read_appearance(ui: &AppWindow, settings: &mut Settings) {
         .to_string();
 }
 
-pub fn push_settings_to_ui(ui: &AppWindow, s: &Settings) {
+pub fn push_settings_to_ui(ui: &AppWindow, s: &Settings, update_layout: Option<&InstallLayout>) {
     ui.set_theme_pref(match s.theme.as_str() {
         "light" => 1,
         "auto" => 2,
@@ -1756,6 +2391,12 @@ pub fn push_settings_to_ui(ui: &AppWindow, s: &Settings) {
     // and the location warning follows the running executable's folder.
     ui.set_set_start_with_windows(crate::startup::is_enabled());
     ui.set_set_startup_location_warn(crate::startup::exe_in_temp_or_downloads());
+    // Wiring W2: the checks checkbox mirrors the flag file as it actually
+    // is (like the startup toggle mirrors the registry). Save re-mirrors
+    // it here but never writes it: the flag is not a Settings field.
+    ui.set_set_checks_enabled(
+        update_layout.is_some_and(|layout| usagi::update_check::checks_enabled(layout)),
+    );
     ui.set_set_user_agent(SharedString::from(s.user_agent.clone()));
     ui.set_set_log_index(match s.log_level.as_str() {
         "off" => 0,
@@ -2033,5 +2674,136 @@ mod s2_render_tests {
         assert!(detail.transport_label.contains("IPv4: H3/H2 (ready)"));
         assert!(detail.transport_label.contains("IPv6: H2 (active)"));
         ui.hide().unwrap();
+    }
+}
+
+/// The automatic-check due rule and window clock, as pure logic. These run
+/// on every platform (no GUI, no tray, no network): the scheduler's whole
+/// decision is `update_check_due` plus the three clock-rewrite events.
+#[cfg(test)]
+mod update_schedule_tests {
+    use super::*;
+
+    const SIX_H: Duration = Duration::from_secs(6 * 60 * 60);
+    const ONE_H: Duration = Duration::from_secs(60 * 60);
+    const ONE_S: Duration = Duration::from_secs(1);
+
+    #[test]
+    fn off_is_never_due() {
+        let t0 = Instant::now();
+        // Even with the startup flag owed and a long window elapsed, OFF is
+        // never due.
+        assert!(!update_check_due(t0, t0, true, false, false));
+        assert!(!update_check_due(t0 + SIX_H * 2, t0, true, false, false));
+        assert!(!update_check_due(t0 + SIX_H * 2, t0, false, false, false));
+        // Arming while OFF never owes a startup check.
+        let mut s = UpdateSchedule::new(t0);
+        s.observe(t0, false);
+        assert!(!s.startup_pending);
+        assert!(!s.due(t0 + SIX_H * 2, false, false));
+    }
+
+    #[test]
+    fn on_at_launch_due_exactly_once_at_ready() {
+        let t0 = Instant::now();
+        let mut s = UpdateSchedule::new(t0);
+        // The first ready evaluation with checks ON owes the startup check.
+        s.observe(t0, true);
+        assert!(s.startup_pending);
+        assert!(s.due(t0, false, true));
+        // The start consumes the flag and rewrites the clock.
+        s.note_check_start(t0);
+        assert!(!s.startup_pending);
+        assert!(!s.due(t0, false, true));
+        // No second startup firing inside the window.
+        assert!(!s.due(t0 + ONE_H, false, true));
+        assert!(!s.due(t0 + SIX_H - ONE_S, false, true));
+    }
+
+    #[test]
+    fn enable_after_off_launch_not_due_until_enable_plus_six_hours() {
+        let t0 = Instant::now();
+        let mut s = UpdateSchedule::new(t0);
+        s.observe(t0, false); // launch OFF
+        assert!(!s.startup_pending);
+        let t1 = t0 + ONE_H; // enable an hour later
+        s.observe(t1, true); // OFF->ON flip rewrites the clock to t1
+        assert!(!s.startup_pending); // enabling never fires a check by itself
+        assert!(!s.due(t1, false, true));
+        assert!(!s.due(t1 + SIX_H - ONE_S, false, true));
+        assert!(s.due(t1 + SIX_H, false, true));
+    }
+
+    #[test]
+    fn manual_start_resets_clock_and_clears_startup_pending() {
+        let t0 = Instant::now();
+        let mut s = UpdateSchedule::new(t0);
+        s.observe(t0, true);
+        assert!(s.startup_pending);
+        // A manual start before the startup tick consumes the flag and
+        // resets the window clock to the start instant.
+        let tm = t0 + Duration::from_secs(120);
+        s.note_check_start(tm);
+        assert!(!s.startup_pending);
+        assert_eq!(s.clock_base, tm);
+        assert!(!s.due(tm + SIX_H - ONE_S, false, true));
+        assert!(s.due(tm + SIX_H, false, true));
+    }
+
+    #[test]
+    fn running_is_never_due() {
+        let t0 = Instant::now();
+        assert!(!update_check_due(t0, t0, true, true, true));
+        assert!(!update_check_due(t0 + SIX_H * 2, t0, true, true, true));
+        assert!(!update_check_due(t0 + SIX_H * 2, t0, false, true, true));
+    }
+
+    #[test]
+    fn at_or_over_six_hours_since_clock_base_is_due() {
+        let t0 = Instant::now();
+        assert!(!update_check_due(
+            t0 + SIX_H - ONE_S,
+            t0,
+            false,
+            false,
+            true
+        ));
+        assert!(update_check_due(t0 + SIX_H, t0, false, false, true));
+        assert!(update_check_due(t0 + SIX_H + ONE_S, t0, false, false, true));
+    }
+
+    /// Rev.3 trace (i): start OFF at T0, flip ON at T1 at least 6h after T0.
+    /// The flip rewrites the clock, so it is NOT due at T1 and due at T1+6h.
+    #[test]
+    fn rev3_trace_i_off_then_on_after_six_hours() {
+        let t0 = Instant::now();
+        let mut s = UpdateSchedule::new(t0);
+        s.observe(t0, false);
+        let t1 = t0 + SIX_H + ONE_H;
+        s.observe(t1, true);
+        assert!(!s.due(t1, false, true), "not due at the enable instant");
+        assert!(
+            s.due(t1 + SIX_H, false, true),
+            "due a full window after enable"
+        );
+    }
+
+    /// Rev.3 trace (ii): start OFF at T0, flip ON at T1 under 6h after T0.
+    /// Due at T1+6h, NOT at T0+6h: the older window must not resurrect.
+    #[test]
+    fn rev3_trace_ii_off_then_on_before_six_hours() {
+        let t0 = Instant::now();
+        let mut s = UpdateSchedule::new(t0);
+        s.observe(t0, false);
+        let t1 = t0 + ONE_H;
+        s.observe(t1, true);
+        assert!(
+            !s.due(t0 + SIX_H, false, true),
+            "the old T0 window must not resurrect"
+        );
+        assert!(
+            s.due(t1 + SIX_H, false, true),
+            "due a full window after enable"
+        );
     }
 }

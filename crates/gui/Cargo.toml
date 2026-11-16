@@ -2,6 +2,7 @@
 name = "udm-gui"
 version = "0.1.0"
 edition = "2021"
+license.workspace = true
 description = "udm desktop front-end (Slint)"
 publish = false
 
@@ -24,6 +25,9 @@ rfd = { version = "0.16.1", default-features = false, features = [
 ] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "ansi"] }
+# The manual update check runs on a background thread with a small
+# current-thread runtime (Wiring W2). No other GUI code uses tokio.
+tokio = { workspace = true }
 
 # URL parsing for display-name fallbacks (already in the lock file as a
 # transitive dependency of usagi).

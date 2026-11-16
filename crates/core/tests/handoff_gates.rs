@@ -609,3 +609,104 @@ fn recovery_entries_list_exactly_the_pending_associations() {
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].tx, "tx-lost");
 }
+
+/// Browser integration item 1: a running-session register/unregister
+/// replaces the allow-list on the live coordinator, and pairing
+/// (check_caller) reads the replaced list from the coordinator mutex.
+#[test]
+fn set_allowed_callers_replaces_the_live_allow_list() {
+    let engine = Arc::new(FakeEngine::default());
+    let clock = Arc::new(ManualClock::new());
+    let c = coordinator(engine, clock, 60_000);
+    // ALICE and BOB start allowed (see `coordinator` above).
+    assert!(c.caller_allowed(ALICE));
+    assert!(c.caller_allowed(BOB));
+    assert!(c.prepare(ALICE, "tx-1", intent()).is_ok());
+
+    // Unregister ALICE: the GUI hands the freshly read callers.json.
+    c.set_allowed_callers(vec![BOB.to_string()]);
+    assert!(!c.caller_allowed(ALICE));
+    assert!(c.caller_allowed(BOB));
+    assert!(c.prepare(ALICE, "tx-2", intent()).is_err());
+    assert!(c.prepare(BOB, "tx-3", intent()).is_ok());
+
+    // Register ALICE again: the list is replaced, not appended to a
+    // stale snapshot, and the previously prepared record is unaffected.
+    c.set_allowed_callers(vec![ALICE.to_string(), BOB.to_string()]);
+    assert!(c.caller_allowed(ALICE));
+    assert!(c.prepare(ALICE, "tx-4", intent()).is_ok());
+}
+
+/// Browser integration item 2: the status light reads the newest
+/// journal row for one browser directly (no coordinator involved).
+#[test]
+fn last_connection_ms_reads_the_newest_row_for_one_browser() {
+    let dir = std::env::temp_dir().join(format!("udm-handoff-journal-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let paths = Paths {
+        root: dir.clone(),
+        db_file: dir.join("udm.redb"),
+        log_file: dir.join("udm.log"),
+        temp_dir: dir.join("tmp"),
+        default_download_dir: dir.clone(),
+        portable: true,
+        exe_dir: None,
+    };
+    let _ = std::fs::create_dir_all(dir.join("handoff"));
+    std::fs::write(
+        dir.join("handoff").join("records.json"),
+        r#"[{"tx":"a","caller":"chrome:ext-a","intent":null,"fingerprint":null,"state":"prepared","created_at_ms":1000,"expires_at_ms":null,"transition_at_ms":1000,"disposition":"unresolved","engine_task_id":null,"association_pending":false,"outcome":null},{"tx":"b","caller":"chrome:ext-a","intent":null,"fingerprint":null,"state":"prepared","created_at_ms":3000,"expires_at_ms":null,"transition_at_ms":3000,"disposition":"unresolved","engine_task_id":null,"association_pending":false,"outcome":null},{"tx":"c","caller":"firefox:ext-b","intent":null,"fingerprint":null,"state":"prepared","created_at_ms":2000,"expires_at_ms":null,"transition_at_ms":2000,"disposition":"unresolved","engine_task_id":null,"association_pending":false,"outcome":null}]"#,
+    )
+    .unwrap();
+    assert_eq!(
+        usagi::handoff::last_connection_ms(&paths, "chrome"),
+        Some(3000)
+    );
+    assert_eq!(
+        usagi::handoff::last_connection_ms(&paths, "firefox"),
+        Some(2000)
+    );
+    assert_eq!(usagi::handoff::last_connection_ms(&paths, "edge"), None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Browser integration item 3: the relocation repair repoints the
+/// manifest `path` field at the sibling host exe; a missing manifest
+/// fails so the caller leaves the registry key alone.
+#[test]
+fn repoint_manifest_sets_the_path_field_and_fails_when_absent() {
+    let dir = std::env::temp_dir().join(format!("udm-handoff-manifest-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let paths = Paths {
+        root: dir.clone(),
+        db_file: dir.join("udm.redb"),
+        log_file: dir.join("udm.log"),
+        temp_dir: dir.join("tmp"),
+        default_download_dir: dir.clone(),
+        portable: true,
+        exe_dir: None,
+    };
+    let _ = std::fs::create_dir_all(dir.join("handoff"));
+    assert!(usagi::handoff::repoint_manifest(
+        &paths,
+        "chrome",
+        std::path::Path::new(r"C:\udm\udm-host.exe")
+    )
+    .is_err());
+    std::fs::write(
+        dir.join("handoff").join("host-manifest-chrome.json"),
+        r#"{"name":"pw.cino.udm.handoff.chrome","description":"UDM browser handoff host","path":"D:\\old\\udm-host.exe","type":"stdio","allowed_origins":["chrome-extension://abc/"]}"#,
+    )
+    .unwrap();
+    let out = usagi::handoff::repoint_manifest(
+        &paths,
+        "chrome",
+        std::path::Path::new(r"C:\udm\udm-host.exe"),
+    )
+    .unwrap();
+    assert_eq!(out, dir.join("handoff").join("host-manifest-chrome.json"));
+    let text = std::fs::read_to_string(&out).unwrap();
+    assert!(text.contains(r#""path": "C:\\udm\\udm-host.exe""#));
+    assert!(text.contains("chrome-extension://abc/"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

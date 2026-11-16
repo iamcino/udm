@@ -266,7 +266,7 @@ function createHandoffFlow(client, fx) {
   return { handoff };
 }
 
-const api = {
+const handoffApi = {
   WIRE_VERSION,
   HOST_NAMES,
   newTransactionId,
@@ -275,5 +275,5 @@ const api = {
   createHandoffClient,
   createHandoffFlow,
 };
-if (typeof module !== "undefined" && module.exports) module.exports = api;
-if (typeof globalThis !== "undefined") globalThis.UdmHandoff = api;
+if (typeof module !== "undefined" && module.exports) module.exports = handoffApi;
+if (typeof globalThis !== "undefined") globalThis.UdmHandoff = handoffApi;

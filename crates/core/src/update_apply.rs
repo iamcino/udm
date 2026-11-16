@@ -22,20 +22,23 @@
 //! (`updater_swap.v1`) in the install's `udm.redb`, the same store the
 //! PR 2 finalize journal pattern uses: a durable intent record committed
 //! before the operation, native renames, a completion commit, and
-//! startup recovery reconciliation. The updater opens that file
-//! standalone; [`recover_updater`] runs at every startup before the UI
-//! launches and before the engine opens its store. The journal records
-//! the new build version, the per-file SHA-256 hashes, and the target
-//! paths. It does not record an epoch, a previous-build location, or a
-//! what-was-where pair.
+//! caller-invoked recovery reconciliation. The updater opens that file
+//! standalone. Recovery is caller-invoked: [`recover_updater`]
+//! reconciles the journal when a caller runs it; no startup path calls
+//! it in the current build, and the update wiring that will call it is
+//! a separate later package. The journal records the new build version,
+//! the per-file SHA-256 hashes, and the target paths. It does not
+//! record an epoch, a previous-build location, or a what-was-where
+//! pair.
 //!
 //! Phase order: `Step::Prepared` (committed durably before any rename),
 //! `Step::OldRenamed` (the running exe is renamed to `.old`, the new exe
 //! not yet in place), `Step::NewStaged` (all new files in place),
-//! `Step::Completed` (the new build has started successfully at least
-//! once: it launched, reported its version, and reached ready state).
-//! Only at `Step::Completed` are the `.old` files reclaimed, so exactly
-//! one previous build is retained, and never two.
+//! `Step::Completed` (recorded by [`confirm_successful_start`] once it
+//! verifies the live hashes of the new build). That same call reclaims
+//! the `.old` files and then clears the journal, so no `Completed` row
+//! persists. Exactly one previous build is retained until that call,
+//! and never two.
 //!
 //! If renaming the running exe is refused (for example a file lock held
 //! by antivirus), [`apply_staged`] returns
@@ -58,6 +61,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::update_fetch::VerifiedPayload;
+use crate::update_manifest::SemVer;
+use crate::update_pin;
 use crate::update_records::{ClientTrust, StagingRefusal};
 
 /// Journal table in the install's `udm.redb`: one swap transaction.
@@ -237,6 +242,17 @@ pub enum ApplyError {
     /// trust state. The installed build is left unchanged.
     #[error("{0}; the installed build is unchanged")]
     StagingRefused(StagingRefusal),
+    /// The staged candidate's version is below the compiled minimum
+    /// accepted version (or is not a parseable semantic version, so it
+    /// cannot prove it meets the floor). The installed build is left
+    /// unchanged; nothing was staged.
+    #[error("candidate version {version} is below the minimum accepted version {floor}; the installed build is unchanged")]
+    BelowVersionFloor {
+        /// The candidate version that was refused.
+        version: String,
+        /// The compiled minimum accepted version.
+        floor: String,
+    },
     /// A signed candidate has no readable trust state to check.
     #[error("updater trust state is missing or unusable: {0}; the installed build is unchanged")]
     TrustState(String),
@@ -565,9 +581,9 @@ pub fn stage(
 /// transient `PermissionDenied` hits it: a real-time scanner on
 /// Windows can hold a freshly written executable without share-read,
 /// so the opens that follow the write can fail until the scanner
-/// releases the file. The v1 window (5 attempts, about 185 ms) did
-/// not survive the hold on garen-pc: the same 13 update_apply tests
-/// still failed there with the denial naming the staged destination.
+/// releases the file. A short retry window (5 attempts, about 185 ms)
+/// can fail to outlast that hold, with the denial naming the staged
+/// destination.
 const STAGE_COPY_ATTEMPTS: u32 = 8;
 /// Backoff between copy attempts, in milliseconds. Bounded: about
 /// 1.6 s worst case per file. Only a denied file burns budget; on
@@ -578,10 +594,10 @@ const STAGE_COPY_BACKOFF_MS: [u64; 7] = [10, 25, 50, 100, 200, 400, 800];
 /// verification. A transient sharing denial can still happen while a
 /// scanner has the new file open. This half never deletes or rewrites:
 /// the staged bytes are already on disk, so it re-opens the same file.
-/// The garen-pc failure was not that hold. `sync_file` opened the
-/// staged file read-only, and Windows `FlushFileBuffers` rejects that
-/// handle with `ERROR_ACCESS_DENIED` on every attempt, so this window
-/// ran out deterministically. The sync open is read-write now.
+/// Not every denial is a scanner hold: Windows `FlushFileBuffers`
+/// rejects a read-only handle with `ERROR_ACCESS_DENIED` on every
+/// attempt, so a read-only sync open runs this window out
+/// deterministically. The sync open is read-write now.
 const STAGE_FINISH_ATTEMPTS: u32 = 8;
 /// Backoff between finish attempts, in milliseconds. Bounded: about
 /// 3.2 s worst case per file.
@@ -707,6 +723,27 @@ fn copy_file_split(source: &Path, destination: &Path) -> Result<(), ApplyError> 
     Ok(())
 }
 
+/// Refuse a staged candidate whose version does not meet the
+/// compiled minimum accepted version. A version that cannot be
+/// parsed cannot prove it meets the floor, so it is refused the
+/// same way; an unparseable compiled floor refuses everything,
+/// mirroring the pin self-consistency discipline.
+fn check_version_floor(version: &str) -> Result<(), ApplyError> {
+    let floor = update_pin::min_accepted_version();
+    let meets_floor = match (SemVer::parse(version), SemVer::parse(floor)) {
+        (Ok(candidate), Ok(floor)) => candidate >= floor,
+        _ => false,
+    };
+    if meets_floor {
+        Ok(())
+    } else {
+        Err(ApplyError::BelowVersionFloor {
+            version: version.to_owned(),
+            floor: floor.to_owned(),
+        })
+    }
+}
+
 /// Stage verified files held on disk. This is the staging core;
 /// [`stage`] adapts the unit U3 handoff to it. An unverified payload
 /// never reaches staging: every source file must match the size and
@@ -727,6 +764,12 @@ fn stage_files_with(
     manifest_epoch: u64,
     signature_key_ids: &[String],
 ) -> Result<StagedCandidate, ApplyError> {
+    // Defense in depth: re-check the candidate version against the
+    // compiled minimum accepted version before the first filesystem
+    // mutation. Manifest verification already refuses below-floor
+    // candidates, so a signed candidate cannot reach this check; the
+    // funnel also covers the public unsigned `stage_files` entry.
+    check_version_floor(version)?;
     if current_journal(layout)?.is_some() {
         return Err(ApplyError::SwapInFlight);
     }

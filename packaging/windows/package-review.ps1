@@ -10,7 +10,7 @@ try {
     $commit = (& git rev-parse HEAD).Trim()
     if ($LASTEXITCODE -ne 0) { throw 'Cannot identify source commit' }
     if (& git status --porcelain) { throw 'Commit source changes before packaging' }
-    $name = "udm-0.1.0-review-$($commit.Substring(0, 12))"
+    $name = "udm-0.2.0-review-$($commit.Substring(0, 12))"
     $folder = Join-Path $OutputDirectory $name
     $zip = "$folder-portable.zip"
     if ((Test-Path -LiteralPath $folder) -or (Test-Path -LiteralPath $zip)) {

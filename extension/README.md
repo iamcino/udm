@@ -4,9 +4,9 @@
 Firefox extension uses a local Native Messaging host, `udm-host`, and a
 durable prepare/commit protocol to transfer download ownership.
 
-This guide describes `241f550`. Setup is currently manual: the regular
-installer and portable ZIP do not include the host or extension. The
-extension passes a GET URL and hints, not cookies or a browser login session.
+This guide describes `241f550`. The installer and portable ZIP include
+`udm-host.exe` beside the app; the extension itself is still loaded
+manually (there is no store listing yet). The extension passes a GET URL and hints, not cookies or a browser login session.
 Some signed-in or session-dependent downloads therefore cannot work in UDM.
 
 ## Before you start
@@ -28,6 +28,11 @@ same `UDM_DATA_DIR` environment. A per-user app and a host in an unrelated
 portable directory will otherwise look for different pairing files.
 
 ## Load and register one browser
+
+The usual way to register is UDM Settings → Browser integration: turn a
+browser's toggle on (Chrome asks for its extension ID; Firefox uses its
+fixed ID) and the status light shows the result. The steps below are the
+manual equivalent, using the host from the installed or portable folder.
 
 1. **Load the extension.** In Chrome, open `chrome://extensions`, enable
    Developer mode, choose **Load unpacked** and select this `extension`
@@ -52,18 +57,26 @@ portable directory will otherwise look for different pairing files.
    .\udm-host.exe --register firefox udm-handoff@cino.pw
    ```
 
-   Replace `<extension-id>` with the Options value. These are alternatives
-   for a single host location; see the identity limitation below before
-   registering both browsers.
-4. **Restart UDM after registration.** Its coordinator reads the caller
-   list on startup. Keep UDM running while handing downloads to it.
+   Replace `<extension-id>` with the Options value. Registering both
+   browsers beside the same host is supported: browser launches are
+   independent (each browser is checked against its own manifest); the
+   single `udm-host.caller` sidecar is the bare-launch identity only.
+4. **No restart needed.** After a successful register, UDM starts the
+   coordinator when the handoff lease is positive and none is up, and
+   caller changes apply to the running coordinator at once. Turning a
+   toggle off refuses the next connection at pairing. Keep UDM running
+   while handing downloads to it.
 5. **Try a public direct file link.** Check both UDM's task list and the
    extension popup's recent outcomes.
 
 No administrator prompt or service is needed. Registration writes a browser
 host manifest under `<data>\handoff\`, its HKCU Native Messaging host key,
 the caller allow-list, and `udm-host.caller` beside the executable. It does
-not happen silently at app start. Moving the host requires re-registration.
+not happen silently at app start. Moving the host does not require
+re-registration: starting the GUI repairs a moved portable folder by
+repointing the HKCU value and the manifest path at the current host
+location. Re-toggle a browser only if its row reports registration-broken,
+which means the repair could not place the executable or the manifest.
 
 Fresh settings already have a **60-second** handoff lease. A positive lease
 and a nonempty registered caller list are both required to start the
@@ -136,17 +149,18 @@ the GUI lists pending committed associations, not every expired prepared
 transaction. Those rows have no task actions. There is no automatic retry
 or user-facing recovery workflow for every outcome at this revision.
 
-**One identity sidecar per host directory:** registration stores a single
-`udm-host.caller`. Registering Chrome then Firefox beside the same host
-overwrites that identity; the earlier registration cannot be assumed to
-retain its original caller. Use one browser per host location. Testing
-both requires separate host directories/sidecars and a shared, explicit
-`UDM_DATA_DIR` visible to the browser-launched hosts and UDM. Do not treat
-simultaneous registration beside one executable as isolated browser identities.
+**Chrome and Firefox beside one exe are independent:** a browser launch
+is checked against that browser's own host manifest
+(`<data>\handoff\host-manifest-<browser>.json`), never against the shared
+sidecar. Registering both browsers beside the same host is supported. The
+single `udm-host.caller` beside the executable is the bare-launch identity
+only: it names the most recently registered browser, and a bare launch (no
+browser) uses it. It does not limit browser launches.
 
 ## Disable or remove the integration
 
-Turn off capture first, then run the matching command from the registered
+Turn off capture first, then turn the browser's toggle off in Settings →
+Browser integration, or run the matching command from the registered
 host's directory using the same data root:
 
 ```powershell
@@ -157,9 +171,11 @@ host's directory using the same data root:
 
 Unregistration removes that browser's HKCU key and caller-list entries; it
 removes the local sidecar if it names that browser. It does not erase the
-transaction journal, host log or all generated manifest files. Restart UDM
-to reload caller availability, then disable/remove the extension in the
-browser. The current app uninstaller does not perform this cleanup for you.
+transaction journal, host log or all generated manifest files. No restart
+is needed: the change applies at pairing, so the next connection from that
+browser is refused. Then disable/remove the extension in the browser. The
+same cleanup happens for both browsers when you run the app uninstaller;
+the Settings toggle does the same per browser.
 
 ## Privacy
 

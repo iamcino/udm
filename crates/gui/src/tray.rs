@@ -79,6 +79,7 @@ mod imp {
         visible: bool,
         vi: bool,
         summary_cache: String,
+        update_badge: bool,
     }
 
     const ID_SUMMARY_TOTAL: &str = "udm.tray.summary_total";
@@ -161,6 +162,7 @@ mod imp {
                 visible: true,
                 vi,
                 summary_cache: String::new(),
+                update_badge: false,
             })
         }
 
@@ -221,6 +223,22 @@ mod imp {
                 .set_tooltip(Some(tooltip.unwrap_or(DEFAULT_TOOLTIP)));
         }
 
+        /// Swap the tray icon between the plain art and the green up-arrow
+        /// variant that signals a held update candidate. Display-only: the
+        /// badge is a pure function of durable state, recomputed by the GUI
+        /// at launch, on every check completion and after apply. Identical
+        /// state is a no-op, so callers may invoke it on every poll tick.
+        pub fn set_update_badge(&mut self, on: bool) {
+            if on == self.update_badge {
+                return;
+            }
+            let icon = if on { load_icon_update() } else { load_icon() };
+            let Some(icon) = icon else { return };
+            if self._icon.set_icon(Some(icon)).is_ok() {
+                self.update_badge = on;
+            }
+        }
+
         pub fn is_visible(&self) -> bool {
             self.visible
         }
@@ -257,13 +275,22 @@ mod imp {
         (area.right - width - 12, area.bottom - height - 12)
     }
 
-    fn load_icon() -> Option<Icon> {
-        const PNG: &[u8] = include_bytes!("../assets/tray/tray-32.png");
-        let img = image::load_from_memory_with_format(PNG, image::ImageFormat::Png)
+    fn icon_from_png(png: &[u8]) -> Option<Icon> {
+        let img = image::load_from_memory_with_format(png, image::ImageFormat::Png)
             .ok()?
             .into_rgba8();
         let (width, height) = (img.width(), img.height());
         Icon::from_rgba(img.into_raw(), width, height).ok()
+    }
+
+    fn load_icon() -> Option<Icon> {
+        icon_from_png(include_bytes!("../assets/tray/tray-32.png"))
+    }
+
+    /// The same 32 px art with a bright green up-arrow badge at the
+    /// bottom-right, shown while a verified update candidate is held.
+    fn load_icon_update() -> Option<Icon> {
+        icon_from_png(include_bytes!("../assets/tray/tray-32-update.png"))
     }
 }
 
@@ -289,6 +316,8 @@ mod imp {
         pub fn set_visible(&mut self, _visible: bool) {}
 
         pub fn set_summary(&mut self, _total: &str, _files: &[String], _tooltip: Option<&str>) {}
+
+        pub fn set_update_badge(&mut self, _on: bool) {}
     }
 
     pub fn work_area_bottom_right(_width: i32, _height: i32) -> (i32, i32) {

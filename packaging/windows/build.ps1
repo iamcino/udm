@@ -3,6 +3,7 @@
 # Produces:
 #   dist\udm.exe                     (GUI, manifest embedded, asInvoker)
 #   dist\udm-cli.exe                 (headless engine)
+#   dist\udm-host.exe                (browser Native Messaging host)
 #   dist\udm-<version>-setup.exe     (per-user NSIS installer)
 #   dist\udm-<version>-portable.zip  (drop-anywhere folder, portable mode)
 #
@@ -16,7 +17,7 @@ param(
     # the .slint sources at build time (saves ~2 GB of RAM at the cost of one
     # manual regeneration step - see packaging/regenerate-slint.sh).
     [switch]$NoSlintCompile,
-    # Sign udm.exe, udm-cli.exe and the installer with the pinned UDM certificate
+    # Sign udm.exe, udm-cli.exe, udm-host.exe and the installer with the pinned UDM certificate
     # (tools\signing\sign.ps1) before they are packaged: the certificate in
     # CurrentUser\My, or -PfxPath with UDM_SIGN_PFX_PASSWORD set.
     [switch]$Sign,
@@ -57,16 +58,17 @@ if ($NoSlintCompile) { $featureArgs += "--no-default-features" }
 
 Write-Host "==> cargo build ($Profile)"
 if ($Profile -eq "release") {
-    cargo build --release @featureArgs -p udm-gui -p udm-cli
+    cargo build --release @featureArgs -p udm-gui -p udm-cli -p udm-host
     $bin = Join-Path $root "target\release"
 } else {
-    cargo build @featureArgs -p udm-gui -p udm-cli
+    cargo build @featureArgs -p udm-gui -p udm-cli -p udm-host
     $bin = Join-Path $root "target\debug"
 }
 if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
 
 Copy-Item (Join-Path $bin "udm.exe")     (Join-Path $dist "udm.exe")     -Force
 Copy-Item (Join-Path $bin "udm-cli.exe") (Join-Path $dist "udm-cli.exe") -Force
+Copy-Item (Join-Path $bin "udm-host.exe") (Join-Path $dist "udm-host.exe") -Force
 Copy-Item (Join-Path $root "LICENSE")      (Join-Path $dist "LICENSE.txt")   -Force
 Copy-Item (Join-Path $root "docs\PRIVACY.md") (Join-Path $dist "PRIVACY.md") -Force
 Copy-Item (Join-Path $root "crates\gui\vendor\cino-ui\LICENSE") (Join-Path $dist "CINO-UI-LICENSE.txt") -Force
@@ -81,6 +83,7 @@ if ($Sign) {
     Write-Host "==> signing executables"
     Sign-File (Join-Path $dist "udm.exe")
     Sign-File (Join-Path $dist "udm-cli.exe")
+    Sign-File (Join-Path $dist "udm-host.exe")
 }
 
 if (-not $SkipInstaller) {
@@ -101,6 +104,7 @@ Remove-Item -Recurse -Force $portable -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $portable | Out-Null
 Copy-Item (Join-Path $dist "udm.exe")     $portable
 Copy-Item (Join-Path $dist "udm-cli.exe") $portable
+Copy-Item (Join-Path $dist "udm-host.exe") $portable
 Copy-Item (Join-Path $dist "LICENSE.txt")   $portable
 Copy-Item (Join-Path $dist "PRIVACY.md")    $portable
 Copy-Item (Join-Path $dist "CINO-UI-LICENSE.txt") $portable

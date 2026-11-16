@@ -444,6 +444,12 @@ impl std::fmt::Debug for Coordinator {
 struct Inner {
     records: Vec<HandoffRecord>,
     store: Box<dyn HandoffStore>,
+    /// Authenticated caller identities the transport may present
+    /// (design handoff section 3). Lives under this mutex so a
+    /// running-session register/unregister can replace the list
+    /// while the pipe is serving: pairing and check_caller read it
+    /// from here, never from a stale snapshot.
+    allowed_callers: Vec<String>,
 }
 
 /// The single coordinator for one user/data-directory instance
@@ -455,7 +461,6 @@ pub struct Coordinator {
     engine: Arc<dyn EnginePort>,
     clock: Arc<dyn HandoffClock>,
     lease_ms: i64,
-    allowed_callers: Vec<String>,
 }
 
 impl Coordinator {
@@ -469,18 +474,22 @@ impl Coordinator {
     ) -> Result<Coordinator> {
         let records = store.load()?;
         let coordinator = Coordinator {
-            inner: Mutex::new(Inner { records, store }),
+            inner: Mutex::new(Inner {
+                records,
+                store,
+                allowed_callers: config.allowed_callers,
+            }),
             engine,
             clock,
             lease_ms: i64::try_from(config.lease.as_millis()).unwrap_or(i64::MAX),
-            allowed_callers: config.allowed_callers,
         };
         coordinator.recover();
         Ok(coordinator)
     }
 
     fn check_caller(&self, caller: &str) -> Result<()> {
-        if self.allowed_callers.iter().any(|c| c == caller) {
+        let inner = self.inner.lock().expect("handoff lock poisoned");
+        if inner.allowed_callers.iter().any(|c| c == caller) {
             Ok(())
         } else {
             Err(Error::Other(format!(
@@ -801,7 +810,19 @@ impl Coordinator {
     /// transport checks this during the pairing handshake; a request
     /// payload never carries a caller (freeze section 6).
     pub fn caller_allowed(&self, caller: &str) -> bool {
-        self.allowed_callers.iter().any(|c| c == caller)
+        let inner = self.inner.lock().expect("handoff lock poisoned");
+        inner.allowed_callers.iter().any(|c| c == caller)
+    }
+
+    /// Replace the allow-list on a live coordinator (browser
+    /// integration item 1): after a register/unregister while the
+    /// pipe is serving, the GUI hands the freshly read callers.json
+    /// list here; pairing on the next connection refuses any caller
+    /// no longer listed. The list is the durable callers.json
+    /// content, so a coordinator restart restores the same set.
+    pub fn set_allowed_callers(&self, callers: Vec<String>) {
+        let mut inner = self.inner.lock().expect("handoff lock poisoned");
+        inner.allowed_callers = callers;
     }
 
     /// The transactions a user must be shown as needing recovery: the
@@ -901,4 +922,47 @@ pub fn read_callers(paths: &crate::Paths) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Newest journal `created_at_ms` for any caller of one browser
+/// (browser integration item 2, tier 3): the status light reads the
+/// journal file directly, with no coordinator dependency and no
+/// host-process probe. `None` means no journal row for the browser
+/// (tier 2 when the registry key exists). A missing or malformed
+/// journal is also `None`, never an error.
+pub fn last_connection_ms(paths: &crate::Paths, browser: &str) -> Option<i64> {
+    let mut store = FileStore::new(FileStore::journal_path(paths));
+    let records = store.load().ok()?;
+    let prefix = format!("{browser}:");
+    records
+        .iter()
+        .filter(|r| r.caller.starts_with(&prefix))
+        .map(|r| r.created_at_ms)
+        .max()
+}
+
+/// Repoint one browser host manifest at the sibling `udm-host.exe`
+/// (browser integration item 3, portable relocation repair): set the
+/// manifest's `path` field to `exe_path` and write it back. The
+/// caller then repoints the HKCU key value at the manifest path.
+/// Fails when the manifest is missing or malformed, so the caller
+/// leaves the key alone and marks the row registration-broken.
+pub fn repoint_manifest(
+    paths: &crate::Paths,
+    browser: &str,
+    exe_path: &std::path::Path,
+) -> Result<std::path::PathBuf> {
+    let manifest_path = paths
+        .root
+        .join("handoff")
+        .join(format!("host-manifest-{browser}.json"));
+    let text =
+        std::fs::read_to_string(&manifest_path).map_err(|e| Error::io(manifest_path.clone(), e))?;
+    let mut value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| Error::Other(format!("handoff: manifest unreadable: {e}")))?;
+    value["path"] = serde_json::Value::String(exe_path.to_string_lossy().to_string());
+    let out = serde_json::to_string_pretty(&value)
+        .map_err(|e| Error::Other(format!("handoff: manifest encode failed: {e}")))?;
+    std::fs::write(&manifest_path, out).map_err(|e| Error::io(manifest_path.clone(), e))?;
+    Ok(manifest_path)
 }

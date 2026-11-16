@@ -1,8 +1,10 @@
 # Build UDM from source
 
 Build the desktop app, CLI and browser host from the same checkout. This
-guide describes the scripts at `241f550` (version 0.1.0), including what
-they currently leave out. For running the results, see [Operations](OPERATIONS.md).
+guide describes the scripts at `241f550` (version 0.1.0). The scripts
+package the browser host (`udm-host.exe`) beside the app; only the
+extension itself is still loaded manually (no store listing yet). For
+running the results, see [Operations](OPERATIONS.md).
 
 ## What you need
 
@@ -34,7 +36,7 @@ To use the checked-in generated UI instead of compiling Slint sources:
 cargo build --release --locked --no-default-features -p udm-gui -p udm-cli -p udm-host
 ```
 
-To build and package the desktop app and CLI:
+To build and package the desktop app, CLI and browser host:
 
 ```powershell
 .\packaging\windows\build.ps1 -NoSlintCompile
@@ -45,23 +47,25 @@ Omit `-NoSlintCompile` for a normal source-compiled UI build. Use
 package. The script reads the version from the workspace manifest and
 stages these outputs under `dist\`:
 
-- `udm.exe` and `udm-cli.exe`;
-- `udm-0.1.0-setup.exe` unless the installer is skipped;
-- `udm-0.1.0-portable.zip`, containing the executables, `udm.portable`,
+- `udm.exe`, `udm-cli.exe` and `udm-host.exe` (signed with `-Sign`);
+- `udm-0.2.0-setup.exe` unless the installer is skipped;
+- `udm-0.2.0-portable.zip`, containing the executables, `udm.portable`,
   privacy documentation and bundled licence notices.
 
-**Packaging gap:** neither `build.ps1`, `installer.nsi` nor the cross-build
-script includes `udm-host` or the extension at this revision. Building the
-host with Cargo does not add it to those packages. For browser testing,
-place the separately built host in a stable user-writable directory and
-follow [extension setup](../extension/README.md). Portable mode requires
-the app and host to resolve the same data directory.
+`build.ps1`, `installer.nsi` and the cross-build script all include
+`udm-host.exe` beside the app, signed with the same certificate when
+`-Sign` is used. The extension itself is not packaged: load it manually
+and follow [extension setup](../extension/README.md). For browser testing
+with a separately built host, keep it beside the app (or in a stable
+user-writable directory) so the app and host resolve the same data
+directory.
 
 The installer is per-user, under `%LOCALAPPDATA%\Programs\udm`. It creates
 shortcuts and an HKCU uninstall entry. It does not register the browser
-host or enable startup. Its uninstaller keeps application data and downloads;
-undo optional startup/host registration first, as explained in
-[Operations](OPERATIONS.md#removing-udm).
+host or enable startup. Its uninstaller removes the host registration for
+both browsers (host keys, caller-list entries and the sidecar) but keeps
+application data and downloads; undo optional startup first, as explained
+in [Operations](OPERATIONS.md#removing-udm).
 
 ## Keep both UI build modes in step
 
@@ -106,9 +110,9 @@ rustup target add x86_64-pc-windows-gnu
 ./packaging/cross/build-windows.sh
 ```
 
-The script uses `--no-default-features`, builds the GUI and CLI, and creates
-the portable ZIP in `dist/`. It does not create an NSIS installer or build
-the host. It uses `set -euo pipefail`: a failed Cargo build stops the script
+The script uses `--no-default-features`, builds the GUI, CLI and host, and
+creates the portable ZIP in `dist/` (it now contains `udm-host.exe`). It
+does not create an NSIS installer. It uses `set -euo pipefail`: a failed Cargo build stops the script
 before copying new binaries. Existing files in `dist/` can still be stale,
 so inspect exit status and output timestamps before distributing anything.
 
@@ -191,9 +195,10 @@ A release is: publish the source snapshot (`tools/publish-gitlab-snapshot.ps1
 -Push`, which also mirrors GitLab to GitHub), run the GitLab `release` job, then
 run the snapshot script with `-Push` again to carry the new tag to GitHub.
 
-The workflows describe automation, not release approval. It neither packages
-the browser integration nor implements an authenticated app updater. No
-updater is built by any command in this guide.
+The workflows describe automation, not release approval. The release job
+packages the browser host (`udm-host.exe`) but not the extension itself,
+and it implements no authenticated app updater. No updater is built by any
+command in this guide.
 
 Continue with [Architecture](ARCHITECTURE.md) for component boundaries or
 [Operations](OPERATIONS.md) for deployment, logs and recovery.

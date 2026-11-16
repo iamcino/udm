@@ -3,9 +3,15 @@
 //! Uses the same `usagi` engine as Universal Download Manager's desktop
 //! app. Commands download/probe URLs, import lists, inspect or change tasks,
 //! update supported settings and report local diagnostics. No telemetry,
-//! administrator rights, service or update check is involved. `update pin`
-//! only prints the compiled publisher fingerprint; it downloads, stages
-//! and installs nothing.
+//! administrator rights or service is involved. The `update` commands are
+//! the updater surface: `update pin` only prints the compiled publisher
+//! fingerprint; `update checks on|off` writes the checks-enabled flag
+//! file and opens no socket; `update check` is a one-shot manual check
+//! (it fetches and stages only when checks resolve on, and installs
+//! nothing); `update apply` is the explicit swap of a staged update and
+//! starts the new build. The CLI itself never schedules a check; the
+//! desktop app checks at startup and every 6 hours while it runs.
+//! Nothing is installed without an explicit `update apply` or Apply.
 //!
 //! This process opens its own engine/store; it does not control a running
 //! GUI through IPC. Exit the GUI from the tray before using its database,
@@ -43,6 +49,9 @@ use usagi::net::stack::NetStack;
 use usagi::net::{tls, MemAltSvc};
 use usagi::paths::Paths;
 use usagi::store::{Store, TaskState};
+use usagi::update_apply::{apply_staged_with_trust, staged_candidate, ApplyError, InstallLayout};
+use usagi::update_manifest::TrustRoot;
+use usagi::update_records::{ClientTrust, Ed25519Identity};
 use usagi::util;
 
 #[derive(Parser)]
@@ -236,6 +245,34 @@ enum UpdateCommand {
     /// band against the fingerprint published in the signed release notes.
     /// No network activity; nothing is downloaded, staged or installed.
     Pin,
+    /// Turn update checks on or off: writes the checks-enabled flag file
+    /// on the install base and opens no socket either way. Checks resolve
+    /// on by default (an absent flag means on); `off` writes durable
+    /// opt-out content rather than deleting the file. With checks on, the
+    /// desktop app checks at startup and every 6 hours while it runs, and
+    /// `update check` runs one manual check; applying is always separate.
+    Checks {
+        /// `on` enables update checks (the default); `off` is a durable opt-out.
+        #[arg(value_enum)]
+        state: ChecksArg,
+    },
+    /// Check for an update now. With checks resolved off this reports that
+    /// checks are disabled and opens no socket. With checks resolved on it
+    /// fetches the signed manifest from the two release hosts, verifies it,
+    /// downloads the payload and stages it. Nothing is installed; applying
+    /// a staged update is a separate, explicit action.
+    Check,
+    /// Apply the staged update: swap the held candidate into the install
+    /// directory and start the new build. No network activity; if nothing
+    /// is staged this reports that and exits. The new build's first start
+    /// is what confirms the update.
+    Apply,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug)]
+enum ChecksArg {
+    On,
+    Off,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -283,7 +320,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Command::Settings(args) => cmd_settings(&cli, args),
-        Command::Update(args) => cmd_update(args),
+        Command::Update(args) => cmd_update(args).await,
         Command::Doctor => cmd_doctor(&cli),
     }
 }
@@ -581,9 +618,121 @@ fn cmd_settings(cli: &Cli, args: SettingsArgs) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn cmd_update(args: UpdateArgs) -> Result<ExitCode> {
+async fn cmd_update(args: UpdateArgs) -> Result<ExitCode> {
     match args.command {
         UpdateCommand::Pin => cmd_update_pin(),
+        UpdateCommand::Checks { state } => cmd_update_checks(state),
+        UpdateCommand::Check => cmd_update_check().await,
+        UpdateCommand::Apply => cmd_update_apply(),
+    }
+}
+
+/// The install layout for this process: updater state lives under the
+/// install directory (design sections 2.4/2.5), which is where the
+/// running `udm-cli` executable sits. This is not the data directory.
+fn install_layout() -> Result<InstallLayout> {
+    let paths = Paths::discover()?;
+    let exe_dir = paths.exe_dir.ok_or_else(|| {
+        usagi::Error::Other(
+            "cannot determine the install directory from the executable path".into(),
+        )
+    })?;
+    Ok(InstallLayout::new(exe_dir))
+}
+
+fn cmd_update_checks(state: ChecksArg) -> Result<ExitCode> {
+    let layout = install_layout()?;
+    let on = matches!(state, ChecksArg::On);
+    usagi::update_check::set_checks_enabled(&layout, on)?;
+    let resolved = usagi::update_check::checks_enabled(&layout);
+    println!(
+        "update checks {} (resolved: {})",
+        if on { "on" } else { "off" },
+        if resolved { "on" } else { "off" }
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn cmd_update_check() -> Result<ExitCode> {
+    let layout = install_layout()?;
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let outcome = usagi::update_check::run_update_check(&layout, now_unix, || {
+        usagi::update_fetch::FetchSession::open(usagi::update_check::release_origins()?)
+    })
+    .await;
+    println!("{}", outcome.notice);
+    // The check ran and reported; only a failed check (transport, HTTP,
+    // local I/O) is a command failure. A refusal is a verdict, not an
+    // error, and a disabled check exits 0 by design.
+    match outcome.kind {
+        usagi::update_check::CheckKind::Failed => Ok(ExitCode::from(1)),
+        _ => Ok(ExitCode::SUCCESS),
+    }
+}
+
+/// Wiring W2 item 6: the explicit swap of the held candidate. Apply
+/// never fetches and never opens a session; with nothing staged it
+/// reports that and exits without a socket. On success the new build
+/// is started here, and its first start (recover_updater +
+/// confirm_successful_start) is the receipt - not this command's
+/// output. On ExeRenameRefused the Prepared journal is left for the
+/// next GUI start, which reconciles it; the CLI never spawns the
+/// helper (envelope item 8).
+fn cmd_update_apply() -> Result<ExitCode> {
+    let layout = install_layout()?;
+    match staged_candidate(&layout) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            println!("no update is staged");
+            return Ok(ExitCode::SUCCESS);
+        }
+        Err(e) => {
+            return Err(usagi::Error::Other(format!(
+                "cannot read the staged update: {e}"
+            )));
+        }
+    }
+    let root = TrustRoot::pinned();
+    let identity = Ed25519Identity::from_pinning(root.public_key, &root.pin)
+        .map_err(|e| usagi::Error::Other(format!("update trust: {e}")))?;
+    let mut trust = ClientTrust::bootstrap(identity)
+        .map_err(|e| usagi::Error::Other(format!("update trust: {e}")))?;
+    trust
+        .load_into(&layout.updater_trust_file())
+        .map_err(|e| usagi::Error::Other(format!("update trust: {e}")))?;
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    match apply_staged_with_trust(&layout, &trust, now_unix) {
+        Ok(journal) => {
+            println!(
+                "update applied: version {} (journal step {:?})",
+                journal.new_version, journal.step
+            );
+            let exe = layout.base().join("udm.exe");
+            std::process::Command::new(&exe)
+                .spawn()
+                .map_err(|e| usagi::Error::Other(format!("cannot start {}: {e}", exe.display())))?;
+            println!("started the new build at {}", exe.display());
+            println!("its first start confirms the update");
+            Ok(ExitCode::SUCCESS)
+        }
+        Err(ApplyError::ExeRenameRefused { path, source }) => {
+            eprintln!(
+                "udm-cli: cannot rename {} while it is in use: {source}",
+                path.display()
+            );
+            eprintln!(
+                "the pending swap stays recorded; the next UDM start reconciles it. \
+                 The staged update remains - apply again from the GUI once the lock is gone."
+            );
+            Ok(ExitCode::from(1))
+        }
+        Err(e) => Err(usagi::Error::Other(format!("update apply failed: {e}"))),
     }
 }
 

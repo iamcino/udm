@@ -113,6 +113,34 @@ fn staging_holds_the_candidate_and_touches_nothing_live() {
 }
 
 #[test]
+fn staging_refuses_a_candidate_below_the_version_floor_and_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let layout = fixture(dir.path());
+    let src = dir.path().join("src-below-floor");
+    write_tree(&src, NEW_FILES);
+    let inputs: Vec<StageInput> = NEW_FILES
+        .iter()
+        .map(|(rel, bytes)| StageInput {
+            path: (*rel).to_owned(),
+            source: join_rel(&src, rel),
+            sha256: sha(bytes),
+            size: bytes.len() as u64,
+        })
+        .collect();
+    let err = stage_files(&layout, "0.0.9", &inputs).unwrap_err();
+    assert!(matches!(err, ApplyError::BelowVersionFloor { .. }));
+    // Nothing was written: no staging area, no journal, no staged
+    // candidate, and the live install is byte-identical.
+    assert!(!layout.staging_dir().exists());
+    assert!(current_journal(&layout).unwrap().is_none());
+    assert!(staged_candidate(&layout).unwrap().is_none());
+    assert_live(&layout, OLD_FILES);
+    // The refusal leaves no residue: the floor version itself stages.
+    stage_files(&layout, "0.1.0", &inputs).unwrap();
+    assert_eq!(staged_candidate(&layout).unwrap().unwrap().version, "0.1.0");
+}
+
+#[test]
 fn staging_rejects_a_second_candidate_and_an_unverified_source() {
     let dir = tempfile::tempdir().unwrap();
     let layout = fixture(dir.path());

@@ -75,6 +75,7 @@ pub mod net;
 pub mod paths;
 pub mod store;
 pub mod update_apply;
+pub mod update_check;
 pub mod update_fetch;
 pub mod update_manifest;
 pub mod update_pin;

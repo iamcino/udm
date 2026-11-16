@@ -2,6 +2,22 @@
 
 All notable changes to UDM are listed here. Vietnamese: [CHANGELOG.vi.md](CHANGELOG.vi.md).
 
+## 0.2.0
+
+- **Browser handoff, built in**: the installer and portable ZIP now ship
+  `udm-host.exe`, and each browser is switched on from **Settings → Browser**
+  (Chrome and Firefox). Load the extension manually (see the extension setup
+  guide), flip the toggle, and downloads you start in the browser are handed
+  to UDM; turn the toggle off and the browser keeps its own downloads.
+  The Browser settings row shows when the browser last connected.
+- **Automatic update checks**: UDM now checks for updates at startup and
+  every 6 hours (on by default; **Settings → Enable update checks** turns
+  them off). A staged update shows a badge on the tray icon. Applying an
+  update is still always your explicit **Apply**.
+- **Stronger update verification**: update manifests must pass stricter
+  publisher and version checks before anything is staged, so a stale or
+  substituted manifest is refused instead of offered.
+
 ## 0.1.0
 
 First public release of Universal Download Manager for Windows 11 x64.

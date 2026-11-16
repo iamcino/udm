@@ -3,6 +3,24 @@
 #
 # Everything below is denied because it either phones home, collects
 # diagnostics, or pulls in a second TLS/crypto stack we deliberately avoid.
+#
+# Browser integration (envelope rev.5, 2026-11-15) curation map, settled in
+# the CI adjudication of 2026-11-14. A local cargo-deny run on the
+# un-curated tree exits 7 with advisories, bans and licenses failing,
+# sources ok, and NO vulnerability advisories.
+#
+# schannel is NOT banned, with this recorded rationale: schannel 0.1.30
+# appears in the lock only under rustls-native-certs 0.8.5, which is how
+# the Windows trust store is read; the lock contains no native-tls or
+# openssl. The bans on native-tls and openssl-sys stay.
+#
+# LicenseRef-Slint-Royalty-free-2.0 is allowed ONLY in combination with
+# the thirteen [[licenses.clarify]] entries below, never as a blanket
+# LicenseRef allow. The thirteen license files are byte-identical on
+# this tree (one shared XxHash32 file hash serves all thirteen entries;
+# if any crate's file ever differs, it gets its own entry with its own
+# hash). The hash is cargo-deny's XxHash32 file hash (0x + eight hex
+# digits), NOT a SHA-256.
 
 [graph]
 all-features = true
@@ -10,15 +28,128 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+ignore = [
+    # pin-utils 0.1.1, unmaintained. Parent chain: spin_on from
+    # slint-build, slint-macros, i-slint-renderer-skia.
+    { id = "RUSTSEC-2026-0441", reason = "unmaintained pin-utils 0.1.1, via spin_on from slint-build, slint-macros, i-slint-renderer-skia" },
+    # proc-macro-error 1.0.4, unmaintained. Parent chain: glib-macros and
+    # gtk3-macros on the Linux tray path through glib and libappindicator.
+    # (proc-macro-error-attr has no advisory.)
+    { id = "RUSTSEC-2024-0370", reason = "unmaintained proc-macro-error 1.0.4, via glib-macros and gtk3-macros on the Linux tray path through glib and libappindicator" },
+    # bincode 2.0.1, unmaintained. Parent chain: typed-index-collections
+    # from i-slint-compiler.
+    { id = "RUSTSEC-2025-0141", reason = "unmaintained bincode 2.0.1, via typed-index-collections from i-slint-compiler" },
+    # ttf-parser 0.25.1, unmaintained. Parent chain: owned_ttf_parser.
+    { id = "RUSTSEC-2026-0192", reason = "unmaintained ttf-parser 0.25.1, via owned_ttf_parser" },
+    # zvariant 5.15.1, unmaintained. Parent chain: zbus 5.19.0 from ashpd
+    # and i-slint-backend-winit.
+    { id = "RUSTSEC-2026-0370", reason = "unmaintained zvariant 5.15.1, via zbus 5.19.0 from ashpd and i-slint-backend-winit" },
+    # zbus_names 4.3.5, unmaintained. Parent chain: zbus 5.19.0 from ashpd
+    # and i-slint-backend-winit.
+    { id = "RUSTSEC-2026-0371", reason = "unmaintained zbus_names 4.3.5, via zbus 5.19.0 from ashpd and i-slint-backend-winit" },
+    # zvariant_derive 5.15.1, unmaintained. Parent chain: zbus 5.19.0 from
+    # ashpd and i-slint-backend-winit.
+    { id = "RUSTSEC-2026-0372", reason = "unmaintained zvariant_derive 5.15.1, via zbus 5.19.0 from ashpd and i-slint-backend-winit" },
+    # glib 0.18.5, UNSOUND (not unmaintained) - the map's one judgment
+    # call, flagged for the gate. glib is reached from tray-icon 0.21.3
+    # by two edges: libappindicator 0.9.0 (target_os = linux) and muda
+    # 0.17.2 with its gtk feature (gtk itself cfg-gated to Linux and the
+    # BSDs); udm-gui depends on tray-icon only under cfg(windows), so
+    # neither edge is compiled into the Windows product this package
+    # ships. The patched line (>= 0.20.0) would require a dependency
+    # upgrade, which this package forbids. This ignore dies the day the
+    # Linux tray path ships or the lock moves glib.
+    { id = "RUSTSEC-2024-0429", reason = "unsound glib 0.18.5, reached from tray-icon 0.21.3 only via libappindicator 0.9.0 (target_os = linux) and muda 0.17.2 gtk feature (gtk cfg-gated to Linux/BSDs); udm-gui depends on tray-icon only under cfg(windows), so neither edge is compiled into the Windows product; patched line >= 0.20.0 would require a forbidden dependency upgrade" },
+]
 
 [licenses]
 version = 2
-allow = ["MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0", "MPL-2.0", "Zlib", "OpenSSL"]
+allow = ["MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0", "MPL-2.0", "Zlib", "OpenSSL", "BSL-1.0", "CDLA-Permissive-2.0", "LicenseRef-Slint-Royalty-free-2.0"]
 confidence-threshold = 0.9
+
+# target-lexicon 0.12.16 is Apache-2.0 WITH LLVM-exception.
+[[licenses.exceptions]]
+allow = ["Apache-2.0 WITH LLVM-exception"]
+name = "target-lexicon"
+version = "0.12.16"
+
+# Thirteen crates sit on the expression GPL-3.0-only OR
+# LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0;
+[[licenses.clarify]]
+name = "slint"
+expression = "LicenseRef-Slint-Royalty-free-2.0"
+license-files = [{ path = "LICENSES/LicenseRef-Slint-Royalty-free-2.0.md", hash = 0xf49b252a }]
+
+[[licenses.clarify]]
+name = "slint-build"
+expression = "LicenseRef-Slint-Royalty-free-2.0"
+license-files = [{ path = "LICENSES/LicenseRef-Slint-Royalty-free-2.0.md", hash = 0xf49b252a }]
+
+[[licenses.clarify]]
+name = "slint-macros"
+expression = "LicenseRef-Slint-Royalty-free-2.0"
+license-files = [{ path = "LICENSES/LicenseRef-Slint-Royalty-free-2.0.md", hash = 0xf49b252a }]
+
+[[licenses.clarify]]
+name = "i-slint-backend-linuxkms"
+expression = "LicenseRef-Slint-Royalty-free-2.0"
+license-files = [{ path = "LICENSES/LicenseRef-Slint-Royalty-free-2.0.md", hash = 0xf49b252a }]
+
+[[licenses.clarify]]
+name = "i-slint-backend-selector"
+expression = "LicenseRef-Slint-Royalty-free-2.0"
+license-files = [{ path = "LICENSES/LicenseRef-Slint-Royalty-free-2.0.md", hash = 0xf49b252a }]
+
+[[licenses.clarify]]
+name = "i-slint-backend-testing"
+expression = "LicenseRef-Slint-Royalty-free-2.0"
+license-files = [{ path = "LICENSES/LicenseRef-Slint-Royalty-free-2.0.md", hash = 0xf49b252a }]
+
+[[licenses.clarify]]
+name = "i-slint-backend-winit"
+expression = "LicenseRef-Slint-Royalty-free-2.0"
+license-files = [{ path = "LICENSES/LicenseRef-Slint-Royalty-free-2.0.md", hash = 0xf49b252a }]
+
+[[licenses.clarify]]
+name = "i-slint-common"
+expression = "LicenseRef-Slint-Royalty-free-2.0"
+license-files = [{ path = "LICENSES/LicenseRef-Slint-Royalty-free-2.0.md", hash = 0xf49b252a }]
+
+[[licenses.clarify]]
+name = "i-slint-compiler"
+expression = "LicenseRef-Slint-Royalty-free-2.0"
+license-files = [{ path = "LICENSES/LicenseRef-Slint-Royalty-free-2.0.md", hash = 0xf49b252a }]
+
+[[licenses.clarify]]
+name = "i-slint-core"
+expression = "LicenseRef-Slint-Royalty-free-2.0"
+license-files = [{ path = "LICENSES/LicenseRef-Slint-Royalty-free-2.0.md", hash = 0xf49b252a }]
+
+[[licenses.clarify]]
+name = "i-slint-core-macros"
+expression = "LicenseRef-Slint-Royalty-free-2.0"
+license-files = [{ path = "LICENSES/LicenseRef-Slint-Royalty-free-2.0.md", hash = 0xf49b252a }]
+
+[[licenses.clarify]]
+name = "i-slint-renderer-skia"
+expression = "LicenseRef-Slint-Royalty-free-2.0"
+license-files = [{ path = "LICENSES/LicenseRef-Slint-Royalty-free-2.0.md", hash = 0xf49b252a }]
+
+[[licenses.clarify]]
+name = "i-slint-renderer-software"
+expression = "LicenseRef-Slint-Royalty-free-2.0"
+license-files = [{ path = "LICENSES/LicenseRef-Slint-Royalty-free-2.0.md", hash = 0xf49b252a }]
 
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Path deps only: crates/gui and crates/host declare usagi = { path = "../core" }
+# with no version, and cargo-deny counts a version-less path dep as a wildcard.
+# Registry deps stay under wildcards = "deny" above; this exemption covers
+# path deps only. Restored per garen ruling 20261115T075608-771410 on blocker
+# 20261115T075415-dc690a (the line was dropped in fidelity rev.5 on the premise
+# that no wildcard requirement exists on this tree; the tree proves otherwise).
+allow-wildcard-paths = true
 deny = [
     # --- telemetry / analytics / crash reporting -----------------------------
     { name = "sentry", reason = "crash reporting is a telemetry channel" },
@@ -41,7 +172,6 @@ deny = [
     { name = "aws-lc-rs", reason = "we standardise on `ring`; aws-lc-rs needs CMake+NASM" },
     { name = "aws-lc-sys", reason = "we standardise on `ring`" },
     { name = "native-tls", reason = "we use rustls with the OS trust store" },
-    { name = "schannel", reason = "we use rustls with the OS trust store" },
     { name = "openssl", reason = "we use rustls" },
     { name = "openssl-sys", reason = "we use rustls" },
 

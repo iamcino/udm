@@ -8,7 +8,7 @@ see [Build](BUILD.md) to produce the binaries and packages.
 
 | Form | How to run it | Default application data |
 |---|---|---|
-| Per-user installer | Run `udm-0.1.0-setup.exe`; it installs under `%LOCALAPPDATA%\Programs\udm` and creates shortcuts. | `%LOCALAPPDATA%\udm` |
+| Per-user installer | Run `udm-0.2.0-setup.exe`; it installs under `%LOCALAPPDATA%\Programs\udm` and creates shortcuts. | `%LOCALAPPDATA%\udm` |
 | Portable ZIP | Extract the archive, then run `udm.exe` inside the extracted program folder with its `udm.portable` marker. | `data\` beside the executable |
 | Bare executable | Put `udm.exe` in a user-writable location and run it without a portable marker. | `%LOCALAPPDATA%\udm` |
 
@@ -17,9 +17,11 @@ Downloads normally use your Windows Downloads folder or the folder chosen
 in Settings/Add Download. Partials are saved in that destination as
 `<filename>.udm.part`, not in the application's `tmp\` directory.
 
-The current packages contain the GUI and CLI. They omit the browser host
-and extension; [browser setup](../extension/README.md) requires a separate
-`udm-host` build and explicit registration. The host does not launch UDM
+The packages contain the GUI, the CLI and the browser host
+(`udm-host.exe` beside the app). The extension itself is still loaded
+manually; [browser setup](../extension/README.md) explains registration,
+which is done from Settings → Browser integration or with
+`udm-host --register`. The host does not launch UDM
 when the desktop app is closed.
 
 ## Everyday desktop use
@@ -38,6 +40,10 @@ stop the app and release its database lock.
 Settings offers Dark/Light/Auto, English/Vietnamese and accent colours.
 Auto follows the Windows app theme. Close to tray is on by default;
 minimize to tray, start minimized and start with Windows default off.
+Settings → Browser integration registers the browsers: each row has a
+toggle, a status light and an Install extension button. The toggle
+registers or unregisters immediately (no Save, no restart); the status
+light reads the registration and the handoff journal directly.
 
 **Start with Windows** writes the `UDM` value under
 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, using the quoted
@@ -90,10 +96,12 @@ a matching partial-file identity and checkpoint; copying a partial to another
 file or disk can invalidate that proof and require re-downloading its bytes.
 
 Native Messaging manifests and HKCU startup values contain executable paths.
-After moving a host, unregister/re-register it deliberately using the same
-data root as UDM. A pairing secret from an old session is not a portable
-credential; UDM replaces it on startup. Do not open the original and restored
-copies against the same downloads concurrently.
+After moving a portable folder, start the GUI: it repairs the browser
+registration on start by repointing the HKCU value and the manifest path
+at the current host location. Re-toggle a browser only if its Settings row
+reports registration-broken. A pairing secret from an old session is not a
+portable credential; UDM replaces it on startup. Do not open the original
+and restored copies against the same downloads concurrently.
 
 ## Command-line operations
 
@@ -172,7 +180,10 @@ See [Engine](ENGINE.md) for checkpoints and rename reconciliation.
 
 Fresh settings use a 60-second prepare lease. The coordinator also requires
 registered callers; an existing explicit `null` lease remains disabled.
-Restart UDM after registration so it can read the caller list.
+No restart is needed after registration: a successful register starts the
+coordinator when the lease is positive and none is up, and caller changes
+apply to the running coordinator at once; turning a toggle off refuses the
+next connection at pairing.
 
 Before a durable prepare acknowledgement, an unavailable host/app leaves
 the browser download in charge. After confirmed cancellation, do not assume
@@ -198,7 +209,7 @@ limitation described in [its guide](../extension/README.md#recovery-and-current-
 | A resumed download starts from zero | The local checkpoint or remote representation did not meet reuse requirements. Last-Modified alone is insufficient. |
 | Progress is at 100% but task is not completed | EOF validation, disk sync, hashing or finalization may still be running. Check the state/error before treating the file as finished. |
 | Category routing did not move an old task | Routing is captured for eligible new tasks; existing/explicit destinations keep their route. |
-| Browser capture does nothing | Check separately built host, registration sidecar, caller list, matching data root and running GUI; see [browser setup](../extension/README.md). |
+| Browser capture does nothing | Check the Browser integration rows in Settings (status light), the caller list, the matching data root and the running GUI; see [browser setup](../extension/README.md). |
 
 The About actions open the data directory and log. At this revision the
 desktop logger initializes from `UDM_LOG` at launch (default `info`); although
@@ -211,15 +222,19 @@ include pairing keys or private URLs.
 
 1. Turn off **Start with Windows** in UDM while its current executable still
    exists. This removes the per-user Run value.
-2. If registered, run `udm-host --unregister chrome` and/or
+2. If registered, turn the browsers off in Settings → Browser integration,
+   or run `udm-host --unregister chrome` and/or
    `udm-host --unregister firefox` using the registered host/data root.
-   Disable or remove the extension in the browser.
+   Disable or remove the extension in the browser. (You can skip this:
+   the uninstaller unregisters both browsers for you.)
 3. Exit UDM and other processes using its data.
 4. Run the per-user uninstaller, or delete the portable/program folder.
 
 At this revision the NSIS uninstaller removes its own app files, shortcuts
-and uninstall entry. It does **not** undo the separately configured startup
-or Native Messaging registrations. It deliberately keeps application data
+and uninstall entry, and it unregisters both browsers (deletes their host
+keys, strips their entries from `handoff\callers.json` and removes
+`udm-host.caller`). It does **not** undo the separately configured startup
+setting; turn that off first. It deliberately keeps application data
 and downloaded files. Delete those separately only if you no longer need
 history, recovery or downloaded content. Removing a portable folder can
 also remove its `data\` directory, so back it up first if needed.

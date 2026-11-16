@@ -27,11 +27,12 @@ echo "==> cargo build --release --target $TARGET"
 # drop the flag on machines that have it. Regenerate the checked-in file with
 # packaging/regenerate-slint.sh whenever ui/*.slint changes.
 cargo build --release --target "$TARGET" --no-default-features \
-    -p udm-gui -p udm-cli
+    -p udm-gui -p udm-cli -p udm-host
 
 mkdir -p dist
 cp "target/$TARGET/release/udm.exe"     dist/
 cp "target/$TARGET/release/udm-cli.exe" dist/
+cp "target/$TARGET/release/udm-host.exe" dist/
 cp LICENSE dist/LICENSE.txt
 cp docs/PRIVACY.md dist/
 cp crates/gui/vendor/cino-ui/LICENSE dist/CINO-UI-LICENSE.txt
@@ -39,7 +40,7 @@ cp crates/gui/vendor/cino-ui/ui/fonts/OFL.txt dist/BE-VIETNAM-PRO-OFL.txt
 
 echo "==> portable zip"
 ( cd dist && rm -rf portable && mkdir portable \
-  && cp udm.exe udm-cli.exe LICENSE.txt PRIVACY.md CINO-UI-LICENSE.txt BE-VIETNAM-PRO-OFL.txt portable/ \
+  && cp udm.exe udm-cli.exe udm-host.exe LICENSE.txt PRIVACY.md CINO-UI-LICENSE.txt BE-VIETNAM-PRO-OFL.txt portable/ \
   && : > portable/udm.portable \
   && zip -qr "udm-$VERSION-portable.zip" portable )
 

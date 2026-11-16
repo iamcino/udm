@@ -45,7 +45,7 @@ hiện cảnh báo, xem [Cảnh báo của Windows](#cảnh-báo-của-windows-v
 | ✅ **Checksum** | Nhập SHA-256, SHA-512, SHA-1, MD5 hoặc BLAKE3 của bên phát hành, UDM kiểm tra tệp trước khi báo hoàn tất. |
 | 🗂️ **Tệp gọn gàng** | Tùy chọn phân loại đưa tệp vào thư mục con theo loại tệp. Mặc định tắt. |
 | 🌐 **Nhận từ trình duyệt** | Tiện ích Chrome hoặc Firefox chuyển lượt tải cho ứng dụng đang chạy qua native messaging host cục bộ. Bạn chủ động bật. |
-| 🔒 **Riêng tư, theo từng người dùng** | Không phân tích, quảng cáo, báo lỗi từ xa hay kiểm tra cập nhật. Không dịch vụ, không quyền quản trị; cài đặt và lịch sử nằm trong thư mục của bạn. |
+| 🔒 **Riêng tư, theo từng người dùng** | Không phân tích, quảng cáo hay báo lỗi từ xa. Kiểm tra cập nhật mặc định bật, chạy lúc khởi động và mỗi 6 giờ; việc áp dụng bản cập nhật luôn là thao tác Áp dụng rõ ràng của bạn. Không dịch vụ, không quyền quản trị; cài đặt và lịch sử nằm trong thư mục của bạn. |
 | 🪶 **Nhẹ và gốc** | Một ứng dụng Rust với giao diện [Slint](https://slint.dev), kèm công cụ dòng lệnh dùng chung engine. |
 
 ## Tính năng
@@ -71,13 +71,28 @@ hiện cảnh báo, xem [Cảnh báo của Windows](#cảnh-báo-của-windows-v
 - **Khởi động cùng Windows**, khởi động thu nhỏ và thu nhỏ xuống khay là các tùy
   chọn riêng, mặc định đều tắt. Khởi động cùng Windows chỉ ghi mục của UDM vào
   `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` và xóa mục đó khi tắt.
+- **Kiểm tra cập nhật** lúc khởi động và mỗi 6 giờ khi UDM chạy (mặc định bật),
+  với mũi tên xanh ở khay khi có bản cập nhật đã lưu sẵn. Việc áp dụng bản cập
+  nhật luôn là thao tác Áp dụng rõ ràng của bạn; tắt kiểm tra trong Cài đặt.
 
 ### Nhận lượt tải từ trình duyệt
 
-Xem [hướng dẫn tiện ích](extension/README.md). Bộ cài và bản portable **chưa kèm**
-`udm-host` hay tiện ích; cần build host riêng. Quy trình chuyển tải dùng bản ghi
-prepare/commit bền vững; mục nào chưa khớp được với tác vụ sẽ hiện thành dòng chỉ
-đọc **Cần khôi phục** trong mục **Tất cả**.
+Bộ cài và bản portable kèm `udm-host.exe` ngay cạnh ứng dụng. Bật trình
+duyệt tại **Cài đặt → Trình duyệt**:
+
+- **Firefox**: nạp tiện ích dưới dạng add-on tạm thời (xem
+  [hướng dẫn cài tiện ích](extension/README.md)), rồi bật công tắc Firefox.
+  Không cần chép ID — Firefox dùng ID tiện ích cố định.
+- **Chrome**: nạp tiện ích dạng unpacked, mở trang options của tiện ích và
+  chép extension ID hiển thị ở đó, dán vào hàng Chrome trong Cài đặt, rồi
+  bật công tắc.
+
+Công tắc đăng ký native messaging host ngay lập tức; không có bước Lưu, và
+việc dời thư mục ứng dụng sẽ được tự sửa ở lần khởi động UDM kế tiếp. Mỗi
+hàng hiển thị **kết nối gần nhất** sau khi trình duyệt đó đã chuyển một
+lượt tải. Tắt công tắc thì trình duyệt tự giữ lượt tải của mình. Quy trình
+chuyển tải dùng bản ghi prepare/commit bền vững; mục nào chưa khớp được
+với tác vụ sẽ hiện thành dòng chỉ đọc **Cần khôi phục** trong mục **Tất cả**.
 
 ## Mẹo nhanh
 
@@ -130,16 +145,31 @@ khi dùng CLI trên dữ liệu đó.
 
 ## Cập nhật
 
-UDM không tự kiểm tra cập nhật; phiên bản này không có kết nối nền nào. Phiên bản
-mới được đăng trên [GitHub](https://github.com/iamcino/udm/releases) và [GitLab](https://gitlab.com/cino-group/udm/-/releases).
-Cài bản mới đè lên bản cũ; cài đặt, lịch sử và tệp tải về vẫn được giữ.
+UDM tự kiểm tra cập nhật: một lần lúc khởi động và mỗi 6 giờ khi đang chạy, cũng
+như khi bạn bấm **Kiểm tra cập nhật**. Kiểm tra mặc định bật. Mỗi lần kiểm tra tải
+manifest cập nhật đã ký từ hai máy chủ phát hành
+([GitHub](https://github.com/iamcino/udm/releases) trước, rồi
+[GitLab](https://gitlab.com/cino-group/udm/-/releases)); yêu cầu chỉ mang phiên bản
+ứng dụng trong User-Agent và một nonce ngẫu nhiên để tránh cache, ngoài ra không
+gửi gì thêm. Nếu bản mới hơn vượt qua xác minh, nó được lưu sẵn và mời áp dụng;
+**việc áp dụng bản cập nhật luôn là thao tác Áp dụng rõ ràng của bạn** — không cài
+đặt gì cho tới khi bạn bấm, và cài đặt, lịch sử cùng tệp tải về vẫn được giữ.
+
+Tắt kiểm tra bằng **Cài đặt › Bật kiểm tra cập nhật**, hoặc
+`udm-cli update checks off`. Tắt kiểm tra sẽ ngăn các lần kiểm tra mới bắt đầu;
+một lần kiểm tra đang chạy sẽ hoàn tất. Khi kiểm tra tắt, không lần kiểm tra mới
+nào mở socket cập nhật. Bạn vẫn có thể tự cài bản mới đè lên bản cũ từ các trang
+phát hành. `udm-cli update pin` chỉ in các fingerprint nhà phát hành đã ghim và
+không dùng mạng. Mỗi bản phát hành cũng kèm báo cáo `virustotal-<tag>.json` (ví dụ
+`virustotal-v0.1.0.json`) dẫn tới kết quả quét VirusTotal của bộ cài đã phát hành.
 
 ## Hỏi đáp
 
 **UDM có thu thập dữ liệu không?**
-Không. Không phân tích, quảng cáo, báo lỗi từ xa hay kiểm tra cập nhật. UDM chỉ kết
-nối tới máy chủ của các lượt tải bạn tạo. Log và URL tải nằm trên máy bạn nhưng có
-thể chứa thông tin nhạy cảm, hãy xem lại trước khi chia sẻ. Xem
+Không. Không phân tích, quảng cáo hay báo lỗi từ xa. UDM kết nối tới máy chủ của
+các lượt tải bạn tạo và, để kiểm tra cập nhật, tới hai máy chủ phát hành (chỉ
+manifest đã ký — xem [Cập nhật](#cập-nhật)). Log và URL tải nằm trên máy bạn nhưng
+có thể chứa thông tin nhạy cảm, hãy xem lại trước khi chia sẻ. Xem
 [chính sách quyền riêng tư](docs/PRIVACY.md).
 
 **Đây có phải ứng dụng torrent hay công cụ lấy video không?**
@@ -183,8 +213,9 @@ lỗi thường gặp.
   media. Hàng đợi chỉ giới hạn số lượt tải chạy cùng lúc.
 - Đoạn tải là yêu cầu đồng thời, không phải kết nối vật lý: HTTP/2 và HTTP/3 có
   thể ghép nhiều đoạn trên một kết nối.
-- Phiên bản này chưa có trình cập nhật trong ứng dụng, chưa dùng IPv4 và IPv6 cùng
-  lúc và chưa chia một lượt tải qua nhiều họ địa chỉ.
+- Kiểm tra cập nhật chạy lúc khởi động và mỗi 6 giờ, nhưng việc áp dụng bản cập
+  nhật luôn là thủ công; không cài đặt âm thầm. Chưa dùng IPv4 và IPv6 cùng lúc
+  và chưa chia một lượt tải qua nhiều họ địa chỉ.
 
 ## Dành cho nhà phát triển
 

@@ -172,6 +172,15 @@ pub struct Settings {
     /// pipe additionally requires the disclosed registration (a callers
     /// list), which remains the user opt-in gate.
     pub handoff_lease_secs: Option<u64>,
+    /// Chrome extension ID for browser integration item 1, copied
+    /// from the extension options page (chrome.runtime.id) into the
+    /// Settings row. Empty means the Chrome toggle cannot turn on.
+    /// Never invented: the GUI refuses to register with an empty or
+    /// illegal ID, and the host refuses it again at --register.
+    pub chrome_extension_id: String,
+    /// The one-time first-run browser hint in Settings was dismissed.
+    /// False shows the hint; dismissing it persists true here.
+    pub browser_hint_dismissed: bool,
 
     // --- window lifecycle (G3) ---------------------------------------------
     /// Closing the window hides it to the tray instead of exiting
@@ -218,6 +227,8 @@ impl Default for Settings {
             accent: "blue".to_string(),
             log_level: "info".to_string(),
             handoff_lease_secs: Some(60),
+            chrome_extension_id: String::new(),
+            browser_hint_dismissed: false,
             close_to_tray: true,
             minimize_to_tray: false,
             start_minimized: false,
