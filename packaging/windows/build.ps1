@@ -56,6 +56,10 @@ $updatePubkey = $pubkeyMatch.Groups[1].Value
 
 # Zip writing with byte-exact entry names. Compress-Archive writes
 # subdirectory entries with '\' separators on Windows, which strict
+# The source root is taken from Get-Item, never Resolve-Path: the two
+# disagree on 8.3 short paths (a CI runner's TEMP is C:\Users\RUNNER~1\...),
+# and a short-form base silently shifts every Substring cut, mangling all
+# entry names. Get-Item and Get-ChildItem both return the long form.
 # consumers cannot resolve (the updater verifies portable members
 # verbatim against the signed manifest; Firefox resolves extension
 # resources by '/' name - the 0.2.1 zips' icons\ entries were
@@ -65,10 +69,11 @@ function Write-Zip($sourceDir, $zipPath) {
     Add-Type -AssemblyName System.IO.Compression
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     if (Test-Path $zipPath) { Remove-Item -Force $zipPath }
-    $base = (Resolve-Path $sourceDir).Path.TrimEnd('\') + '\'
+    $base = (Get-Item $sourceDir).FullName.TrimEnd('\') + '\'
     $zip = [System.IO.Compression.ZipFile]::Open($zipPath, [System.IO.Compression.ZipArchiveMode]::Create)
     try {
         foreach ($file in Get-ChildItem -Recurse -File $sourceDir | Sort-Object FullName) {
+            if (-not $file.FullName.StartsWith($base, [StringComparison]::OrdinalIgnoreCase)) { throw "zip source file outside its root: $($file.FullName)" }
             $rel = $file.FullName.Substring($base.Length).Replace('\', '/')
             $entry = $zip.CreateEntry($rel, [System.IO.Compression.CompressionLevel]::Optimal)
             $entry.LastWriteTime = $file.LastWriteTime
