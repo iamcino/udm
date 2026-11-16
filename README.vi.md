@@ -78,16 +78,18 @@ hiện cảnh báo, xem [Cảnh báo của Windows](#cảnh-báo-của-windows-v
 ### Nhận lượt tải từ trình duyệt
 
 Bộ cài và bản portable kèm `udm-host.exe` ngay cạnh ứng dụng, và kèm cả
-tiện ích trong thư mục `extension` (mỗi trình duyệt một thư mục con); mỗi
-bản phát hành cũng đính kèm tiện ích riêng dưới dạng
+tiện ích trong thư mục `extension` (mỗi trình duyệt một thư mục con, kèm
+bản Firefox dưới dạng tệp zip cài được); mỗi bản phát hành cũng đính kèm
+tiện ích riêng dưới dạng
 `udm-extension-chrome-<phiên bản>.zip` và `udm-extension-firefox-<phiên bản>.zip`.
 Bật trình duyệt tại **Cài đặt → Trình duyệt**:
 
 - **Firefox**: mở `about:debugging`, chọn **This Firefox**, bấm
-  **Load Temporary Add-on** và chọn `manifest.json` trong thư mục
-  `extension\firefox`, rồi bật công tắc Firefox. Không cần chép ID —
-  Firefox dùng ID tiện ích cố định. Tiện ích nạp tạm thời sẽ mất khi khởi
-  động lại trình duyệt.
+  **Load Temporary Add-on** và chọn tệp zip kèm theo
+  `udm-extension-firefox-<phiên bản>.zip` trong thư mục `extension`,
+  rồi bật công tắc Firefox. (Firefox cài từ tệp, không cài từ thư mục
+  `extension\firefox`.) Không cần chép ID — Firefox dùng ID tiện ích cố
+  định. Tiện ích nạp tạm thời sẽ mất khi khởi động lại trình duyệt.
 - **Chrome**: mở `chrome://extensions`, bật **Developer mode**, bấm
   **Load unpacked** và chọn thư mục `extension\chrome`. Sau đó mở trang
   options của tiện ích và chép extension ID hiển thị ở đó, dán vào hàng

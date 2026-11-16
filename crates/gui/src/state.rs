@@ -71,6 +71,10 @@ pub struct Gui {
     /// is currently open. Refreshed only while open, from tray_poll.
     pub popup: RefCell<Option<crate::PopupWindow>>,
     pub popup_open: RefCell<bool>,
+    /// Work area (physical px) of the monitor the popup was opened
+    /// from, captured at open time; placement clamps inside it so the
+    /// popup can never straddle two monitors.
+    pub popup_area: RefCell<Option<(i32, i32, i32, i32)>>,
     /// G5-closing: the live handoff coordinator, when one is serving.
     /// Read-only here: the task list renders its recovery entries as
     /// rows (owner decision 2026-11-09); the GUI never mutates handoff
@@ -218,6 +222,7 @@ pub fn setup(
         repaint_pulses: RefCell::new(0),
         popup: RefCell::new(None),
         popup_open: RefCell::new(false),
+        popup_area: RefCell::new(None),
         handoff: RefCell::new(handoff),
         paths: engine.paths().clone(),
         browser_broken: RefCell::new(Vec::new()),
@@ -783,6 +788,7 @@ fn tray_poll(g: &Rc<Gui>) {
             }
             TrayAction::PauseAll => all_act(g, true),
             TrayAction::ResumeAll => all_act(g, false),
+            TrayAction::CheckForUpdates => start_update_check(g),
             TrayAction::Exit => {
                 let _ = slint::quit_event_loop();
             }
@@ -862,15 +868,13 @@ fn open_popup(g: &Rc<Gui>) {
         });
         *g.popup.borrow_mut() = Some(pop);
     }
+    *g.popup_area.borrow_mut() = Some(crate::tray::cursor_work_area());
     refresh_popup(g);
     if let Some(pop) = g.popup.borrow().as_ref() {
         // Show first: an unrealised window reports a zero size, which
         // would anchor the popup almost entirely off-screen.
         let _ = pop.show();
-        let size = pop.window().size();
-        let (x, y) = crate::tray::work_area_bottom_right(size.width as i32, size.height as i32);
-        pop.window()
-            .set_position(slint::PhysicalPosition::new(x, y));
+        place_popup(pop, g);
         pop.invoke_grab_focus();
     }
     *g.popup_open.borrow_mut() = true;
@@ -881,6 +885,7 @@ fn close_popup(g: &Rc<Gui>) {
         let _ = pop.hide();
     }
     *g.popup_open.borrow_mut() = false;
+    *g.popup_area.borrow_mut() = None;
 }
 
 /// Rebuild the popup model from the shared snapshot. Runs only while the
@@ -915,6 +920,31 @@ fn refresh_popup(g: &Rc<Gui>) {
     }));
     let model = Rc::new(VecModel::from(rows.into_iter().take(5).collect::<Vec<_>>()));
     pop.set_rows(ModelRc::from(model));
+    place_popup(pop, g);
+}
+
+/// Anchor the downloads popup at the bottom-right of the work area
+/// captured when it was opened, clamped so the whole window stays
+/// inside that one monitor. Re-run on every refresh while open: the
+/// first show can report a size that has not settled yet, and the row
+/// count can change the height - without the clamp either could push
+/// the window across a monitor seam (field case 2026-11-16: the popup
+/// opened straddling two monitors).
+fn place_popup(pop: &crate::PopupWindow, g: &Rc<Gui>) {
+    let Some((left, top, right, bottom)) = *g.popup_area.borrow() else {
+        return;
+    };
+    let size = pop.window().size();
+    let (w, h) = (size.width as i32, size.height as i32);
+    if w <= 0 || h <= 0 {
+        return;
+    }
+    let x = (right - w - 12).clamp(left, (right - w).max(left));
+    let y = (bottom - h - 12).clamp(top, (bottom - h).max(top));
+    let pos = slint::PhysicalPosition::new(x, y);
+    if pop.window().position() != pos {
+        pop.window().set_position(pos);
+    }
 }
 
 /// G3 B1: compose the tray summary from the current totals and task rows
@@ -1247,6 +1277,34 @@ fn transport_labels(s: &TaskSnapshot, vietnamese: bool) -> (&'static str, String
     (short, label.into())
 }
 
+/// The row/detail state label, with the segment-retry note appended
+/// while a transfer is recovering from a transport error (0.2.2): a
+/// task working through a stall must read as retrying, not frozen.
+fn state_label_with_retry(s: &TaskSnapshot, vietnamese: bool) -> String {
+    match (&s.segment_retry, s.state == TaskState::Downloading) {
+        (Some(retry), true) => format!(
+            "{} \u{b7} {}",
+            s.state_label,
+            if vietnamese {
+                format!(
+                    "đang thử lại đoạn {} ({}/{})",
+                    retry.segment + 1,
+                    retry.attempt,
+                    retry.max
+                )
+            } else {
+                format!(
+                    "retrying segment {} ({}/{})",
+                    retry.segment + 1,
+                    retry.attempt,
+                    retry.max
+                )
+            }
+        ),
+        _ => s.state_label.clone(),
+    }
+}
+
 fn detail_from(s: &TaskSnapshot, vietnamese: bool) -> TaskDetail {
     let (_, mut transport_label) = transport_labels(s, vietnamese);
     if !s.paths.is_empty() {
@@ -1391,7 +1449,7 @@ fn detail_from(s: &TaskSnapshot, vietnamese: bool) -> TaskDetail {
         key: SharedString::from(s.id.to_string()),
         name: SharedString::from(display_name(s)),
         state: SharedString::from(s.state.as_str()),
-        state_label: SharedString::from(s.state_label.clone()),
+        state_label: SharedString::from(state_label_with_retry(s, vietnamese)),
         percent,
         progress_text: SharedString::from(progress_text),
         size_text: SharedString::from(match s.total_size {
@@ -1490,7 +1548,7 @@ fn row_from(s: &TaskSnapshot, vietnamese: bool, selected: bool) -> TaskRow {
         name: SharedString::from(name.clone()),
         url: SharedString::from(s.url.clone()),
         state: SharedString::from(s.state.as_str()),
-        state_label: SharedString::from(s.state_label.clone()),
+        state_label: SharedString::from(state_label_with_retry(s, vietnamese)),
         received_text: SharedString::from(util::human_bytes(s.received as f64)),
         total_text: SharedString::from(match s.total_size {
             Some(t) => util::human_bytes(t as f64),
@@ -2630,6 +2688,7 @@ mod s2_render_tests {
             expected_hash: None,
             computed_hash: None,
             attempts: 0,
+            segment_retry: None,
             verify_bps: 0.0,
         };
         ui.show().unwrap();

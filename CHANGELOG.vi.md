@@ -2,6 +2,28 @@
 
 Các thay đổi đáng chú ý của UDM. Tiếng Anh: [CHANGELOG.md](CHANGELOG.md).
 
+## 0.2.2
+
+- **Tải không còn chết vì nghẽn**: khi một kết nối của một lượt tải
+  nhiều đoạn bị nghẽn, UDM thử lại đúng đoạn đó thay vì khởi động lại
+  cả lượt, và hàng tác vụ hiển thị lần thử lại trong lúc nó diễn ra.
+  Một lượt tải trước đây có thể đốt hết số lần thử vì vài kết nối
+  nghẽn rồi thất bại, nay tự hồi phục.
+- **Nhận lượt tải từ trình duyệt, chắc chắn hơn**: việc hủy phía
+  Chrome được xác nhận trước khi quyền sở hữu chuyển giao, và lượt
+  tải nào trình duyệt giữ lại sẽ được trình duyệt tiếp tục trên mọi
+  đường thoát.
+- **Tiện ích Firefox dưới dạng tệp cài được**: bộ cài và bản portable
+  kèm tiện ích Firefox dưới dạng tệp zip trong thư mục `extension` —
+  chọn tệp đó tại **Load Temporary Add-on**. Mọi tệp zip đóng gói nay
+  ghi tên mục theo dạng portable, nên biểu tượng tiện ích hiển thị
+  đúng trong Firefox.
+- **Khay hệ thống**: thêm mục **Kiểm tra cập nhật** vào menu khay, và
+  các liên kết GitHub/GitLab ở trang Giới thiệu có logo hãng.
+- **Đã sửa**: cửa sổ tải đang chạy có thể mở vắt qua hai màn hình.
+- **Đã sửa**: lỗi hết giờ từng báo "timed out after 0s"; nay hiển thị
+  thời gian chờ đo thật.
+
 ## 0.2.1
 
 - **Tiện ích trình duyệt nay đi kèm UDM**: bộ cài và bản portable mang

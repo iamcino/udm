@@ -82,15 +82,17 @@ menu to quit. If Windows shows a warning, see
 
 The installer and the portable zip include `udm-host.exe` beside the app,
 and the extension itself in the `extension` folder (one subfolder per
-browser); each release also attaches the extension on its own as
+browser, plus the Firefox build as an installable zip file); each
+release also attaches the extension on its own as
 `udm-extension-chrome-<version>.zip` and `udm-extension-firefox-<version>.zip`.
 Turn a browser on in **Settings → Browser**:
 
 - **Firefox**: open `about:debugging`, choose **This Firefox**, click
-  **Load Temporary Add-on** and select `manifest.json` in the
-  `extension\firefox` folder, then flip the Firefox toggle. No ID to
-  copy — Firefox uses a fixed extension ID. A temporary add-on does not
-  survive a browser restart.
+  **Load Temporary Add-on** and select the bundled zip file
+  `udm-extension-firefox-<version>.zip` in the `extension` folder,
+  then flip the Firefox toggle. (Firefox installs the file, not the
+  `extension\firefox` folder.) No ID to copy — Firefox uses a fixed
+  extension ID. A temporary add-on does not survive a browser restart.
 - **Chrome**: open `chrome://extensions`, turn on **Developer mode**,
   click **Load unpacked** and select the `extension\chrome` folder. Then
   open the extension's options page and copy the extension ID it shows,

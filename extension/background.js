@@ -84,17 +84,27 @@ const fx = {
     // A resolved cancel request is not yet a confirmation: verify the
     // resulting state. "interrupted" (or the item being gone) confirms;
     // "complete" means the browser copy finished and owns the file.
+    // Chrome applies a cancel asynchronously - the state can still read
+    // "in_progress" for a few hundred ms after the request resolves
+    // (field case 2026-11-16: a single immediate check raced that
+    // transition and Chrome handoffs aborted as unconfirmed), so poll
+    // for the transition before giving up.
     try {
       await invoke(api.downloads.cancel, api.downloads, [id]);
     } catch {
       return false;
     }
-    try {
-      const items = await invoke(api.downloads.search, api.downloads, [{ id }]);
-      if (!items || items.length === 0) return true;
-      return items[0].state === "interrupted";
-    } catch {
-      return false;
+    for (let waited = 0; ; waited += 100) {
+      try {
+        const items = await invoke(api.downloads.search, api.downloads, [{ id }]);
+        if (!items || items.length === 0) return true;
+        if (items[0].state === "interrupted") return true;
+        if (items[0].state === "complete") return false;
+      } catch {
+        return false;
+      }
+      if (waited >= 2000) return false;
+      await new Promise((resolve) => setTimeout(resolve, 100));
     }
   },
   erase(id) {

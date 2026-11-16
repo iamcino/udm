@@ -163,6 +163,13 @@ function item(overrides) {
     const out = await H.createHandoffFlow(client, fx).handoff(item());
     assert.strictEqual(out, "kept-by-browser");
     assert.deepStrictEqual(client.calls, ["prepare", "abort"]);
+    // The download was paused at the start of the flow: a kept-by-browser
+    // exit must hand it back running, and the outcome must be recorded.
+    assert.ok(fx.calls.some((c) => c[0] === "resume"), "kept download must be resumed");
+    assert.ok(
+      fx.calls.some((c) => c[0] === "record" && c[1] === "kept-by-browser"),
+      "the kept-by-browser outcome must be recorded"
+    );
   });
 
   await test("flow: expired commit surfaces recovery-required", async () => {

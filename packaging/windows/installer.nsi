@@ -15,7 +15,7 @@
 Unicode true
 !define APPNAME        "udm"
 !ifndef VERSION
-!define VERSION        "0.2.1"
+!define VERSION        "0.2.2"
 !endif
 !define PUBLISHER      "Cino"
 !define EXE            "udm.exe"
@@ -78,6 +78,10 @@ Section "udm" SecMain
     File /r "..\..\dist\extension\chrome\*.*"
     SetOutPath "$INSTDIR\extension\firefox"
     File /r "..\..\dist\extension\firefox\*.*"
+    ; Firefox installs a file, not a folder: the bundled extension zip
+    ; (the Firefox guide in Settings > Browser points at it).
+    SetOutPath "$INSTDIR\extension"
+    File "..\..\dist\extension\udm-extension-firefox-${VERSION}.zip"
     SetOutPath "$INSTDIR"
 
     ; U2 first-trust record (REV1 sec. 2.1/2.5): the installer ships the

@@ -6,9 +6,12 @@ durable prepare/commit protocol to transfer download ownership.
 
 The installer and portable ZIP include `udm-host.exe` beside the app and
 the extension itself in the `extension` folder (`extension\chrome`,
-`extension\firefox`); each release also attaches the extension as
-standalone zips. There is no store listing yet, so the extension is still
-loaded manually from that folder, as described below. The extension passes a GET URL and hints, not cookies or a browser login session.
+`extension\firefox`), plus the Firefox build as an installable zip file,
+`udm-extension-firefox-<version>.zip`, in that folder; each release also
+attaches the extension as standalone zips. There is no store listing
+yet, so the extension is still loaded manually, as described below:
+Chrome loads its folder (Load unpacked); Firefox loads the bundled zip
+file, because Firefox installs a file, not a folder. The extension passes a GET URL and hints, not cookies or a browser login session.
 Some signed-in or session-dependent downloads therefore cannot work in UDM.
 
 ## Before you start

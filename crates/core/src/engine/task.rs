@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use crate::config::{ConflictPolicy, Settings, TransportPref};
-use crate::engine::{stop_reason, Event, LogLevel, SharedState, TaskCell};
+use crate::engine::{stop_reason, Event, LogLevel, SegmentRetry, SharedState, TaskCell};
 use crate::error::{Error, Result};
 use crate::hash;
 use crate::net::stack::{FamilyPaths, FamilyRoute};
@@ -785,29 +785,126 @@ async fn transfer(
         return transfer_families(ctx, cell, &plan, token).await;
     }
     let plan = &plan;
+    *cell.segment_retry.lock() = None;
     let count = cell.segments.read().len();
-    let mut set: JoinSet<Result<()>> = JoinSet::new();
-    for index in 0..count {
+    // Per-segment supervision (0.2.2): a segment that fails with a
+    // transport-class error is restarted alone, from its own committed
+    // checkpoint, after a backoff, while the surviving segments keep
+    // flowing. Before this, any one segment's error failed the whole
+    // attempt, so under per-connection stalls (field case 2026-11-16: an
+    // 8-segment resume burned all 5 task attempts in ~4.5 minutes and
+    // failed) the more segments a task had, the more certain an attempt
+    // was to die. HTTP status errors are NOT absorbed here (see the
+    // retryable set below); a fatal error, a stale generation, a spent
+    // per-segment budget or cancellation still ends the transfer, with
+    // the same error preference as before.
+    let mut set: JoinSet<(usize, Result<()>)> = JoinSet::new();
+    let mut seg_retries = vec![0u32; count];
+    fn spawn_segment(
+        set: &mut JoinSet<(usize, Result<()>)>,
+        ctx: &Arc<RunCtx>,
+        cell: &Arc<TaskCell>,
+        plan: &Plan,
+        token: &CancellationToken,
+        index: usize,
+        delay: Duration,
+    ) {
         let mut attempt = plan.clone();
         attempt.allocation_epoch = cell.allocation_epochs.lock()[index];
-        set.spawn(run_segment(
-            ctx.clone(),
-            cell.clone(),
-            attempt,
-            token.clone(),
-            index,
-        ));
+        let ctx = ctx.clone();
+        let cell = cell.clone();
+        let token = token.clone();
+        set.spawn(async move {
+            if !delay.is_zero() {
+                tokio::select! {
+                    _ = tokio::time::sleep(delay) => {}
+                    _ = token.cancelled() => return (index, Ok(())),
+                }
+            }
+            let result = run_segment(ctx, cell, attempt, token, index).await;
+            (index, result)
+        });
+    }
+    for index in 0..count {
+        spawn_segment(&mut set, ctx, cell, plan, token, index, Duration::ZERO);
     }
 
     let mut errors: Vec<Error> = Vec::new();
+    let mut abort = false;
     while let Some(joined) = set.join_next().await {
-        match joined {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => errors.push(e),
+        let (index, result) = match joined {
+            Ok(pair) => pair,
             Err(join_error) => {
-                errors.push(Error::Other(format!("segment task panicked: {join_error}")))
+                // The index is lost with a panicked worker; the segment it
+                // owned stays unfinished and the final all-done check turns
+                // this into the generic error below, exactly as before.
+                errors.push(Error::Other(format!("segment task panicked: {join_error}")));
+                continue;
             }
+        };
+        let Err(e) = result else {
+            // A segment that came back clean retires its own retry note.
+            let mut note = cell.segment_retry.lock();
+            if note.is_some_and(|n| n.segment == index as u32) {
+                *note = None;
+            }
+            continue;
+        };
+        let segment_done = cell.segments.read().get(index).is_some_and(|s| s.is_done());
+        if segment_done {
+            continue;
         }
+        // Only transport-class errors are retried at segment level:
+        // stalls, timeouts, connect/DNS failures and body-stream errors
+        // (which the reqwest conversion reports as Http3). An HTTP status
+        // is a server decision, not a transport hiccup: it stays with
+        // the task-level loop, which re-probes before spending an
+        // attempt - the accounting pinned by integrity_boundaries'
+        // protocol_restart_leaves_one_network_retry_for_503.
+        let retryable = matches!(
+            e,
+            Error::Stall { .. }
+                | Error::Timeout { .. }
+                | Error::Connect(_)
+                | Error::Dns(_)
+                | Error::Http3(_)
+        );
+        let give_up = abort
+            || token.is_cancelled()
+            || !retryable
+            || seg_retries[index] >= ctx.settings.max_retries;
+        if give_up {
+            if e.is_fatal() || matches!(e, Error::StaleGeneration { .. }) {
+                abort = true;
+            }
+            errors.push(e);
+            continue;
+        }
+        seg_retries[index] += 1;
+        *cell.segment_retry.lock() = Some(SegmentRetry {
+            segment: index as u32,
+            attempt: seg_retries[index],
+            max: ctx.settings.max_retries,
+        });
+        let delay = util::backoff(
+            seg_retries[index],
+            Duration::from_millis(700),
+            Duration::from_secs(30),
+        );
+        ctx.state.log(
+            LogLevel::Warn,
+            format!(
+                "#{} {} segment {}: {} (segment retry {}/{} in {})",
+                cell.id,
+                filename_of(cell),
+                index,
+                e.short(),
+                seg_retries[index],
+                ctx.settings.max_retries,
+                util::human_duration_ms(delay.as_millis() as i64)
+            ),
+        );
+        spawn_segment(&mut set, ctx, cell, plan, token, index, delay);
     }
 
     if token.is_cancelled() {

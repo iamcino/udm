@@ -138,6 +138,44 @@ const tick = () => new Promise((r) => setTimeout(r, 100));
     assert.deepStrictEqual(crHosts, ["pw.cino.udm.handoff.chrome"]);
   });
 
+  // ---- fx.cancel confirmation polling (Chrome field case 2026-11-16):
+  // ---- Chrome applies a cancel asynchronously; the state can still read
+  // ---- "in_progress" when the cancel request resolves. fx.cancel must
+  // ---- poll for the transition instead of checking exactly once.
+  function cancelContext(flip) {
+    const hosts = [];
+    const fake = makeFakeApi(hosts, false);
+    let state = "in_progress";
+    fake.api.downloads.cancel = async () => {
+      if (flip) setTimeout(() => { state = flip; }, 250);
+    };
+    fake.api.downloads.search = async () => [{ id: ITEM.id, state }];
+    const ctx = vm.createContext({ setTimeout, clearTimeout, console, URL });
+    ctx.chrome = fake.api;
+    ctx.browser = fake.api;
+    ctx.importScripts = (file) => vm.runInContext(read(file), ctx, { filename: file });
+    vm.runInContext(read("background.js"), ctx, { filename: "background.js" });
+    return ctx;
+  }
+
+  await test("fx.cancel confirms once Chrome lands the interrupted state", async () => {
+    const ctx = cancelContext("interrupted");
+    const confirmed = await vm.runInContext("fx.cancel(7)", ctx);
+    assert.strictEqual(confirmed, true);
+  });
+
+  await test("fx.cancel refuses when the download completes instead", async () => {
+    const ctx = cancelContext("complete");
+    const confirmed = await vm.runInContext("fx.cancel(7)", ctx);
+    assert.strictEqual(confirmed, false);
+  });
+
+  await test("fx.cancel gives up when the state never settles", async () => {
+    const ctx = cancelContext(null);
+    const confirmed = await vm.runInContext("fx.cancel(7)", ctx);
+    assert.strictEqual(confirmed, false);
+  });
+
   console.log(`\n${passed} tests passed`);
 })().catch((e) => {
   console.error(e);

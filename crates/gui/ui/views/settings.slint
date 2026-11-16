@@ -382,7 +382,7 @@ export component SettingsView inherits Rectangle {
                             ActionButton { label: I18n.tr("Install extension"); compact: true; clicked => { root.firefox-guide-visible = !root.firefox-guide-visible; } }
                         }
                         if root.firefox-guide-visible: Text {
-                            text: I18n.tr("Firefox guide: the extension ships with UDM, in the extension\\firefox folder next to udm.exe (also on the release page as the udm-extension-firefox zip). Open about:debugging, choose This Firefox, click Load Temporary Add-on and select the manifest.json file inside that folder. A temporary add-on does not survive a browser restart. The extension ID is fixed (udm-handoff@cino.pw); there is no field to fill. UDM does not watch the browser's extension list.");
+                            text: I18n.tr("Firefox guide: the extension ships with UDM as a zip file, in the extension folder next to udm.exe (file name udm-extension-firefox-<version>.zip; the same zip is on the release page). Open about:debugging, choose This Firefox, click Load Temporary Add-on and select that zip file. A temporary add-on does not survive a browser restart. The extension ID is fixed (udm-handoff@cino.pw); there is no field to fill. UDM does not watch the browser's extension list.");
                             color: Theme.text-faint;
                             font-size: 11px;
                             wrap: word-wrap;

@@ -256,7 +256,20 @@ impl Http12Client {
             builder = builder.header(name, value.as_str());
         }
 
-        let response = builder.send().await?;
+        let started = std::time::Instant::now();
+        let response = builder.send().await.map_err(|e| {
+            if e.is_timeout() {
+                // The context-free From impl cannot know how long the
+                // request actually ran and reports 0s (field case
+                // 2026-11-16: "operation timed out after 0s" for ~40s
+                // waits). Report the measured elapsed time instead.
+                Error::Timeout {
+                    secs: started.elapsed().as_secs(),
+                }
+            } else {
+                Error::from(e)
+            }
+        })?;
         if self.h2_only && response.version() != http::Version::HTTP_2 {
             return Err(Error::InvalidResponse(
                 "H2 experiment requires negotiated H2".into(),

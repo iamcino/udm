@@ -42,6 +42,9 @@ pub enum TrayAction {
     ToggleShowHide,
     PauseAll,
     ResumeAll,
+    /// "Check for Updates" menu item: the same manual check as the
+    /// Settings button (0.2.2; the tray menu had no way to ask).
+    CheckForUpdates,
     Exit,
 }
 
@@ -75,6 +78,7 @@ mod imp {
         popup_item: MenuItem,
         pause_all: MenuItem,
         resume_all: MenuItem,
+        check_updates: MenuItem,
         exit: MenuItem,
         visible: bool,
         vi: bool,
@@ -90,6 +94,7 @@ mod imp {
     ];
     pub const DEFAULT_TOOLTIP: &str = "UDM \u{2014} Universal Download Manager";
     const ID_POPUP: &str = "udm.tray.popup";
+    const ID_CHECK_UPDATES: &str = "udm.tray.check_updates";
 
     impl Tray {
         pub fn new(vi: bool) -> Option<Tray> {
@@ -105,6 +110,12 @@ mod imp {
             let resume_all = MenuItem::with_id(
                 ID_RESUME_ALL,
                 text(vi, "Resume all", "Tiếp tục tất cả"),
+                true,
+                None,
+            );
+            let check_updates = MenuItem::with_id(
+                ID_CHECK_UPDATES,
+                text(vi, "Check for Updates", "Kiểm tra cập nhật"),
                 true,
                 None,
             );
@@ -139,6 +150,7 @@ mod imp {
                 &PredefinedMenuItem::separator(),
                 &pause_all,
                 &resume_all,
+                &check_updates,
                 &PredefinedMenuItem::separator(),
                 &exit,
             ])
@@ -158,6 +170,7 @@ mod imp {
                 popup_item,
                 pause_all,
                 resume_all,
+                check_updates,
                 exit,
                 visible: true,
                 vi,
@@ -179,6 +192,8 @@ mod imp {
                     TrayAction::PauseAll
                 } else if event.id() == self.resume_all.id() {
                     TrayAction::ResumeAll
+                } else if event.id() == self.check_updates.id() {
+                    TrayAction::CheckForUpdates
                 } else if event.id() == self.exit.id() {
                     TrayAction::Exit
                 } else {
@@ -253,26 +268,63 @@ mod imp {
         }
     }
 
-    /// Bottom-right anchor of the primary work area for a popup of the
-    /// given physical size, with a small margin - the tray corner.
-    pub fn work_area_bottom_right(width: i32, height: i32) -> (i32, i32) {
-        use windows_sys::Win32::Foundation::RECT;
-        use windows_sys::Win32::UI::WindowsAndMessaging::{SystemParametersInfoW, SPI_GETWORKAREA};
-        let mut area = RECT {
-            left: 0,
-            top: 0,
-            right: 1920,
-            bottom: 1040,
+    /// Work area (physical pixels, virtual-screen coordinates) of the
+    /// monitor under the cursor - the monitor whose tray menu was just
+    /// clicked - as (left, top, right, bottom). Falls back to the
+    /// primary work area when the monitor cannot be determined. The
+    /// downloads popup anchors inside this rectangle and clamps to it,
+    /// so it can never straddle two monitors (field case 2026-11-16:
+    /// first open landed across the seam - placement used only the
+    /// primary work area with a not-yet-settled first-show size).
+    pub fn cursor_work_area() -> (i32, i32, i32, i32) {
+        use windows_sys::Win32::Foundation::{POINT, RECT};
+        use windows_sys::Win32::Graphics::Gdi::{
+            GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+        };
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            GetCursorPos, SystemParametersInfoW, SPI_GETWORKAREA,
         };
         unsafe {
+            let mut pt = POINT { x: 0, y: 0 };
+            if GetCursorPos(&mut pt) != 0 {
+                let monitor = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+                if monitor != 0 {
+                    let mut info = MONITORINFO {
+                        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                        rcMonitor: RECT {
+                            left: 0,
+                            top: 0,
+                            right: 0,
+                            bottom: 0,
+                        },
+                        rcWork: RECT {
+                            left: 0,
+                            top: 0,
+                            right: 0,
+                            bottom: 0,
+                        },
+                        dwFlags: 0,
+                    };
+                    if GetMonitorInfoW(monitor, &mut info) != 0 {
+                        let w = info.rcWork;
+                        return (w.left, w.top, w.right, w.bottom);
+                    }
+                }
+            }
+            let mut area = RECT {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1040,
+            };
             let _ = SystemParametersInfoW(
                 SPI_GETWORKAREA,
                 0,
                 &mut area as *mut RECT as *mut core::ffi::c_void,
                 0,
             );
+            (area.left, area.top, area.right, area.bottom)
         }
-        (area.right - width - 12, area.bottom - height - 12)
     }
 
     fn icon_from_png(png: &[u8]) -> Option<Icon> {
@@ -320,9 +372,9 @@ mod imp {
         pub fn set_update_badge(&mut self, _on: bool) {}
     }
 
-    pub fn work_area_bottom_right(_width: i32, _height: i32) -> (i32, i32) {
-        (100, 100)
+    pub fn cursor_work_area() -> (i32, i32, i32, i32) {
+        (0, 0, 1920, 1040)
     }
 }
 
-pub use imp::{work_area_bottom_right, Tray};
+pub use imp::{cursor_work_area, Tray};

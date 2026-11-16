@@ -6,6 +6,9 @@
 #   dist\udm-host.exe                (browser Native Messaging host)
 #   dist\udm-<version>-setup.exe     (per-user NSIS installer)
 #   dist\udm-<version>-portable.zip  (drop-anywhere folder, portable mode)
+#   dist\udm-extension-<browser>-<version>.zip  (standalone extension zips;
+#                               the Firefox zip is also bundled inside the
+#                               installer and the portable zip)
 #
 # Prereqs: Rust (stable, x86_64-pc-windows-msvc), NSIS 3 (makensis on PATH),
 # PowerShell 5+. No admin needed for any of this.
@@ -51,6 +54,71 @@ $pubkeyMatch = [regex]::Match($pinText, 'pub const PUBLISHER_PUBLIC_KEY_HEX: &st
 if (-not $pubkeyMatch.Success) { throw "could not read PUBLISHER_PUBLIC_KEY_HEX from crates/core/src/update_pin.rs" }
 $updatePubkey = $pubkeyMatch.Groups[1].Value
 
+# Zip writing with byte-exact entry names. Compress-Archive writes
+# subdirectory entries with '\' separators on Windows, which strict
+# consumers cannot resolve (the updater verifies portable members
+# verbatim against the signed manifest; Firefox resolves extension
+# resources by '/' name - the 0.2.1 zips' icons\ entries were
+# unresolvable and the icon rendered blank). Entries are written
+# explicitly with '/' names, files only, in sorted order.
+function Write-Zip($sourceDir, $zipPath) {
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    if (Test-Path $zipPath) { Remove-Item -Force $zipPath }
+    $base = (Resolve-Path $sourceDir).Path.TrimEnd('\') + '\'
+    $zip = [System.IO.Compression.ZipFile]::Open($zipPath, [System.IO.Compression.ZipArchiveMode]::Create)
+    try {
+        foreach ($file in Get-ChildItem -Recurse -File $sourceDir | Sort-Object FullName) {
+            $rel = $file.FullName.Substring($base.Length).Replace('\', '/')
+            $entry = $zip.CreateEntry($rel, [System.IO.Compression.CompressionLevel]::Optimal)
+            $entry.LastWriteTime = $file.LastWriteTime
+            $inStream = [System.IO.File]::OpenRead($file.FullName)
+            $outStream = $entry.Open()
+            try { $inStream.CopyTo($outStream) } finally { $outStream.Dispose(); $inStream.Dispose() }
+        }
+    } finally { $zip.Dispose() }
+    Assert-ZipLayout $zipPath $false
+}
+
+# Entry names exactly as stored: parse the central directory bytes.
+# (Readers that normalize separators - .NET's FullName, Python's
+# ZipInfo.filename - cannot testify here; the raw bytes can.)
+function Get-ZipRawEntryNames($zipPath) {
+    $bytes = [System.IO.File]::ReadAllBytes($zipPath)
+    $eocd = -1
+    for ($i = $bytes.Length - 22; $i -ge 0; $i--) {
+        if ($bytes[$i] -eq 0x50 -and $bytes[$i + 1] -eq 0x4b -and $bytes[$i + 2] -eq 0x05 -and $bytes[$i + 3] -eq 0x06) { $eocd = $i; break }
+    }
+    if ($eocd -lt 0) { throw "not a zip file: $zipPath" }
+    $count = [BitConverter]::ToUInt16($bytes, $eocd + 10)
+    $pos = [BitConverter]::ToUInt32($bytes, $eocd + 16)
+    $names = @()
+    for ($n = 0; $n -lt $count; $n++) {
+        if ($bytes[$pos] -ne 0x50 -or $bytes[$pos + 1] -ne 0x4b -or $bytes[$pos + 2] -ne 0x01 -or $bytes[$pos + 3] -ne 0x02) { throw "corrupt central directory in $zipPath" }
+        $nameLen = [BitConverter]::ToUInt16($bytes, $pos + 28)
+        $extraLen = [BitConverter]::ToUInt16($bytes, $pos + 30)
+        $commentLen = [BitConverter]::ToUInt16($bytes, $pos + 32)
+        $names += [Text.Encoding]::UTF8.GetString($bytes, $pos + 46, $nameLen)
+        $pos += 46 + $nameLen + $extraLen + $commentLen
+    }
+    $names
+}
+
+# The zip layout gate: no backslash in any raw entry name, ever; the
+# portable zip additionally keeps its executables at the root, where
+# the updater's member verification looks for them.
+function Assert-ZipLayout($zipPath, $portableRoot) {
+    $names = Get-ZipRawEntryNames $zipPath
+    foreach ($name in $names) {
+        if ($name.Contains('\')) { throw "zip entry with a backslash name in $zipPath`: $name" }
+    }
+    if ($portableRoot) {
+        foreach ($exe in @("udm.exe", "udm-cli.exe", "udm-host.exe")) {
+            if ($names -notcontains $exe) { throw "portable zip is missing root entry $exe in $zipPath" }
+        }
+    }
+}
+
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
 
 $featureArgs = @()
@@ -79,7 +147,10 @@ Copy-Item (Join-Path $root "crates\gui\vendor\cino-ui\ui\fonts\OFL.txt") (Join-P
 # Firefox folder carries manifest.firefox.json AS manifest.json, and the
 # other browser's manifest and the tests stay out. The folders ship in the
 # installer and in the portable zip; the zips of the same folders are
-# standalone release assets for users who only want the extension.
+# standalone release assets for users who only want the extension. The
+# Firefox zip is additionally bundled at the extension root of the
+# installer and the portable zip, because Firefox installs the file,
+# not the folder.
 $extSrc = Join-Path $root "extension"
 $extFiles = @("background.js", "handoff.js", "options.html", "options.js", "popup.css", "popup.html", "popup.js", "strings.js", "README.md")
 foreach ($browser in @("chrome", "firefox")) {
@@ -89,8 +160,15 @@ foreach ($browser in @("chrome", "firefox")) {
     Copy-Item (Join-Path $extSrc "icons\*.png") (Join-Path $dest "icons") -Force
     $manifest = if ($browser -eq "firefox") { "manifest.firefox.json" } else { "manifest.json" }
     Copy-Item (Join-Path $extSrc $manifest) (Join-Path $dest "manifest.json") -Force
-    Compress-Archive -Path "$dest\*" -DestinationPath (Join-Path $dist "udm-extension-$browser-$version.zip") -Force
+    Write-Zip $dest (Join-Path $dist "udm-extension-$browser-$version.zip")
 }
+
+# The Firefox build also ships AS a zip file inside the bundles: a
+# folder cannot be installed in Firefox, the zip can (about:debugging,
+# Load Temporary Add-on, select the file). Staged at the extension
+# root, it rides into the installer and the portable zip with the
+# folders; the Chrome folder remains the load-unpacked unit.
+Copy-Item (Join-Path $dist "udm-extension-firefox-$version.zip") (Join-Path $dist "extension\udm-extension-firefox-$version.zip") -Force
 
 function Sign-File($file) {
     $signArgs = @{ Path = $file; ProjectName = 'UDM' }
@@ -130,7 +208,11 @@ Copy-Item (Join-Path $dist "BE-VIETNAM-PRO-OFL.txt") $portable
 Copy-Item -Recurse (Join-Path $dist "extension") (Join-Path $portable "extension")
 # The marker switches udm into portable mode: data lives beside the exe.
 New-Item -ItemType File -Force -Path (Join-Path $portable "udm.portable") | Out-Null
-Compress-Archive -Path $portable -DestinationPath (Join-Path $dist "udm-$version-portable.zip") -Force
+# Root-level entries: the updater verifies members verbatim against
+# the signed manifest and stages a candidate that needs bare
+# udm.exe/udm-cli.exe at the zip root (payload contract, 0.2.1 e2e).
+Write-Zip $portable (Join-Path $dist "udm-$version-portable.zip")
+Assert-ZipLayout (Join-Path $dist "udm-$version-portable.zip") $true
 
 Write-Host "==> done. artifacts in $dist"
 Get-ChildItem $dist | Format-Table Name, Length

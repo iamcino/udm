@@ -228,7 +228,13 @@ function createHandoffFlow(client, fx) {
       if (!cancelled) {
         // The cancel was not confirmed (the download completed or the
         // browser refused): never commit on an unconfirmed cancel.
-        await fx.abort(tx).catch(() => null);
+        // Release the prepared intent through the CLIENT (abort is not
+        // an fx member - calling fx.abort used to throw and reach the
+        // resume below only via the catch-all, losing this record), and
+        // hand the download back running: it was paused at the start of
+        // the flow, as on every other kept-by-browser exit.
+        await client.abort(tx).catch(() => null);
+        await fx.resume(item.id).catch(() => {});
         await fx.record({ tx, name: intent.filename_hint || intent.url, status: "kept-by-browser", at: Date.now() });
         return "kept-by-browser";
       }

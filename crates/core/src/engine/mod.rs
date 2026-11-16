@@ -99,6 +99,17 @@ impl LogLevel {
     }
 }
 
+/// A segment-level retry currently in flight inside a transfer (0.2.2):
+/// which segment, which retry, out of how many. Published on the
+/// snapshot so a task recovering from a stall reads as retrying instead
+/// of frozen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SegmentRetry {
+    pub segment: u32,
+    pub attempt: u32,
+    pub max: u32,
+}
+
 /// Everything the UI needs to render one row.
 #[derive(Clone, Debug)]
 pub struct TaskSnapshot {
@@ -131,6 +142,9 @@ pub struct TaskSnapshot {
     pub expected_hash: Option<String>,
     pub computed_hash: Option<String>,
     pub attempts: u32,
+    /// Segment-level retry in flight, when the transfer is recovering
+    /// from a transport error without spending a task attempt.
+    pub segment_retry: Option<SegmentRetry>,
     /// Bytes per second when verifying a checksum (0 otherwise).
     pub verify_bps: f64,
 }
@@ -240,6 +254,10 @@ pub(crate) struct TaskCell {
     /// Scheduler-owned per-range leases. Changed only after the old worker joins.
     pub(super) allocation_epochs: Mutex<Vec<u64>>,
     pub(super) storage_failure: Mutex<Option<(u64, String)>>,
+    /// Latest segment-level retry scheduled by the single-path transfer
+    /// supervisor; cleared when that segment next returns cleanly and
+    /// when a transfer starts. Snapshot-only, never persisted.
+    pub(super) segment_retry: Mutex<Option<SegmentRetry>>,
     pub(super) uses_family_paths: AtomicBool,
     proof_barrier: Mutex<Option<Arc<proof::ProofBarrier>>>,
     /// Runtime run generation (Usagi PR 3). `spawn_task` advances it once per
@@ -308,6 +326,7 @@ impl TaskCell {
             lanes: Arc::new(crate::net::lane::LaneTable::default()),
             allocation_epochs: Mutex::new(Vec::new()),
             storage_failure: Mutex::new(None),
+            segment_retry: Mutex::new(None),
             uses_family_paths: AtomicBool::new(false),
             proof_barrier: Mutex::new(None),
             generation: AtomicU64::new(0),
@@ -423,6 +442,7 @@ impl TaskCell {
             expected_hash: record.expected_hash.as_ref().map(|h| h.display()),
             computed_hash: record.computed_hash.clone(),
             attempts: record.attempts,
+            segment_retry: *self.segment_retry.lock(),
             verify_bps,
         }
     }

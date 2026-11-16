@@ -2,6 +2,27 @@
 
 All notable changes to UDM are listed here. Vietnamese: [CHANGELOG.vi.md](CHANGELOG.vi.md).
 
+## 0.2.2
+
+- **Downloads survive stalls**: when one connection of a multi-part
+  download stalls, UDM retries just that part instead of restarting
+  the whole attempt, and the task row shows the retry while it
+  happens. A download that previously could burn all its attempts on
+  a few stalled connections and fail now recovers on its own.
+- **Browser handoff, more reliable**: Chrome cancellations are
+  confirmed before ownership moves, and a download the browser keeps
+  is resumed in the browser on every exit path.
+- **Firefox extension as an installable file**: the installer and the
+  portable zip bundle the Firefox extension as a zip file in the
+  `extension` folder — select that file under **Load Temporary
+  Add-on**. All bundled zips now write their entry names portably,
+  so the extension icon resolves in Firefox.
+- **Tray**: a **Check for Updates** item joins the tray menu, and the
+  About page's GitHub/GitLab links carry their brand marks.
+- **Fixed**: the downloads popup could open straddling two monitors.
+- **Fixed**: timeout errors said "timed out after 0s"; they now show
+  the measured wait.
+
 ## 0.2.1
 
 - **The browser extension ships with UDM**: the installer and the portable
