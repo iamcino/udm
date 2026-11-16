@@ -328,6 +328,27 @@ pub struct Release {
 /// Build the payload zip and the manifest JSON for `spec`, signed by
 /// every key in `signers` (one for a normal release, two inside the
 /// dual-signature window), with the payload served from `port`.
+/// A release version strictly newer than the running build, derived
+/// from `usagi::VERSION` so a fixture can never collide with a
+/// version bump (the literal default above did exactly that when
+/// the workspace reached 0.2.0).
+pub fn newer_version() -> String {
+    let mut parts = usagi::VERSION.split('.');
+    let major: u64 = parts.next().unwrap().parse().unwrap();
+    let minor: u64 = parts.next().unwrap().parse().unwrap();
+    format!("{}.{}.0", major, minor + 1)
+}
+
+/// The standard valid release, offered at a version newer than the
+/// running build: for tests that drive the real update check, whose
+/// newer-than comparison reads the compiled crate version.
+pub fn newer_spec() -> ManifestSpec {
+    ManifestSpec {
+        version: newer_version(),
+        ..ManifestSpec::default()
+    }
+}
+
 pub fn release_at(
     signers: &[&Publisher],
     port: u16,

@@ -79,12 +79,7 @@ async fn apply_swaps_then_first_start_confirms_the_receipt() {
     let signer = publisher();
     let loop_a = spawn(certs.server.clone()).await;
     let loop_b = spawn(certs.server.clone()).await;
-    let release = release_at(
-        &[&signer],
-        loop_a.addr.port(),
-        FILES,
-        &ManifestSpec::default(),
-    );
+    let release = release_at(&[&signer], loop_a.addr.port(), FILES, &newer_spec());
     loop_a.set(serve_release(release.json.clone(), release.zip.clone()));
     loop_b.set(serve_release(release.json, release.zip));
     let origins = origins_for(loop_a.addr, loop_b.addr);
@@ -98,7 +93,7 @@ async fn apply_swaps_then_first_start_confirms_the_receipt() {
     let trust = trust_from(&signer.trust, &layout);
     let journal = apply_staged_with_trust(&layout, &trust, NOW).unwrap();
     assert_eq!(journal.step, Step::NewStaged);
-    assert_eq!(journal.new_version, "0.2.0");
+    assert_eq!(journal.new_version, newer_version());
     assert_eq!(fs::read(base.join("udm.exe")).unwrap(), NEW_EXE);
     assert_eq!(fs::read(base.join("udm-cli.exe")).unwrap(), NEW_CLI);
     assert_eq!(fs::read(base.join("udm.exe.old")).unwrap(), OLD_EXE);
@@ -112,7 +107,7 @@ async fn apply_swaps_then_first_start_confirms_the_receipt() {
     assert_eq!(
         report.outcome,
         RecoveryOutcome::AwaitingFirstStart {
-            version: "0.2.0".to_owned()
+            version: newer_version()
         }
     );
     assert!(report.notice.is_none());
@@ -123,7 +118,7 @@ async fn apply_swaps_then_first_start_confirms_the_receipt() {
     assert_eq!(
         confirmed,
         ConfirmOutcome::Confirmed {
-            version: "0.2.0".to_owned()
+            version: newer_version()
         }
     );
     assert!(current_journal(&layout).unwrap().is_none());

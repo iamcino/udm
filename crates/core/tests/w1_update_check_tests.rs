@@ -114,7 +114,7 @@ async fn case10_flag_off_builds_no_session_and_opens_no_socket() {
 
 #[tokio::test]
 async fn case10_flag_on_fetches_verifies_and_stages() {
-    let mut rig = rig(&ManifestSpec::default()).await;
+    let mut rig = rig(&newer_spec()).await;
     set_checks_enabled(&rig.layout, true).unwrap();
     assert!(checks_enabled(&rig.layout));
 
@@ -124,7 +124,7 @@ async fn case10_flag_on_fetches_verifies_and_stages() {
     assert!(
         outcome
             .notice
-            .starts_with("Update available: version 0.2.0"),
+            .starts_with(&format!("Update available: version {}", newer_version())),
         "notice: {}",
         outcome.notice
     );
@@ -135,7 +135,7 @@ async fn case10_flag_on_fetches_verifies_and_stages() {
     let staged = staged_candidate(&rig.layout)
         .unwrap()
         .expect("a staged candidate");
-    assert_eq!(staged.version, "0.2.0");
+    assert_eq!(staged.version, newer_version());
     // The accepted manifest's epoch was persisted durably by fetch.
     assert_eq!(
         read_epoch(&usagi::update_check::epoch_path(&rig.layout)),
@@ -145,7 +145,7 @@ async fn case10_flag_on_fetches_verifies_and_stages() {
 
 #[tokio::test]
 async fn case10_flag_absent_resolves_on_and_fetches() {
-    let mut rig = rig(&ManifestSpec::default()).await;
+    let mut rig = rig(&newer_spec()).await;
     // No flag file at all: the default resolves ON, so the factory IS
     // called against the fixture.
     assert!(!rig.layout.base().join("update-checks-enabled").exists());
