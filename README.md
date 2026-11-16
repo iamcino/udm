@@ -80,15 +80,21 @@ menu to quit. If Windows shows a warning, see
 
 ### Browser handoff
 
-The installer and the portable zip include `udm-host.exe` beside the app.
+The installer and the portable zip include `udm-host.exe` beside the app,
+and the extension itself in the `extension` folder (one subfolder per
+browser); each release also attaches the extension on its own as
+`udm-extension-chrome-<version>.zip` and `udm-extension-firefox-<version>.zip`.
 Turn a browser on in **Settings → Browser**:
 
-- **Firefox**: load the extension as a temporary add-on (see
-  [the extension setup guide](extension/README.md)), then flip the Firefox
-  toggle. No ID to copy — Firefox uses a fixed extension ID.
-- **Chrome**: load the extension unpacked, open the extension's options
-  page and copy the extension ID it shows, paste it into the Chrome row in
-  Settings, then flip the toggle.
+- **Firefox**: open `about:debugging`, choose **This Firefox**, click
+  **Load Temporary Add-on** and select `manifest.json` in the
+  `extension\firefox` folder, then flip the Firefox toggle. No ID to
+  copy — Firefox uses a fixed extension ID. A temporary add-on does not
+  survive a browser restart.
+- **Chrome**: open `chrome://extensions`, turn on **Developer mode**,
+  click **Load unpacked** and select the `extension\chrome` folder. Then
+  open the extension's options page and copy the extension ID it shows,
+  paste it into the Chrome row in Settings, then flip the toggle.
 
 The toggle registers the native messaging host immediately; there is no
 Save step, and moving the app folder is repaired automatically the next
@@ -120,8 +126,10 @@ row in the **All** view.
 Downloads go to the configured download folder, normally your Windows Downloads
 folder. Portable mode moves the application data, **not** your downloads. The
 database is `udm.redb`; the log is `logs\udm.log`; browser handoff keeps extra
-files under `handoff\`. Older `quget` paths and environment names still work for
-upgrades. See [operations and backups](docs/OPERATIONS.md) before moving data.
+files under `handoff\`. A data folder left by a pre-rename install under the
+old `quget` name is renamed to `udm` automatically on the first start after
+upgrading (everything in it moves, update state included); older environment
+names still work. See [operations and backups](docs/OPERATIONS.md) before moving data.
 
 ## Command line
 

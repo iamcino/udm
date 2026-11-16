@@ -77,15 +77,21 @@ hiện cảnh báo, xem [Cảnh báo của Windows](#cảnh-báo-của-windows-v
 
 ### Nhận lượt tải từ trình duyệt
 
-Bộ cài và bản portable kèm `udm-host.exe` ngay cạnh ứng dụng. Bật trình
-duyệt tại **Cài đặt → Trình duyệt**:
+Bộ cài và bản portable kèm `udm-host.exe` ngay cạnh ứng dụng, và kèm cả
+tiện ích trong thư mục `extension` (mỗi trình duyệt một thư mục con); mỗi
+bản phát hành cũng đính kèm tiện ích riêng dưới dạng
+`udm-extension-chrome-<phiên bản>.zip` và `udm-extension-firefox-<phiên bản>.zip`.
+Bật trình duyệt tại **Cài đặt → Trình duyệt**:
 
-- **Firefox**: nạp tiện ích dưới dạng add-on tạm thời (xem
-  [hướng dẫn cài tiện ích](extension/README.md)), rồi bật công tắc Firefox.
-  Không cần chép ID — Firefox dùng ID tiện ích cố định.
-- **Chrome**: nạp tiện ích dạng unpacked, mở trang options của tiện ích và
-  chép extension ID hiển thị ở đó, dán vào hàng Chrome trong Cài đặt, rồi
-  bật công tắc.
+- **Firefox**: mở `about:debugging`, chọn **This Firefox**, bấm
+  **Load Temporary Add-on** và chọn `manifest.json` trong thư mục
+  `extension\firefox`, rồi bật công tắc Firefox. Không cần chép ID —
+  Firefox dùng ID tiện ích cố định. Tiện ích nạp tạm thời sẽ mất khi khởi
+  động lại trình duyệt.
+- **Chrome**: mở `chrome://extensions`, bật **Developer mode**, bấm
+  **Load unpacked** và chọn thư mục `extension\chrome`. Sau đó mở trang
+  options của tiện ích và chép extension ID hiển thị ở đó, dán vào hàng
+  Chrome trong Cài đặt, rồi bật công tắc.
 
 Công tắc đăng ký native messaging host ngay lập tức; không có bước Lưu, và
 việc dời thư mục ứng dụng sẽ được tự sửa ở lần khởi động UDM kế tiếp. Mỗi

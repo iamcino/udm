@@ -74,6 +74,24 @@ Copy-Item (Join-Path $root "docs\PRIVACY.md") (Join-Path $dist "PRIVACY.md") -Fo
 Copy-Item (Join-Path $root "crates\gui\vendor\cino-ui\LICENSE") (Join-Path $dist "CINO-UI-LICENSE.txt") -Force
 Copy-Item (Join-Path $root "crates\gui\vendor\cino-ui\ui\fonts\OFL.txt") (Join-Path $dist "BE-VIETNAM-PRO-OFL.txt") -Force
 
+# Browser extension bundles: one self-contained folder per browser, staged
+# from the extension tree. The Chrome folder keeps manifest.json; the
+# Firefox folder carries manifest.firefox.json AS manifest.json, and the
+# other browser's manifest and the tests stay out. The folders ship in the
+# installer and in the portable zip; the zips of the same folders are
+# standalone release assets for users who only want the extension.
+$extSrc = Join-Path $root "extension"
+$extFiles = @("background.js", "handoff.js", "options.html", "options.js", "popup.css", "popup.html", "popup.js", "strings.js", "README.md")
+foreach ($browser in @("chrome", "firefox")) {
+    $dest = Join-Path $dist "extension\$browser"
+    New-Item -ItemType Directory -Force -Path (Join-Path $dest "icons") | Out-Null
+    foreach ($f in $extFiles) { Copy-Item (Join-Path $extSrc $f) (Join-Path $dest $f) -Force }
+    Copy-Item (Join-Path $extSrc "icons\*.png") (Join-Path $dest "icons") -Force
+    $manifest = if ($browser -eq "firefox") { "manifest.firefox.json" } else { "manifest.json" }
+    Copy-Item (Join-Path $extSrc $manifest) (Join-Path $dest "manifest.json") -Force
+    Compress-Archive -Path "$dest\*" -DestinationPath (Join-Path $dist "udm-extension-$browser-$version.zip") -Force
+}
+
 function Sign-File($file) {
     $signArgs = @{ Path = $file; ProjectName = 'UDM' }
     if ($PfxPath) { $signArgs.PfxPath = $PfxPath }
@@ -109,6 +127,7 @@ Copy-Item (Join-Path $dist "LICENSE.txt")   $portable
 Copy-Item (Join-Path $dist "PRIVACY.md")    $portable
 Copy-Item (Join-Path $dist "CINO-UI-LICENSE.txt") $portable
 Copy-Item (Join-Path $dist "BE-VIETNAM-PRO-OFL.txt") $portable
+Copy-Item -Recurse (Join-Path $dist "extension") (Join-Path $portable "extension")
 # The marker switches udm into portable mode: data lives beside the exe.
 New-Item -ItemType File -Force -Path (Join-Path $portable "udm.portable") | Out-Null
 Compress-Archive -Path $portable -DestinationPath (Join-Path $dist "udm-$version-portable.zip") -Force

@@ -568,6 +568,8 @@ pub fn setup(
     ui.on_open_data_dir(move || shell_open(&g.engine.paths().root, false));
     let g = gui.clone();
     ui.on_open_log(move || shell_open(&g.engine.paths().log_file, false));
+    ui.on_open_github(move || shell_open_url("https://github.com/iamcino/udm"));
+    ui.on_open_gitlab(move || shell_open_url("https://gitlab.com/cino-group/udm"));
 
     // ------------------------------------------------------------- poll timer
     let timer = slint::Timer::default();
@@ -2516,6 +2518,18 @@ fn open_task_file(g: &Rc<Gui>, id: u64, folder: bool) {
             format!("file no longer exists: {}", path.display()),
             true,
         );
+    }
+}
+
+/// Open a web URL in the default browser.
+pub fn shell_open_url(url: &str) {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("explorer").arg(url).spawn();
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
     }
 }
 

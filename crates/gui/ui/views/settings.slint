@@ -347,8 +347,7 @@ export component SettingsView inherits Rectangle {
                             }
                         }
                         if root.chrome-guide-visible: Text {
-                            width: min(root.width - 48px, 580px);
-                            text: I18n.tr("Chrome guide: install the extension from the Chrome Web Store once listed, or load it unpacked from the extension folder. Then open the extension options page, copy its ID (chrome.runtime.id) into the field above, and turn the toggle on. UDM does not watch the browser's extension list.");
+                            text: I18n.tr("Chrome guide: the extension ships with UDM, in the extension\\chrome folder next to udm.exe (also on the release page as the udm-extension-chrome zip). Open chrome://extensions, turn on Developer mode, click Load unpacked and select that folder. Then open the extension's options page, copy its ID (chrome.runtime.id) into the field above, and turn the toggle on. UDM does not watch the browser's extension list.");
                             color: Theme.text-faint;
                             font-size: 11px;
                             wrap: word-wrap;
@@ -383,15 +382,13 @@ export component SettingsView inherits Rectangle {
                             ActionButton { label: I18n.tr("Install extension"); compact: true; clicked => { root.firefox-guide-visible = !root.firefox-guide-visible; } }
                         }
                         if root.firefox-guide-visible: Text {
-                            width: min(root.width - 48px, 580px);
-                            text: I18n.tr("Firefox guide: install the add-on from the Firefox Add-ons site once listed, or load it temporarily from the extension folder — a temporary add-on does not survive a browser restart. The extension ID is fixed (udm-handoff@cino.pw); there is no field to fill. UDM does not watch the browser's extension list.");
+                            text: I18n.tr("Firefox guide: the extension ships with UDM, in the extension\\firefox folder next to udm.exe (also on the release page as the udm-extension-firefox zip). Open about:debugging, choose This Firefox, click Load Temporary Add-on and select the manifest.json file inside that folder. A temporary add-on does not survive a browser restart. The extension ID is fixed (udm-handoff@cino.pw); there is no field to fill. UDM does not watch the browser's extension list.");
                             color: Theme.text-faint;
                             font-size: 11px;
                             wrap: word-wrap;
                         }
                     }
                     Text {
-                        width: min(root.width - 48px, 580px);
                         text: I18n.tr("After a successful register the connection starts when the lease allows and no coordinator is running yet; turning a toggle off refuses the next connection at pairing, all without a restart. Moving the portable folder is repaired on the next start.");
                         color: Theme.text-faint;
                         font-size: 11px;

@@ -118,4 +118,16 @@ $text = "$($release.description)`n`nThe same files are published on GitLab: $Git
 [IO.File]::WriteAllText($notes, $text, (New-Object Text.UTF8Encoding $false))
 $files = @(Get-ChildItem $out -File | ForEach-Object FullName)
 Run gh release create $Tag @files --repo $GitHubRepo --verify-tag --title $release.name --notes-file $notes
+
+# The notes must come back byte-for-byte: the v0.2.0 GitHub notes were
+# garbled by a codepage decode in the publish chain and nobody noticed
+# until the owner read them. Compare the stored body against the composed
+# text exactly and fail the release if they differ.
+Step 'Verifying the published notes'
+$ghToken = $env:GH_TOKEN
+if (-not $ghToken) { $ghToken = (gh auth token).Trim() }
+$ghResp = Invoke-WebRequest -UseBasicParsing -Headers @{ Authorization = "Bearer $ghToken"; Accept = 'application/vnd.github+json' } "https://api.github.com/repos/$GitHubRepo/releases/tags/$Tag"
+$ghBody = ([Text.Encoding]::UTF8.GetString($ghResp.RawContentStream.ToArray()) | ConvertFrom-Json).body
+if ($ghBody.TrimEnd() -cne $text.TrimEnd()) { throw 'The stored GitHub release notes differ from the composed notes (encoding corruption in the publish chain).' }
+Write-Host 'Stored notes match the composed notes exactly.'
 Write-Host "Done: https://github.com/$GitHubRepo/releases/tag/$Tag"

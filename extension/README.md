@@ -4,9 +4,11 @@
 Firefox extension uses a local Native Messaging host, `udm-host`, and a
 durable prepare/commit protocol to transfer download ownership.
 
-This guide describes `241f550`. The installer and portable ZIP include
-`udm-host.exe` beside the app; the extension itself is still loaded
-manually (there is no store listing yet). The extension passes a GET URL and hints, not cookies or a browser login session.
+The installer and portable ZIP include `udm-host.exe` beside the app and
+the extension itself in the `extension` folder (`extension\chrome`,
+`extension\firefox`); each release also attaches the extension as
+standalone zips. There is no store listing yet, so the extension is still
+loaded manually from that folder, as described below. The extension passes a GET URL and hints, not cookies or a browser login session.
 Some signed-in or session-dependent downloads therefore cannot work in UDM.
 
 ## Before you start

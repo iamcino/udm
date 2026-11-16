@@ -296,6 +296,8 @@ export component AppWindow inherits Window {
     callback update-apply-clicked;
     callback open-data-dir;
     callback open-log;
+    callback open-github;
+    callback open-gitlab;
     callback clear-finished;
     callback add-from-clipboard;
 
@@ -649,6 +651,8 @@ export component AppWindow inherits Window {
                             http3-available: root.http3-available;
                             open-data-dir => { root.open-data-dir(); }
                             open-log => { root.open-log(); }
+                            open-github => { root.open-github(); }
+                            open-gitlab => { root.open-gitlab(); }
                         }
                     }
 

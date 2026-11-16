@@ -204,13 +204,15 @@ try {
     $dist = Join-Path $work 'dist'
     $setup = "udm-$version-setup.exe"
     $zip = "udm-$version-portable.zip"
-    foreach ($f in @($setup, $zip)) {
+    $extChrome = "udm-extension-chrome-$version.zip"
+    $extFirefox = "udm-extension-firefox-$version.zip"
+    foreach ($f in @($setup, $zip, $extChrome, $extFirefox)) {
         if (-not (Test-Path (Join-Path $dist $f))) { throw "build.ps1 did not produce $f" }
     }
 
     $out = Join-Path $work 'release-out'
     New-Item -ItemType Directory -Force $out | Out-Null
-    Copy-Item (Join-Path $dist $setup), (Join-Path $dist $zip), LICENSE $out
+    Copy-Item (Join-Path $dist $setup), (Join-Path $dist $zip), (Join-Path $dist $extChrome), (Join-Path $dist $extFirefox), LICENSE $out
     if ($thumb) {
         Step 'Checking signatures against the pinned certificate'
         $verify = Join-Path $work 'tools\signing\verify.ps1'
@@ -226,14 +228,15 @@ try {
         }
         Copy-Item $cer $out
     }
-    $lines = foreach ($f in @($setup, $zip)) {
+    $lines = foreach ($f in @($setup, $zip, $extChrome, $extFirefox)) {
         "$((Get-FileHash (Join-Path $out $f) -Algorithm SHA256).Hash.ToLower())  $f"
     }
     [IO.File]::WriteAllText("$out\SHA256SUMS.txt", ($lines -join "`n") + "`n")
     $lines | ForEach-Object { Write-Host "  $_" }
 
     $notes += "`n`n---`n`nRun ``$setup`` to install for the current user (no administrator rights needed), " +
-        "or unzip ``$zip`` and run ``udm.exe`` (portable: data stays next to the program). Windows 11 x64.`n`n" +
+        "or unzip ``$zip`` and run ``udm.exe`` (portable: data stays next to the program). Windows 11 x64. " +
+        "The browser extension is inside both packages (the extension folder) and also attached below on its own (``$extChrome``, ``$extFirefox``).`n`n" +
         $(if ($thumb) {
             "Signed with the self-signed UDM code signing certificate, thumbprint ``$thumb`` (``UDM-codesign.cer`` in this release). " +
             "Windows does not know this certificate, so SmartScreen may still warn the first time. "
@@ -277,6 +280,15 @@ try {
     } | ConvertTo-Json -Depth 5
     Invoke-RestMethod -Method Post -Headers $headers -Uri "$api/releases" `
         -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($body)) | Out-Null
+
+    # The notes must come back byte-for-byte: a console-codepage decode
+    # anywhere in the chain garbles the Vietnamese text silently, so the
+    # stored description is compared against the composed notes exactly.
+    Step 'Verifying the published notes'
+    $resp = Invoke-WebRequest -UseBasicParsing -Headers $headers "$api/releases/$tag"
+    $stored = ([Text.Encoding]::UTF8.GetString($resp.RawContentStream.ToArray()) | ConvertFrom-Json).description
+    if ($stored.TrimEnd() -cne $notes.TrimEnd()) { throw 'The stored GitLab release notes differ from the composed notes (encoding corruption in the publish chain).' }
+    Write-Host 'Stored notes match the composed notes exactly.'
     Write-Host "Done: $GitLab/$Project/-/releases/$tag"
     Write-Host "Latest installer: $GitLab/$Project/-/releases/permalink/latest/downloads/udm-setup.exe"
 }

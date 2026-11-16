@@ -15,9 +15,9 @@
 Unicode true
 !define APPNAME        "udm"
 !ifndef VERSION
-!define VERSION        "0.2.0"
+!define VERSION        "0.2.1"
 !endif
-!define PUBLISHER      "udm contributors"
+!define PUBLISHER      "Cino"
 !define EXE            "udm.exe"
 !define CLIEXE         "udm-cli.exe"
 !define HOSTEXE        "udm-host.exe"
@@ -57,7 +57,7 @@ VIProductVersion "${VERSION}.0"
 VIAddVersionKey "ProductName" "${APPNAME}"
 VIAddVersionKey "FileVersion" "${VERSION}"
 VIAddVersionKey "FileDescription" "${APPNAME} installer (per-user, no admin)"
-VIAddVersionKey "LegalCopyright" "MIT OR Apache-2.0"
+VIAddVersionKey "LegalCopyright" "Copyright (c) 2026 Cino - MIT OR Apache-2.0"
 
 Section "udm" SecMain
     SectionIn RO
@@ -71,6 +71,14 @@ Section "udm" SecMain
     File /oname=PRIVACY.md    "..\..\docs\PRIVACY.md"
     File /oname=CINO-UI-LICENSE.txt "..\..\crates\gui\vendor\cino-ui\LICENSE"
     File /oname=BE-VIETNAM-PRO-OFL.txt "..\..\crates\gui\vendor\cino-ui\ui\fonts\OFL.txt"
+
+    ; Browser extension bundles (Settings > Browser points here): one
+    ; self-contained folder per browser, staged by build.ps1 into dist.
+    SetOutPath "$INSTDIR\extension\chrome"
+    File /r "..\..\dist\extension\chrome\*.*"
+    SetOutPath "$INSTDIR\extension\firefox"
+    File /r "..\..\dist\extension\firefox\*.*"
+    SetOutPath "$INSTDIR"
 
     ; U2 first-trust record (REV1 sec. 2.1/2.5): the installer ships the
     ; same pin the binary was built with, so `udm-cli update pin` output
@@ -146,6 +154,7 @@ Section "Uninstall"
     Delete "$INSTDIR\PRIVACY.md"
     Delete "$INSTDIR\CINO-UI-LICENSE.txt"
     Delete "$INSTDIR\BE-VIETNAM-PRO-OFL.txt"
+    RMDir /r "$INSTDIR\extension"
     Delete "$INSTDIR\update-pin.txt"
     Delete "$INSTDIR\uninstall.exe"
     RMDir "$INSTDIR"

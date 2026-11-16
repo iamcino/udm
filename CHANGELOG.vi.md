@@ -2,6 +2,30 @@
 
 Các thay đổi đáng chú ý của UDM. Tiếng Anh: [CHANGELOG.md](CHANGELOG.md).
 
+## 0.2.1
+
+- **Tiện ích trình duyệt nay đi kèm UDM**: bộ cài và bản portable mang
+  theo tiện ích trong thư mục `extension` (hai thư mục con `chrome` và
+  `firefox`), và mỗi bản phát hành cũng đính kèm tiện ích dưới dạng zip
+  riêng. Hướng dẫn cài đặt trong Cài đặt và README đã được viết lại theo
+  cách đóng gói mới.
+- **Trang Giới thiệu gọn lại**: phiên bản thật, dòng tác giả và giấy
+  phép, liên kết dự án (GitHub, GitLab) và nơi lưu dữ liệu. Các đoạn văn
+  dài đã chuyển ra; chúng nằm trong README và tài liệu riêng tư.
+- **Đổi tên thư mục dữ liệu**: thư mục dữ liệu người dùng không còn dùng
+  mật danh tiền phát hành `quget`; các bản đã cài được tự di cư sang
+  `udm` ở lần khởi động đầu tiên, toàn bộ dữ liệu (gồm cả trạng thái cập
+  nhật) đi theo.
+- **User-Agent luôn mới**: User-Agent còn ở mặc định gốc nay theo phiên
+  bản hiện tại thay vì phiên bản lúc mới cài UDM; giá trị đã tuỳ chỉnh
+  được giữ nguyên.
+- **Đã sửa**: ghi chú cuối mục **Cài đặt → Trình duyệt** có thể bị cắt
+  khi hiển thị.
+- **Đã sửa**: tiện ích trên Chrome nhận nhầm Chrome hiện nay là Firefox
+  nên gọi sai host native, khiến việc chuyển không bao giờ kết nối được.
+  Trang tuỳ chọn của tiện ích nay hiển thị ID tiện ích và chỉ tới phần
+  đăng ký trong **Cài đặt → Trình duyệt** thay cho lệnh terminal.
+
 ## 0.2.0
 
 - **Nhận lượt tải từ trình duyệt, tích hợp sẵn**: bộ cài và bản portable nay

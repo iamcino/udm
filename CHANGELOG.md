@@ -2,6 +2,30 @@
 
 All notable changes to UDM are listed here. Vietnamese: [CHANGELOG.vi.md](CHANGELOG.vi.md).
 
+## 0.2.1
+
+- **The browser extension ships with UDM**: the installer and the portable
+  zip now carry the extension in the `extension` folder (`chrome` and
+  `firefox` subfolders), and each release also attaches it as standalone
+  zips. The install guides in Settings and the README were rewritten for
+  the bundled layout.
+- **About page, trimmed**: the real version, the author and license line,
+  project links (GitHub, GitLab) and the data locations. The long texts
+  moved out; they live in the README and the privacy document.
+- **Data folder renamed**: the per-user data folder no longer uses the
+  pre-release codename `quget`; existing installs are migrated to `udm`
+  automatically on the first start, with all data (including update
+  state) carried over.
+- **User-Agent freshness**: a User-Agent still at the factory default now
+  follows the current version instead of the version that first installed
+  UDM; customized values are untouched.
+- **Fixed**: the closing note in **Settings → Browser** could render
+  clipped.
+- **Fixed**: the Chrome extension mistook current Chrome for Firefox and
+  called the wrong native host, so handoffs never connected. The
+  extension's options page now shows the extension ID and points to
+  registration in **Settings → Browser** instead of a terminal command.
+
 ## 0.2.0
 
 - **Browser handoff, built in**: the installer and portable ZIP now ship

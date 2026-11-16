@@ -17,8 +17,16 @@ if (typeof importScripts === "function") {
 }
 
 const H = globalThis.UdmHandoff;
-const api = globalThis.browser || globalThis.chrome;
-const HOST_NAME = globalThis.browser ? H.HOST_NAMES.firefox : H.HOST_NAMES.chrome;
+// Firefox is the only browser whose `browser` global implements
+// runtime.getBrowserInfo; current Chrome also exposes a `browser`
+// global, so its mere presence does not identify Firefox. Picking the
+// wrong host name here makes every handoff fail with "host not found".
+const IS_FIREFOX =
+  !!globalThis.browser &&
+  !!globalThis.browser.runtime &&
+  typeof globalThis.browser.runtime.getBrowserInfo === "function";
+const api = IS_FIREFOX ? globalThis.browser : globalThis.chrome || globalThis.browser;
+const HOST_NAME = IS_FIREFOX ? H.HOST_NAMES.firefox : H.HOST_NAMES.chrome;
 
 const SETTINGS_KEY = "udmSettings";
 const LOG_KEY = "udmHandoffLog";

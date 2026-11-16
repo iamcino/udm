@@ -237,6 +237,21 @@ impl Default for Settings {
     }
 }
 
+/// True when `ua` has the factory shape `udm/<version>` that
+/// `Settings::default` seeds. A value the user typed themselves could in
+/// principle collide with the shape, but refreshing it then yields exactly
+/// the current default, which is what the shape asks for anyway.
+fn is_factory_user_agent(ua: &str) -> bool {
+    let Some(rest) = ua.strip_prefix("udm/") else {
+        return false;
+    };
+    let core = rest.split(['-', '+']).next().unwrap_or("");
+    !core.is_empty()
+        && core
+            .split('.')
+            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+}
+
 impl Settings {
     /// Clamp nonsense values into a sane range (also used after loading from
     /// disk, so a hand-edited database cannot make the engine misbehave).
@@ -261,6 +276,12 @@ impl Settings {
         self.persist_interval_ms = self.persist_interval_ms.clamp(200, 60_000);
         self.alt_svc_max_age_secs = self.alt_svc_max_age_secs.clamp(60, 30 * 86400);
         if self.user_agent.trim().is_empty() {
+            self.user_agent = DEFAULT_USER_AGENT.to_string();
+        }
+        if is_factory_user_agent(&self.user_agent) && self.user_agent != DEFAULT_USER_AGENT {
+            // Seeded by an older release and never customized (a custom
+            // value never has the factory shape): follow the compiled
+            // version instead of advertising the old one forever.
             self.user_agent = DEFAULT_USER_AGENT.to_string();
         }
         if !matches!(self.theme.as_str(), "dark" | "light" | "auto") {
@@ -429,6 +450,22 @@ fn parse_bool(value: &str) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_factory_user_agent_follows_the_compiled_version() {
+        let mut s = Settings::default();
+        s.user_agent = "udm/0.1.0".to_string();
+        s.sanitize();
+        assert_eq!(s.user_agent, DEFAULT_USER_AGENT);
+    }
+
+    #[test]
+    fn custom_user_agent_survives_sanitize() {
+        let mut s = Settings::default();
+        s.user_agent = "Mozilla/5.0 (compatible)".to_string();
+        s.sanitize();
+        assert_eq!(s.user_agent, "Mozilla/5.0 (compatible)");
+    }
 
     #[test]
     fn defaults_round_trip() {

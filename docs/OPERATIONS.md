@@ -8,7 +8,7 @@ see [Build](BUILD.md) to produce the binaries and packages.
 
 | Form | How to run it | Default application data |
 |---|---|---|
-| Per-user installer | Run `udm-0.2.0-setup.exe`; it installs under `%LOCALAPPDATA%\Programs\udm` and creates shortcuts. | `%LOCALAPPDATA%\udm` |
+| Per-user installer | Run `udm-0.2.1-setup.exe`; it installs under `%LOCALAPPDATA%\Programs\udm` and creates shortcuts. | `%LOCALAPPDATA%\udm` |
 | Portable ZIP | Extract the archive, then run `udm.exe` inside the extracted program folder with its `udm.portable` marker. | `data\` beside the executable |
 | Bare executable | Put `udm.exe` in a user-writable location and run it without a portable marker. | `%LOCALAPPDATA%\udm` |
 
@@ -76,8 +76,11 @@ The registered host also has `udm-host.caller` beside its executable. Keep
 pairing material private. URLs, filenames, paths and errors in local data
 may contain sensitive information; review them before sharing.
 
-Pre-rename `quget.portable`, `QUGET_*` environment fallbacks and existing
-`quget` data directories remain supported. The database filename migrates
+Pre-rename `quget.portable` and `QUGET_*` environment fallbacks remain
+supported. An existing `quget` data directory is renamed to `udm` on the
+first start (the whole directory moves, update state included); when the
+rename fails the legacy directory is used for that run and the migration
+is retried on the next start. The database filename migrates
 from `quget.redb` to `udm.redb` when possible. Check the resolved directory
 before assuming an upgrade started with an empty history.
 

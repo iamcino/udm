@@ -223,16 +223,27 @@ fn per_user_data_root() -> Result<PathBuf> {
             home.join(".local").join("share")
         }
     };
+    Ok(resolve_data_dir(&base))
+}
+
+/// Resolve the installed-mode data directory under `base`, migrating a
+/// pre-rename `quget` directory to `udm` in place when only the legacy one
+/// exists. The rename carries everything with it (database, update state,
+/// handoff journal), so nothing is stranded; if the rename fails - a locked
+/// file, a read-only volume - the legacy directory is used for this run and
+/// the migration is retried on the next start.
+fn resolve_data_dir(base: &Path) -> PathBuf {
     let dir = base.join("udm");
-    // Pre-rename installs wrote to .../quget; keep using that directory when
-    // the new one does not exist yet instead of stranding the user's history.
     if !dir.exists() {
         let legacy = base.join("quget");
         if legacy.is_dir() {
-            return Ok(legacy);
+            if fs::rename(&legacy, &dir).is_ok() {
+                return dir;
+            }
+            return legacy;
         }
     }
-    Ok(dir)
+    dir
 }
 
 /// Rename a pre-rename `quget.redb` to `udm.redb` once, in place. If the
@@ -322,6 +333,34 @@ mod tests {
         assert!(!p.portable);
         env::remove_var(DATA_DIR_ENV);
         env::remove_var(PORTABLE_ENV);
+    }
+
+    #[test]
+    fn legacy_data_dir_is_migrated_to_the_current_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let legacy = tmp.path().join("quget");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("udm.redb"), b"db").unwrap();
+        let dir = resolve_data_dir(tmp.path());
+        assert_eq!(dir, tmp.path().join("udm"));
+        assert!(dir.join("udm.redb").exists());
+        assert!(!legacy.exists());
+    }
+
+    #[test]
+    fn current_data_dir_wins_over_legacy() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("udm")).unwrap();
+        fs::create_dir_all(tmp.path().join("quget")).unwrap();
+        let dir = resolve_data_dir(tmp.path());
+        assert_eq!(dir, tmp.path().join("udm"));
+        assert!(tmp.path().join("quget").is_dir());
+    }
+
+    #[test]
+    fn fresh_install_uses_the_current_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(resolve_data_dir(tmp.path()), tmp.path().join("udm"));
     }
 
     #[test]

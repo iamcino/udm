@@ -48,8 +48,8 @@ package. The script reads the version from the workspace manifest and
 stages these outputs under `dist\`:
 
 - `udm.exe`, `udm-cli.exe` and `udm-host.exe` (signed with `-Sign`);
-- `udm-0.2.0-setup.exe` unless the installer is skipped;
-- `udm-0.2.0-portable.zip`, containing the executables, `udm.portable`,
+- `udm-0.2.1-setup.exe` unless the installer is skipped;
+- `udm-0.2.1-portable.zip`, containing the executables, `udm.portable`,
   privacy documentation and bundled licence notices.
 
 `build.ps1`, `installer.nsi` and the cross-build script all include

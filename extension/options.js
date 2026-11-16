@@ -1,8 +1,14 @@
 "use strict";
-const api = globalThis.browser || globalThis.chrome;
+// Firefox is the only browser whose `browser` global implements
+// runtime.getBrowserInfo; current Chrome also exposes a `browser`
+// global, so its mere presence does not identify Firefox.
+const isFirefox =
+  !!globalThis.browser &&
+  !!globalThis.browser.runtime &&
+  typeof globalThis.browser.runtime.getBrowserInfo === "function";
+const api = isFirefox ? globalThis.browser : globalThis.chrome || globalThis.browser;
 const T = globalThis.UdmStrings.udmT();
 const SETTINGS_KEY = "udmSettings";
-const isFirefox = !!globalThis.browser;
 
 document.title = `${T.title} - ${T.options}`;
 document.getElementById("title").textContent = T.title;
@@ -13,13 +19,13 @@ document.getElementById("exclusionsHint").textContent = T.exclusionsHint;
 document.getElementById("save").textContent = T.save;
 document.getElementById("saved").textContent = T.saved;
 document.getElementById("registrationLabel").textContent = T.registration;
-document.getElementById("registrationHint").textContent = T.registrationHint;
+document.getElementById("registrationHint").textContent =
+  isFirefox ? T.registrationHintFirefox : T.registrationHintChrome;
 
-// The registration command names THIS extension's id - the exact value
-// the host manifest will pin.
-const browser = isFirefox ? "firefox" : "chrome";
-document.getElementById("registrationCmd").textContent =
-  `udm-host --register ${browser} ${api.runtime.id}`;
+// Registration happens in UDM Settings; this page only shows the ID.
+// Chrome: the user pastes this ID into UDM. Firefox: the ID is fixed
+// (udm-handoff@cino.pw), so UDM needs no value at all.
+document.getElementById("registrationCmd").textContent = api.runtime.id;
 
 const enabledBox = document.getElementById("enabled");
 const exclusionsBox = document.getElementById("exclusions");
