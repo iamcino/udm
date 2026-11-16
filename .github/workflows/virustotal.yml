@@ -18,7 +18,7 @@ jobs:
     env:
       VT_API_KEY: ${{ secrets.VT_API_KEY }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Resolve release tag
         id: rel
