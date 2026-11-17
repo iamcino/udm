@@ -121,11 +121,14 @@ function item(overrides) {
     const calls = [];
     return {
       calls,
-      pause: async (id) => (calls.push(["pause", id]), true),
-      resume: async (id) => (calls.push(["resume", id]), true),
       cancel: async (id) => (calls.push(["cancel", id]), behavior.cancel),
       erase: async (id) => calls.push(["erase", id]),
-      record: async (e) => calls.push(["record", e.status]),
+      download: async (url) => {
+        calls.push(["download", url]);
+        if (behavior.downloadFails) throw new Error("browser refused");
+        return 99;
+      },
+      record: async (e) => calls.push(["record", e.status, e.name]),
     };
   }
   function fakeClient(replies) {
@@ -134,7 +137,7 @@ function item(overrides) {
     return { calls, prepare: next("prepare"), commit: next("commit"), abort: next("abort"), query: next("query") };
   }
 
-  await test("flow: happy path hands off exactly once", async () => {
+  await test("flow: happy path cancels first, then hands off exactly once", async () => {
     const fx = fakeFx({ cancel: true });
     const client = fakeClient({
       prepare: { status: "prepared" },
@@ -143,29 +146,33 @@ function item(overrides) {
     const out = await H.createHandoffFlow(client, fx).handoff(item());
     assert.strictEqual(out, "handed-off");
     assert.deepStrictEqual(client.calls, ["prepare", "commit"]);
-    assert.ok(fx.calls.some((c) => c[0] === "cancel"));
+    // The cancel is the FIRST browser effect (0.2.3): a prompt-parked
+    // download accepts no other effect until it is cancelled.
+    assert.deepStrictEqual(fx.calls[0], ["cancel", 42]);
+    assert.ok(!fx.calls.some((c) => c[0] === "download"));
     assert.ok(fx.calls.some((c) => c[0] === "record" && c[1] === "handed-off"));
   });
 
-  await test("flow: coordinator unavailable keeps the browser download", async () => {
+  await test("flow: coordinator unavailable re-issues the download in the browser", async () => {
     const fx = fakeFx({ cancel: true });
     const client = fakeClient({ prepare: { status: "unavailable" } });
     const out = await H.createHandoffFlow(client, fx).handoff(item());
     assert.strictEqual(out, "kept-by-browser");
     assert.deepStrictEqual(client.calls, ["prepare"]);
-    assert.ok(fx.calls.some((c) => c[0] === "resume"));
-    assert.ok(!fx.calls.some((c) => c[0] === "cancel"));
+    assert.deepStrictEqual(fx.calls[0], ["cancel", 42]);
+    assert.ok(fx.calls.some((c) => c[0] === "download" && c[1] === "https://files.example.com/pub/report.pdf"));
+    assert.ok(fx.calls.some((c) => c[0] === "record" && c[1] === "kept-by-browser"));
   });
 
-  await test("flow: unconfirmed cancel aborts and never commits", async () => {
+  await test("flow: unconfirmed cancel never prepares and loses nothing", async () => {
     const fx = fakeFx({ cancel: false });
     const client = fakeClient({ prepare: { status: "prepared" }, abort: { status: "aborted" } });
     const out = await H.createHandoffFlow(client, fx).handoff(item());
     assert.strictEqual(out, "kept-by-browser");
-    assert.deepStrictEqual(client.calls, ["prepare", "abort"]);
-    // The download was paused at the start of the flow: a kept-by-browser
-    // exit must hand it back running, and the outcome must be recorded.
-    assert.ok(fx.calls.some((c) => c[0] === "resume"), "kept download must be resumed");
+    // The browser copy stands (it completed or refused the cancel):
+    // prepare is never sent and no re-issue happens.
+    assert.deepStrictEqual(client.calls, []);
+    assert.ok(!fx.calls.some((c) => c[0] === "download"));
     assert.ok(
       fx.calls.some((c) => c[0] === "record" && c[1] === "kept-by-browser"),
       "the kept-by-browser outcome must be recorded"
@@ -181,6 +188,34 @@ function item(overrides) {
     const out = await H.createHandoffFlow(client, fx).handoff(item());
     assert.strictEqual(out, "recovery-required");
     assert.deepStrictEqual(client.calls, ["prepare", "commit"]);
+    assert.ok(!fx.calls.some((c) => c[0] === "download"));
+  });
+
+  await test("flow: refused commit aborts the intent and re-issues", async () => {
+    const fx = fakeFx({ cancel: true });
+    const client = fakeClient({
+      prepare: { status: "prepared" },
+      commit: { status: "unavailable" },
+      abort: { status: "aborted" },
+    });
+    const out = await H.createHandoffFlow(client, fx).handoff(item());
+    assert.strictEqual(out, "kept-by-browser");
+    assert.deepStrictEqual(client.calls, ["prepare", "commit", "abort"]);
+    assert.ok(fx.calls.some((c) => c[0] === "download"));
+    assert.ok(fx.calls.some((c) => c[0] === "record" && c[1] === "kept-by-browser"));
+  });
+
+  await test("flow: failed re-issue surfaces recovery-required with the URL", async () => {
+    const fx = fakeFx({ cancel: true, downloadFails: true });
+    const client = fakeClient({ prepare: { status: "unavailable" } });
+    const out = await H.createHandoffFlow(client, fx).handoff(item());
+    assert.strictEqual(out, "kept-by-browser");
+    assert.ok(
+      fx.calls.some(
+        (c) => c[0] === "record" && c[1] === "recovery-required" && c[2] === "https://files.example.com/pub/report.pdf",
+      ),
+      "a download that could not be re-issued must be surfaced, never dropped",
+    );
   });
 
   console.log(`\n${passed} tests passed`);

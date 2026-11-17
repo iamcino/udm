@@ -13,11 +13,24 @@
  *
  * Contract points honoured here:
  *  - the transaction id is an opaque string, stable per download;
- *  - prepare must be ACKed before the browser download is cancelled;
- *  - commit is sent only after the browser-side cancel is confirmed;
- *  - if the coordinator is unavailable before prepare, or the cancel
- *    cannot be confirmed, the BROWSER keeps the download (we resume it
- *    and, for a prepared transaction, abort with browser_retains);
+ *  - commit is sent only after the browser-side cancel is confirmed
+ *    (confirm.browser_cancelled stays truthful);
+ *  - the browser download is cancelled FIRST (0.2.3): with "ask where
+ *    to save" on, Chrome parks a new download behind its Save As
+ *    prompt and no other browser effect lands until the user dismisses
+ *    it - the old first step (pause) stalled there, and the handoff
+ *    only completed after the user cancelled the prompt by hand
+ *    (field case 2026-11-17). Cancelling a prompt-parked download
+ *    dismisses the prompt. The freeze's no-loss property is kept by
+ *    the re-issue fallback below instead of by the old ordering;
+ *  - if the coordinator is unavailable, refuses the prepare, or
+ *    refuses a commit after preparing, the download is RE-ISSUED in
+ *    the browser (fx.download) and the outcome is kept-by-browser:
+ *    the download always ends up owned by UDM or by the browser,
+ *    never silently dropped. The wiring layer (background.js) marks
+ *    re-issued downloads so they are not handed off a second time;
+ *  - if the cancel itself cannot be confirmed, the browser copy
+ *    stands untouched and prepare is never sent;
  *  - an expired commit answers recovery_required: the handoff is NOT
  *    retried automatically and the download is NOT restarted - the
  *    coordinator keeps the intent recoverable and the popup says so.
@@ -197,10 +210,12 @@ function createHandoffClient(portFactory) {
 /**
  * The per-download handoff state machine, with every browser effect
  * injected through `fx` so tests can drive it:
- *   fx.pause(id), fx.resume(id), fx.cancel(id) -> Promise<bool>
- *     (cancel resolves true only when the browser confirms the download
- *      is cancelled; false when it completed or the cancel failed)
+ *   fx.cancel(id) -> Promise<bool>
+ *     (resolves true only when the browser confirms the download is
+ *      cancelled; false when it completed or the cancel failed)
  *   fx.erase(id) -> Promise<void>
+ *   fx.download(url) -> Promise<id>  (re-issue a download in the
+ *     browser; rejects when the browser refuses)
  *   fx.record(entry) -> Promise<void>  (bounded handoff log for the popup)
  * Returns the terminal outcome string.
  */
@@ -209,36 +224,54 @@ function createHandoffFlow(client, fx) {
     const tx = newTransactionId();
     const intent = buildIntent(item);
     let prepared = false;
-    try {
-      // Stop bytes flowing while the coordinator decides; a pause failure
-      // (already complete) makes us ineligible after the fact.
-      await fx.pause(item.id).catch(() => false);
+    let cancelled = false;
 
-      const prep = await client.prepare(tx, intent);
-      if (!prep || prep.status !== "prepared") {
-        // Coordinator unavailable or conflicted before any promise: the
-        // browser keeps the download, untouched.
-        await fx.resume(item.id).catch(() => {});
-        await fx.record({ tx, name: intent.filename_hint || intent.url, status: "kept-by-browser", at: Date.now() });
-        return "kept-by-browser";
+    // Give the download back to the browser as a fresh download after
+    // the original was cancelled. Resolves false when even that failed;
+    // the caller then records recovery-required with the URL, so the
+    // download is surfaced in the popup instead of silently dropped.
+    // Attempted at most once per handoff: the catch-all below must
+    // never re-issue a second copy.
+    let reissueAttempted = false;
+    async function reissue() {
+      if (reissueAttempted) return false;
+      reissueAttempted = true;
+      try {
+        await fx.download(intent.url);
+        return true;
+      } catch {
+        return false;
       }
-      prepared = true;
+    }
+    async function recordKept() {
+      if (await reissue()) {
+        await fx.record({ tx, name: intent.filename_hint || intent.url, status: "kept-by-browser", at: Date.now() });
+      } else {
+        await fx.record({ tx, name: intent.url, status: "recovery-required", at: Date.now() });
+      }
+    }
 
-      const cancelled = await fx.cancel(item.id).catch(() => false);
+    try {
+      // Cancel FIRST (0.2.3): a prompt-parked download accepts no other
+      // effect until the Save As prompt is dismissed, and cancelling
+      // dismisses it. An unconfirmed cancel means the browser copy
+      // stands (it completed, or the browser refused): prepare is
+      // never sent and nothing is lost.
+      cancelled = await fx.cancel(item.id).catch(() => false);
       if (!cancelled) {
-        // The cancel was not confirmed (the download completed or the
-        // browser refused): never commit on an unconfirmed cancel.
-        // Release the prepared intent through the CLIENT (abort is not
-        // an fx member - calling fx.abort used to throw and reach the
-        // resume below only via the catch-all, losing this record), and
-        // hand the download back running: it was paused at the start of
-        // the flow, as on every other kept-by-browser exit.
-        await client.abort(tx).catch(() => null);
-        await fx.resume(item.id).catch(() => {});
         await fx.record({ tx, name: intent.filename_hint || intent.url, status: "kept-by-browser", at: Date.now() });
         return "kept-by-browser";
       }
       await fx.erase(item.id).catch(() => {});
+
+      const prep = await client.prepare(tx, intent);
+      if (!prep || prep.status !== "prepared") {
+        // Coordinator unavailable or conflicted: the browser gets the
+        // download back as a fresh download.
+        await recordKept();
+        return "kept-by-browser";
+      }
+      prepared = true;
 
       const commit = await client.commit(tx);
       if (commit && commit.status === "committed") {
@@ -258,14 +291,21 @@ function createHandoffFlow(client, fx) {
         await fx.record({ tx, name: intent.filename_hint || intent.url, status: "recovery-required", at: Date.now() });
         return "recovery-required";
       }
-      await fx.record({ tx, name: intent.filename_hint || intent.url, status: "kept-by-browser", at: Date.now() });
+      // The commit was refused or its answer is unknown after a
+      // successful prepare: release the intent and give the download
+      // back to the browser.
+      await client.abort(tx).catch(() => null);
+      prepared = false;
+      await recordKept();
       return "kept-by-browser";
     } catch {
       if (prepared) {
         // Best-effort release of the prepared intent.
         await client.abort(tx).catch(() => null);
       }
-      await fx.resume(item.id).catch(() => {});
+      if (cancelled && !reissueAttempted) {
+        await recordKept().catch(() => {});
+      }
       return "kept-by-browser";
     }
   }

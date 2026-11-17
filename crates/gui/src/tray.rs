@@ -344,6 +344,46 @@ mod imp {
     fn load_icon_update() -> Option<Icon> {
         icon_from_png(include_bytes!("../assets/tray/tray-32-update.png"))
     }
+
+    /// Makes Windows draw the tray menu dark or light to match the app
+    /// theme, the way Yeager and EasyKey do: the native menu follows the
+    /// OS, so an app whose theme overrides the OS must say so through two
+    /// undocumented uxtheme exports (by ordinal), present since
+    /// Windows 10 1903. Called from state.rs at every theme funnel;
+    /// deduped so the auto-theme re-resolve on the slow tick does not
+    /// re-flush needlessly (field report 2026-11-17: the menu rendered
+    /// light while the app was dark).
+    pub fn set_menu_theme(dark: bool) {
+        use std::sync::atomic::{AtomicI8, Ordering};
+        use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+        const SET_PREFERRED_APP_MODE: usize = 135;
+        const FLUSH_MENU_THEMES: usize = 136;
+        const FORCE_DARK: i32 = 2;
+        const FORCE_LIGHT: i32 = 3;
+        static LAST: AtomicI8 = AtomicI8::new(-1);
+        let want = i8::from(dark);
+        if LAST.swap(want, Ordering::Relaxed) == want {
+            return;
+        }
+        let name: Vec<u16> = "uxtheme.dll\0".encode_utf16().collect();
+        // SAFETY: uxtheme stays loaded for the life of the process; the
+        // ordinals have had these signatures since they were added, and
+        // are checked for presence before the calls.
+        unsafe {
+            let uxtheme = LoadLibraryW(name.as_ptr());
+            if uxtheme == 0 {
+                return;
+            }
+            let set = GetProcAddress(uxtheme, SET_PREFERRED_APP_MODE as *const u8);
+            let flush = GetProcAddress(uxtheme, FLUSH_MENU_THEMES as *const u8);
+            if let (Some(set), Some(flush)) = (set, flush) {
+                let set: unsafe extern "system" fn(i32) -> i32 = std::mem::transmute(set);
+                let flush: unsafe extern "system" fn() = std::mem::transmute(flush);
+                set(if dark { FORCE_DARK } else { FORCE_LIGHT });
+                flush();
+            }
+        }
+    }
 }
 
 #[cfg(not(windows))]
@@ -375,6 +415,8 @@ mod imp {
     pub fn cursor_work_area() -> (i32, i32, i32, i32) {
         (0, 0, 1920, 1040)
     }
+
+    pub fn set_menu_theme(_dark: bool) {}
 }
 
-pub use imp::{cursor_work_area, Tray};
+pub use imp::{cursor_work_area, set_menu_theme, Tray};

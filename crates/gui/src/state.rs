@@ -269,7 +269,13 @@ pub fn setup(
                 }
                 slint::CloseRequestResponse::HideWindow
             } else {
-                slint::CloseRequestResponse::KeepWindowShown
+                // 0.2.3 U1: with close-to-tray off (or no tray), the X
+                // button quits the app. The event loop no longer ends
+                // when the window hides, so end it explicitly; vetoing
+                // the close (the old KeepWindowShown) left the button
+                // dead.
+                let _ = slint::quit_event_loop();
+                slint::CloseRequestResponse::HideWindow
             }
         });
     }
@@ -314,6 +320,10 @@ pub fn setup(
     ui.on_appearance_changed(move || {
         let Some(ui) = g.ui.upgrade() else { return };
         ui.invoke_apply_native_theme();
+        // The native tray menu follows the OS, not the app; keep it in
+        // step with the effective theme (0.2.3, U9). Every theme funnel
+        // in this file repeats this line after apply_native_theme.
+        crate::tray::set_menu_theme(ui.get_theme_index() == 0);
         let mut settings = g.engine.settings();
         read_appearance(&ui, &mut settings);
         if let Err(error) = g.engine.update_settings(settings.clone()) {
@@ -742,8 +752,12 @@ fn tray_poll(g: &Rc<Gui>) {
             if ui.window().is_minimized() {
                 if !*g.minimized_seen.borrow() {
                     *g.minimized_seen.borrow_mut() = true;
+                    // 0.2.3 U2: hide only. Un-minimising here (the old
+                    // set_minimized(false)) restored the window straight
+                    // back onto the taskbar; the flag stays set while the
+                    // window is in the tray and the restore paths clear
+                    // it when they show the window again.
                     let _ = ui.window().hide();
-                    ui.window().set_minimized(false);
                     if let Some(tray) = g.tray.borrow_mut().as_mut() {
                         tray.set_visible(false);
                     }
@@ -760,6 +774,7 @@ fn tray_poll(g: &Rc<Gui>) {
                 close_popup(g);
                 if let Some(ui) = g.ui.upgrade() {
                     let _ = ui.window().show();
+                    ui.window().set_minimized(false);
                 }
                 arm_repaint(g);
                 if let Some(tray) = g.tray.borrow_mut().as_mut() {
@@ -779,6 +794,7 @@ fn tray_poll(g: &Rc<Gui>) {
                         let _ = ui.window().hide();
                     } else {
                         let _ = ui.window().show();
+                        ui.window().set_minimized(false);
                     }
                 }
                 arm_repaint(g);
@@ -788,7 +804,23 @@ fn tray_poll(g: &Rc<Gui>) {
             }
             TrayAction::PauseAll => all_act(g, true),
             TrayAction::ResumeAll => all_act(g, false),
-            TrayAction::CheckForUpdates => start_update_check(g),
+            TrayAction::CheckForUpdates => {
+                // 0.2.3 U5: a tray user got no feedback from a manual
+                // check — its busy/result state renders in the main
+                // window, invisible while the app sits in the tray.
+                // Restore the window first (the Show sequence), then
+                // run the check where its outcome can be seen.
+                close_popup(g);
+                if let Some(ui) = g.ui.upgrade() {
+                    let _ = ui.window().show();
+                    ui.window().set_minimized(false);
+                }
+                arm_repaint(g);
+                if let Some(tray) = g.tray.borrow_mut().as_mut() {
+                    tray.set_visible(true);
+                }
+                start_update_check(g);
+            }
             TrayAction::Exit => {
                 let _ = slint::quit_event_loop();
             }
@@ -2386,6 +2418,7 @@ fn resolve_auto_theme(ui: &AppWindow, settings: &Settings) {
     if settings.theme == "auto" {
         ui.set_theme_index(if os_prefers_dark() { 0 } else { 1 });
         ui.invoke_apply_native_theme();
+        crate::tray::set_menu_theme(ui.get_theme_index() == 0);
     }
 }
 
@@ -2426,6 +2459,7 @@ pub fn push_settings_to_ui(ui: &AppWindow, s: &Settings, update_layout: Option<&
             .unwrap_or(0) as i32,
     );
     ui.invoke_apply_native_theme();
+    crate::tray::set_menu_theme(ui.get_theme_index() == 0);
     ui.set_set_max_tasks(s.max_concurrent_tasks as i32);
     ui.set_set_segments(s.segments_per_task as i32);
     ui.set_set_download_dir(SharedString::from(s.default_download_dir.clone()));
@@ -2700,6 +2734,7 @@ mod s2_render_tests {
                     ui.set_theme_index(theme);
                     ui.set_theme_pref(theme);
                     ui.invoke_apply_native_theme();
+                    crate::tray::set_menu_theme(ui.get_theme_index() == 0);
                     ui.set_tasks(ModelRc::new(VecModel::from(vec![row_from(
                         &task, vietnamese, false,
                     )])));

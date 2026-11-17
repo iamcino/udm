@@ -49,6 +49,7 @@ function makeFakeApi(hostCalls, firefox) {
       cancel: async () => {},
       search: async () => [],
       erase: async () => {},
+      download: async () => 99,
     },
     runtime: {
       lastError: undefined,
@@ -174,6 +175,26 @@ const tick = () => new Promise((r) => setTimeout(r, 100));
     const ctx = cancelContext(null);
     const confirmed = await vm.runInContext("fx.cancel(7)", ctx);
     assert.strictEqual(confirmed, false);
+  });
+
+  // ---- re-issue guard (0.2.3): a download this layer re-issued after
+  // ---- a cancelled handoff must not start a second handoff, or a
+  // ---- down coordinator would loop cancel -> re-issue forever.
+  await test("a re-issued download is skipped once; a fresh one is not", async () => {
+    const hosts = [];
+    const fake = makeFakeApi(hosts, false);
+    const ctx = vm.createContext({ setTimeout, clearTimeout, console, URL });
+    ctx.chrome = fake.api;
+    ctx.browser = fake.api;
+    ctx.importScripts = (file) => vm.runInContext(read(file), ctx, { filename: file });
+    vm.runInContext(read("background.js"), ctx, { filename: "background.js" });
+    await vm.runInContext("fx.download('https://example.com/file.bin')", ctx);
+    fake.listeners[0](ITEM);
+    await tick();
+    assert.deepStrictEqual(hosts, []);
+    fake.listeners[0](Object.assign({}, ITEM, { id: 8, url: "https://example.com/other.bin" }));
+    await tick();
+    assert.deepStrictEqual(hosts, ["pw.cino.udm.handoff.chrome"]);
   });
 
   console.log(`\n${passed} tests passed`);

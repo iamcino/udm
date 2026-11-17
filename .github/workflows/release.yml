@@ -27,7 +27,7 @@ jobs:
     if: ${{ !github.event.repository.private }}
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
       - name: Mirror GitLab release

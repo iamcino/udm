@@ -387,7 +387,11 @@ impl Settings {
             | "use_system_proxy"
             | "verify_checksums"
             | "delete_part_on_remove"
-            | "auto_categorize" => {
+            | "auto_categorize"
+            | "close_to_tray"
+            | "minimize_to_tray"
+            | "start_minimized"
+            | "start_with_windows" => {
                 let b = parse_bool(value)
                     .ok_or_else(|| Error::Other(format!("`{value}` is not true/false")))?;
                 match key {
@@ -397,6 +401,10 @@ impl Settings {
                     "verify_checksums" => self.verify_checksums = b,
                     "delete_part_on_remove" => self.delete_part_on_remove = b,
                     "auto_categorize" => self.auto_categorize = b,
+                    "close_to_tray" => self.close_to_tray = b,
+                    "minimize_to_tray" => self.minimize_to_tray = b,
+                    "start_minimized" => self.start_minimized = b,
+                    "start_with_windows" => self.start_with_windows = b,
                     _ => unreachable!(),
                 }
             }
@@ -601,6 +609,23 @@ mod tests {
         assert_eq!(s.segments_per_task, 16);
         assert!(!s.http3_enabled);
         assert!(s.apply_pair("nope", "1").is_err());
+    }
+
+    #[test]
+    fn apply_pair_accepts_lifecycle_keys() {
+        // 0.2.3 U3: the GUI-written lifecycle settings must be settable
+        // through the same key/value path the CLI uses; they used to be
+        // rejected as unknown while `settings --list` showed them.
+        let mut s = Settings::default();
+        s.apply_pair("close_to_tray", "false").unwrap();
+        s.apply_pair("minimize_to_tray", "true").unwrap();
+        s.apply_pair("start_minimized", "true").unwrap();
+        s.apply_pair("start_with_windows", "true").unwrap();
+        assert!(!s.close_to_tray);
+        assert!(s.minimize_to_tray);
+        assert!(s.start_minimized);
+        assert!(s.start_with_windows);
+        assert!(s.apply_pair("close_to_tray", "banana").is_err());
     }
 
     #[test]

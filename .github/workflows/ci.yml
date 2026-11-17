@@ -20,7 +20,7 @@ jobs:
     if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # U2 REV1 sec. 2.1/2.5: installer pin and binary pin must be the same
@@ -43,7 +43,7 @@ jobs:
     if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install GUI system libraries
@@ -62,7 +62,7 @@ jobs:
     if: ${{ !github.event.repository.private }}
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install NSIS (for the per-user installer)
@@ -73,7 +73,7 @@ jobs:
       - name: Build + package
         shell: pwsh
         run: ./packaging/windows/build.ps1 -NoSlintCompile
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v4
         with:
           name: udm-windows-x64-msvc
           path: dist/
@@ -85,7 +85,7 @@ jobs:
     if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-gnu
@@ -96,7 +96,7 @@ jobs:
           sudo apt-get install -y gcc-mingw-w64-x86-64 zip
       - name: Cross-build
         run: bash ./packaging/cross/build-windows.sh
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v4
         with:
           name: udm-windows-x64-gnu
           path: dist/

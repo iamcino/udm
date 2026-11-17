@@ -5934,7 +5934,7 @@ checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
 name = "udm-cli"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "clap",
  "humantime",
@@ -5945,7 +5945,7 @@ dependencies = [
 
 [[package]]
 name = "udm-gui"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "embed-resource",
  "image",
@@ -5964,7 +5964,7 @@ dependencies = [
 
 [[package]]
 name = "udm-host"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "serde_json",
  "tempfile",
@@ -5974,7 +5974,7 @@ dependencies = [
 
 [[package]]
 name = "udm-publisher-tool"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "flate2",
  "hex",
@@ -5988,7 +5988,7 @@ dependencies = [
 
 [[package]]
 name = "udm-updater-helper"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "hex",
  "ring",
@@ -6096,7 +6096,7 @@ checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
 
 [[package]]
 name = "usagi"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "blake3",
  "bytes",

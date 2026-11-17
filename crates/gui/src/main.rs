@@ -201,7 +201,23 @@ fn main() {
     }
     tracing::info!("entering event loop");
 
-    let result = ui.run();
+    // 0.2.3 U1: the app must outlive its window. Both `ui.run()` and
+    // `slint::run_event_loop()` quit when the last window hides: Slint
+    // keeps a keepalive count of visible windows (plus its own visible
+    // SystemTrayIcon components), and hiding the last one posts a quit.
+    // UDM's tray comes from the tray_icon crate, which Slint cannot see,
+    // so close-to-tray dropped the count to zero and killed the process
+    // (and a --minimized start with it). The until-quit variant is the
+    // daemon-style loop: it ends only via `slint::quit_event_loop()` —
+    // tray Exit, a real close with close-to-tray off, or the
+    // update-apply restart paths. A hidden launch stays hidden: setup
+    // has already applied the start-hidden state, so only a normal
+    // launch is shown here.
+    if !hidden {
+        let _ = ui.show();
+    }
+    let result = slint::run_event_loop_until_quit();
+    let _ = ui.hide();
     // Graceful: stop the supervisor, flush redb, close QUIC connections.
     engine.shutdown();
     tracing::info!("udm stopped");

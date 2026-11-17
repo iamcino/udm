@@ -67,19 +67,16 @@ function invoke(fn, thisArg, args) {
   });
 }
 
+// Downloads this layer re-issued after a cancelled handoff attempt
+// (see handoff.js): their onCreated must not start a second handoff.
+// Keyed by URL - the new download's id is not known before its
+// onCreated can fire - consumed on first sight and expired after two
+// minutes. A wrongly skipped item is harmless: skipping only means
+// the browser keeps that download, which is the fallback outcome.
+const reissuedAt = new Map();
+const REISSUE_WINDOW_MS = 120000;
+
 const fx = {
-  pause(id) {
-    return invoke(api.downloads.pause, api.downloads, [id]).then(
-      () => true,
-      () => false,
-    );
-  },
-  resume(id) {
-    return invoke(api.downloads.resume, api.downloads, [id]).then(
-      () => true,
-      () => false,
-    );
-  },
   async cancel(id) {
     // A resolved cancel request is not yet a confirmation: verify the
     // resulting state. "interrupted" (or the item being gone) confirms;
@@ -113,6 +110,20 @@ const fx = {
       () => {},
     );
   },
+  download(url) {
+    const now = Date.now();
+    for (const [u, at] of reissuedAt) {
+      if (now - at >= REISSUE_WINDOW_MS) reissuedAt.delete(u);
+    }
+    reissuedAt.set(url, now);
+    return invoke(api.downloads.download, api.downloads, [{ url }]).then(
+      (id) => id,
+      (e) => {
+        reissuedAt.delete(url);
+        throw e;
+      },
+    );
+  },
   record,
 };
 
@@ -127,6 +138,11 @@ const flow = H.createHandoffFlow(client, fx);
 
 const inFlight = new Set();
 api.downloads.onCreated.addListener((item) => {
+  const reissued = reissuedAt.get(item.url);
+  if (reissued !== undefined) {
+    reissuedAt.delete(item.url);
+    if (Date.now() - reissued < REISSUE_WINDOW_MS) return;
+  }
   if (inFlight.has(item.id)) return;
   inFlight.add(item.id);
   (async () => {

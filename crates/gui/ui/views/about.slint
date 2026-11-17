@@ -25,18 +25,27 @@ component BrandButton inherits Rectangle {
         padding-right: 11px;
         spacing: 7px;
         alignment: center;
-        Image {
-            source: root.icon;
-            width: 16px;
-            height: 16px;
-            vertical-alignment: center;
+        // Layout children keep their preferred height at the top of the
+        // row, so the 16 px mark and the 12 px label drifted apart
+        // (field report 2026-11-17). A centre-aligned slot per child
+        // puts both on the button's midline.
+        VerticalLayout {
+            alignment: center;
+            Image {
+                source: root.icon;
+                width: 16px;
+                height: 16px;
+            }
         }
-        label-text := Text {
-            text: root.label;
-            color: touch.has-hover ? Theme.text : Theme.text-dim;
-            font-size: 12px;
-            font-weight: touch.has-hover ? 600 : 400;
-            vertical-alignment: center;
+        VerticalLayout {
+            alignment: center;
+            label-text := Text {
+                text: root.label;
+                color: touch.has-hover ? Theme.text : Theme.text-dim;
+                font-size: 12px;
+                font-weight: touch.has-hover ? 600 : 400;
+                vertical-alignment: center;
+            }
         }
     }
     touch := TouchArea {
@@ -76,8 +85,17 @@ export component AboutView inherits Rectangle {
                 font-size: 22px;
                 font-weight: 700;
             }
-            Pill { text: root.version-text; fg: Theme.accent-hi; }
-            Pill { text: root.http3-available ? I18n.tr("QUIC ready") : I18n.tr("QUIC unavailable"); fg: root.http3-available ? Theme.ok : Theme.warn; }
+            // The 18 px pills sat at the row's top while the 22 px title
+            // centred its glyphs in a taller line box (field report
+            // 2026-11-17); centre each pill in a full-height slot.
+            VerticalLayout {
+                alignment: center;
+                Pill { text: root.version-text; fg: Theme.accent-hi; }
+            }
+            VerticalLayout {
+                alignment: center;
+                Pill { text: root.http3-available ? I18n.tr("QUIC ready") : I18n.tr("QUIC unavailable"); fg: root.http3-available ? Theme.ok : Theme.warn; }
+            }
         }
 
         Text {

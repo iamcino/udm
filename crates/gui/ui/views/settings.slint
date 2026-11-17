@@ -308,11 +308,17 @@ export component SettingsView inherits Rectangle {
                                 checked <=> root.chrome-enabled;
                                 toggled => { root.browser-toggled("chrome", root.chrome-enabled); }
                             }
-                            Rectangle {
-                                width: 10px;
-                                height: 10px;
-                                border-radius: 5px;
-                                background: root.chrome-broken ? #c0392b : root.chrome-status == 3 ? Theme.ok : root.chrome-status == 2 ? Theme.warn : Theme.text-faint;
+                            // The 10 px dot sat at the row's top instead of
+                            // on the text's midline (field report
+                            // 2026-11-17); centre it in a full-height slot.
+                            VerticalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    width: 10px;
+                                    height: 10px;
+                                    border-radius: 5px;
+                                    background: root.chrome-broken ? #c0392b : root.chrome-status == 3 ? Theme.ok : root.chrome-status == 2 ? Theme.warn : Theme.text-faint;
+                                }
                             }
                             Text {
                                 horizontal-stretch: 1;
@@ -328,7 +334,10 @@ export component SettingsView inherits Rectangle {
                         }
                         HorizontalLayout {
                             spacing: 6px;
-                            Text { text: I18n.tr("Extension ID"); color: Theme.text-dim; font-size: 12px; vertical-alignment: center; }
+                            VerticalLayout {
+                                alignment: center;
+                                Text { text: I18n.tr("Extension ID"); color: Theme.text-dim; font-size: 12px; vertical-alignment: center; }
+                            }
                             Rectangle {
                                 horizontal-stretch: 1;
                                 height: 30px;
@@ -363,11 +372,14 @@ export component SettingsView inherits Rectangle {
                                 checked <=> root.firefox-enabled;
                                 toggled => { root.browser-toggled("firefox", root.firefox-enabled); }
                             }
-                            Rectangle {
-                                width: 10px;
-                                height: 10px;
-                                border-radius: 5px;
-                                background: root.firefox-broken ? #c0392b : root.firefox-status == 3 ? Theme.ok : root.firefox-status == 2 ? Theme.warn : Theme.text-faint;
+                            VerticalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    width: 10px;
+                                    height: 10px;
+                                    border-radius: 5px;
+                                    background: root.firefox-broken ? #c0392b : root.firefox-status == 3 ? Theme.ok : root.firefox-status == 2 ? Theme.warn : Theme.text-faint;
+                                }
                             }
                             Text {
                                 horizontal-stretch: 1;
