@@ -49,9 +49,7 @@ use usagi::net::stack::NetStack;
 use usagi::net::{tls, MemAltSvc};
 use usagi::paths::Paths;
 use usagi::store::{Store, TaskState};
-use usagi::update_apply::{apply_staged_with_trust, staged_candidate, ApplyError, InstallLayout};
-use usagi::update_manifest::TrustRoot;
-use usagi::update_records::{ClientTrust, Ed25519Identity};
+use usagi::updater::InstallLayout;
 use usagi::util;
 
 #[derive(Parser)]
@@ -241,9 +239,10 @@ struct UpdateArgs {
 
 #[derive(Subcommand, Clone)]
 enum UpdateCommand {
-    /// Print the pinned publisher fingerprint so it can be compared out of
-    /// band against the fingerprint published in the signed release notes.
-    /// No network activity; nothing is downloaded, staged or installed.
+    /// Print the pinned code-signing key fingerprint (the SPKI SHA-256 of
+    /// the signing certificate) so it can be compared out of band against
+    /// the fingerprint published with the release. No network activity;
+    /// nothing is downloaded, staged or installed.
     Pin,
     /// Turn update checks on or off: writes the checks-enabled flag file
     /// on the install base and opens no socket either way. Checks resolve
@@ -258,14 +257,19 @@ enum UpdateCommand {
     },
     /// Check for an update now. With checks resolved off this reports that
     /// checks are disabled and opens no socket. With checks resolved on it
-    /// fetches the signed manifest from the two release hosts, verifies it,
-    /// downloads the payload and stages it. Nothing is installed; applying
-    /// a staged update is a separate, explicit action.
+    /// asks both release hosts for their latest release and reports
+    /// whether a newer build is published. A check stores nothing and
+    /// downloads nothing; applying an update is a separate, explicit
+    /// action.
     Check,
-    /// Apply the staged update: swap the held candidate into the install
-    /// directory and start the new build. No network activity; if nothing
-    /// is staged this reports that and exits. The new build's first start
-    /// is what confirms the update.
+    /// Download and install the latest release now. If the published
+    /// version is not newer than this build, this reports that and
+    /// changes nothing. Otherwise it fetches the portable zip and
+    /// SHA256SUMS.txt, verifies the zip hash and the Authenticode
+    /// signature (pinned signing key) of every executable inside, then
+    /// swaps the install tree file by file; the replaced files stay as
+    /// `.old` backups until the next UDM start removes them. Restart
+    /// UDM afterwards to run the new build.
     Apply,
 }
 
@@ -622,7 +626,7 @@ async fn cmd_update(args: UpdateArgs) -> Result<ExitCode> {
     match args.command {
         UpdateCommand::Pin => cmd_update_pin(),
         UpdateCommand::Checks { state } => cmd_update_checks(state),
-        UpdateCommand::Check => cmd_update_check().await,
+        UpdateCommand::Check => cmd_update_check(),
         UpdateCommand::Apply => cmd_update_apply(),
     }
 }
@@ -643,8 +647,8 @@ fn install_layout() -> Result<InstallLayout> {
 fn cmd_update_checks(state: ChecksArg) -> Result<ExitCode> {
     let layout = install_layout()?;
     let on = matches!(state, ChecksArg::On);
-    usagi::update_check::set_checks_enabled(&layout, on)?;
-    let resolved = usagi::update_check::checks_enabled(&layout);
+    usagi::updater::set_checks_enabled(&layout, on)?;
+    let resolved = usagi::updater::checks_enabled(&layout);
     println!(
         "update checks {} (resolved: {})",
         if on { "on" } else { "off" },
@@ -653,108 +657,61 @@ fn cmd_update_checks(state: ChecksArg) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-async fn cmd_update_check() -> Result<ExitCode> {
+fn cmd_update_check() -> Result<ExitCode> {
     let layout = install_layout()?;
     let now_unix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    let outcome = usagi::update_check::run_update_check(&layout, now_unix, || {
-        usagi::update_fetch::FetchSession::open(usagi::update_check::release_origins()?)
-    })
-    .await;
+    let outcome = usagi::updater::run_check(&layout, now_unix);
     println!("{}", outcome.notice);
     // The check ran and reported; only a failed check (transport, HTTP,
-    // local I/O) is a command failure. A refusal is a verdict, not an
-    // error, and a disabled check exits 0 by design.
+    // local I/O) is a command failure. A disabled check exits 0 by
+    // design.
     match outcome.kind {
-        usagi::update_check::CheckKind::Failed => Ok(ExitCode::from(1)),
+        usagi::updater::CheckKind::Failed => Ok(ExitCode::from(1)),
         _ => Ok(ExitCode::SUCCESS),
     }
 }
 
-/// Wiring W2 item 6: the explicit swap of the held candidate. Apply
-/// never fetches and never opens a session; with nothing staged it
-/// reports that and exits without a socket. On success the new build
-/// is started here, and its first start (recover_updater +
-/// confirm_successful_start) is the receipt - not this command's
-/// output. On ExeRenameRefused the Prepared journal is left for the
-/// next GUI start, which reconciles it; the CLI never spawns the
-/// helper (envelope item 8).
+/// The explicit install: read the latest published version, and when
+/// it is newer, download, verify and swap it in (the Yeager flow; there
+/// is no staged candidate and no journal). The checks flag governs
+/// checks, not this explicit act. A build already current changes
+/// nothing on disk.
 fn cmd_update_apply() -> Result<ExitCode> {
     let layout = install_layout()?;
-    match staged_candidate(&layout) {
-        Ok(Some(_)) => {}
-        Ok(None) => {
-            println!("no update is staged");
-            return Ok(ExitCode::SUCCESS);
-        }
+    let version = match usagi::updater::latest() {
+        Ok(version) => version,
         Err(e) => {
-            return Err(usagi::Error::Other(format!(
-                "cannot read the staged update: {e}"
-            )));
+            eprintln!("udm-cli: update check failed: {e}");
+            return Ok(ExitCode::from(1));
         }
+    };
+    if !usagi::updater::is_newer(&version) {
+        println!(
+            "Already current: version {} is the latest published version.",
+            usagi::VERSION
+        );
+        return Ok(ExitCode::SUCCESS);
     }
-    let root = TrustRoot::pinned();
-    let identity = Ed25519Identity::from_pinning(root.public_key, &root.pin)
-        .map_err(|e| usagi::Error::Other(format!("update trust: {e}")))?;
-    let mut trust = ClientTrust::bootstrap(identity)
-        .map_err(|e| usagi::Error::Other(format!("update trust: {e}")))?;
-    trust
-        .load_into(&layout.updater_trust_file())
-        .map_err(|e| usagi::Error::Other(format!("update trust: {e}")))?;
-    let now_unix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    match apply_staged_with_trust(&layout, &trust, now_unix) {
-        Ok(journal) => {
-            println!(
-                "update applied: version {} (journal step {:?})",
-                journal.new_version, journal.step
-            );
-            let exe = layout.base().join("udm.exe");
-            std::process::Command::new(&exe)
-                .spawn()
-                .map_err(|e| usagi::Error::Other(format!("cannot start {}: {e}", exe.display())))?;
-            println!("started the new build at {}", exe.display());
-            println!("its first start confirms the update");
+    match usagi::updater::download_and_install(&layout, &version) {
+        Ok(()) => {
+            println!("update applied: version {version}");
+            println!("restart UDM to run the new build");
             Ok(ExitCode::SUCCESS)
         }
-        Err(ApplyError::ExeRenameRefused { path, source }) => {
-            eprintln!(
-                "udm-cli: cannot rename {} while it is in use: {source}",
-                path.display()
-            );
-            eprintln!(
-                "the pending swap stays recorded; the next UDM start reconciles it. \
-                 The staged update remains - apply again from the GUI once the lock is gone."
-            );
+        Err(f) => {
+            eprintln!("udm-cli: {}", f.message());
             Ok(ExitCode::from(1))
         }
-        Err(e) => Err(usagi::Error::Other(format!("update apply failed: {e}"))),
     }
 }
 
 fn cmd_update_pin() -> Result<ExitCode> {
-    // A failed self-check means the compiled constants were transcribed
-    // wrong; refuse to print a fingerprint that cannot be trusted.
-    if !usagi::update_pin::pins_self_consistent() {
-        return Err(usagi::Error::Other(
-            "update pin self-check failed: the compiled pin does not match the publisher public key".into(),
-        ));
-    }
     println!(
-        "publisher pin (SHA-256): {}",
-        usagi::update_pin::publisher_pin()
-    );
-    println!(
-        "publisher public key:    {}",
-        usagi::update_pin::publisher_public_key_hex()
-    );
-    println!(
-        "recovery pin (SHA-256):  {}",
-        usagi::update_pin::recovery_pin()
+        "code-signing key pin (SPKI SHA-256): {}",
+        usagi::updater::PINNED_SPKI_SHA256_HEX
     );
     Ok(ExitCode::SUCCESS)
 }

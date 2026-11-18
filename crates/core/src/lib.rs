@@ -18,9 +18,8 @@
 //!   the same database while it is locked. Browser handoff uses the separate
 //!   local coordinator/pipe boundary and persisted task transaction markers.
 //! - No telemetry, remote crash reporting, or metric export is implemented.
-//!   [`update_pin`] holds the compiled publisher trust root. [`update_manifest`]
-//!   verifies a signed manifest. [`update_fetch`] downloads a manifest and
-//!   payload only when the update flow calls it. There is no polling.
+//!   [`updater`] checks the release hosts only when the update flow calls
+//!   it. There is no polling.
 //!   Local instrumentation is not an engine-wide connection census;
 //!   unavailable totals must not be displayed as zero.
 //! - No administrator rights or services are required. [`Paths`] resolves
@@ -44,23 +43,16 @@
 //! | [`handoff`] | Durable browser ownership transactions and recovery entries. |
 //! | [`handoff_pipe`] | Framing, pairing and Windows per-user named-pipe transport. |
 //! | [`paths`] | Data and default download location discovery, including legacy fallbacks. |
-//! | [`update_pin`] | U2 publisher pin: compiled Ed25519 trust root, no network. |
-//! | [`update_manifest`] | U2 manifest parse and Ed25519 verification. No network. |
-//! | [`update_fetch`] | U3 fetch: two configured origins, verified manifest, payload handoff. |
-//! | [`update_apply`] | U4 staging, rename swap and rollback journal. Held until applied. |
-//! | [`update_records`] | U5 rotation and revocation records, verified from caller-supplied bytes. No network. |
+//! | [`updater`] | Yeager-style update: latest-release check on both hosts, SHA256SUMS + Authenticode SPKI gate, rename swap. |
 //! | [`error`] | Shared errors. |
 //! | [`util`] | Filename, path, byte-count and duration helpers. |
 //!
 //! Internal durability and finalization modules enforce file-sync ordering
-//! and reconcile rename/database boundaries. They are not a public updater
-//! API. Timed scheduling, a global speed limit, torrents and media resolving
-//! are not implemented here. Manifest verification ([`update_manifest`]) and
-//! fetch ([`update_fetch`]) are implemented. Staging, rename swap, and
-//! rollback are implemented in [`update_apply`]. Rotation and revocation
-//! records are implemented in [`update_records`]. N2 dual-stack
-//! (IPv4/IPv6 selection) and N3 multi-family transfers remain
-//! measurement-gated and are not built.
+//! and reconcile rename/database boundaries. Timed scheduling, a global
+//! speed limit, torrents and media resolving are not implemented here.
+//! Updates are implemented in [`updater`]. N2 dual-stack (IPv4/IPv6
+//! selection) and N3 multi-family transfers remain measurement-gated and
+//! are not built.
 
 pub mod category;
 pub mod config;
@@ -74,12 +66,7 @@ pub mod hash;
 pub mod net;
 pub mod paths;
 pub mod store;
-pub mod update_apply;
-pub mod update_check;
-pub mod update_fetch;
-pub mod update_manifest;
-pub mod update_pin;
-pub mod update_records;
+pub mod updater;
 pub mod util;
 
 pub use config::{ConflictPolicy, Settings, TransportPref};

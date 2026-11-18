@@ -18,10 +18,7 @@ use usagi::engine::{AddRequest, Engine, Event, TaskSnapshot};
 use usagi::handoff::{Coordinator, RecoveryEntry};
 use usagi::hash::ExpectedHash;
 use usagi::store::records::TaskState;
-use usagi::update_apply::{ApplyError, InstallLayout};
-use usagi::update_check::CheckKind;
-use usagi::update_manifest::TrustRoot;
-use usagi::update_records::{ClientTrust, Ed25519Identity};
+use usagi::updater::{CheckKind, InstallLayout};
 use usagi::util;
 
 use crate::{AppWindow, EndpointRow, StatusInfo, TaskDetail, TaskRow};
@@ -106,6 +103,12 @@ pub struct Gui {
     /// badge. The completion closure cannot touch the tray itself: the GUI
     /// handle is not `Send`.
     pub was_check_running: RefCell<bool>,
+    /// The version a check found newer than this build this session,
+    /// shared with the check/apply worker threads (the GUI handle
+    /// itself is not `Send`). `None` until a check reports one.
+    pub update_offered: Arc<std::sync::Mutex<Option<String>>>,
+    /// Single-flight guard for the download+install worker.
+    pub update_apply_running: Arc<AtomicBool>,
 }
 
 /// The automatic-check window. There is one clock instant (`clock_base`,
@@ -232,6 +235,8 @@ pub fn setup(
         relaunch_after_apply,
         update_schedule: RefCell::new(UpdateSchedule::new(Instant::now())),
         was_check_running: RefCell::new(false),
+        update_offered: Arc::new(std::sync::Mutex::new(None)),
+        update_apply_running: Arc::new(AtomicBool::new(false)),
     });
 
     // Wiring W1: a rollback at startup reconciliation surfaces its
@@ -243,12 +248,11 @@ pub fn setup(
     push_settings_to_ui(ui, &engine.settings(), gui.update_layout.as_ref());
     refresh(&gui);
 
-    // Initialise the update offer and the tray badge from durable state at
-    // launch. A candidate staged by an earlier session is still held on
-    // disk, so it is offered again now rather than waiting for a fresh
-    // check to return Available; the badge mirrors the same probe.
-    let held = held_candidate(&gui);
-    ui.set_update_available(held);
+    // The update offer is session state in the Yeager model: a check
+    // stores nothing and no candidate is held on disk between sessions,
+    // so the offer starts empty and the startup automatic check
+    // re-finds a newer build within seconds when one is published.
+    ui.set_update_available(false);
     refresh_update_badge(&gui);
 
     // G3 lifecycle: the window close button hides to the tray when the
@@ -1919,7 +1923,7 @@ fn set_update_checks(g: &Rc<Gui>, enabled: bool) {
         toast(g, "cannot locate the install directory".into(), true);
         return;
     };
-    match usagi::update_check::set_checks_enabled(layout, enabled) {
+    match usagi::updater::set_checks_enabled(layout, enabled) {
         Ok(()) => {
             if let Some(ui) = g.ui.upgrade() {
                 ui.set_set_checks_enabled(enabled);
@@ -2141,63 +2145,54 @@ fn start_update_check(g: &Rc<Gui>) {
     g.update_schedule
         .borrow_mut()
         .note_check_start(Instant::now());
+    if let Ok(mut slot) = g.update_offered.lock() {
+        *slot = None;
+    }
     ui.set_update_check_busy(true);
     ui.set_update_available(false);
     ui.set_update_result(SharedString::default());
     let weak = g.ui.clone();
     let running = g.update_check_running.clone();
+    let offered = g.update_offered.clone();
     std::thread::spawn(move || {
         let outcome = run_check_blocking(&layout);
         let _ = slint::invoke_from_event_loop(move || {
-            running.store(false, Ordering::SeqCst);
-            let Some(ui) = weak.upgrade() else { return };
+            if outcome.kind == CheckKind::Available {
+                if let Ok(mut slot) = offered.lock() {
+                    *slot = outcome.version.clone();
+                }
+            }
+            let Some(ui) = weak.upgrade() else {
+                running.store(false, Ordering::SeqCst);
+                return;
+            };
             ui.set_update_check_busy(false);
             ui.set_update_available(outcome.kind == CheckKind::Available);
             ui.set_update_result(ui.invoke_translate(SharedString::from(outcome.notice)));
+            running.store(false, Ordering::SeqCst);
         });
     });
 }
 
-fn run_check_blocking(layout: &InstallLayout) -> usagi::update_check::CheckOutcome {
+fn run_check_blocking(layout: &InstallLayout) -> usagi::updater::CheckOutcome {
     let now_unix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    let runtime = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(runtime) => runtime,
-        Err(e) => {
-            return usagi::update_check::CheckOutcome {
-                kind: CheckKind::Failed,
-                notice: format!("Update check failed: {e}"),
-            };
-        }
-    };
-    runtime.block_on(usagi::update_check::run_update_check(
-        layout,
-        now_unix,
-        || usagi::update_fetch::FetchSession::open(usagi::update_check::release_origins()?),
-    ))
+    usagi::updater::run_check(layout, now_unix)
 }
 
-/// Whether a verified candidate is held on this install right now. The
-/// durable probe behind both the update offer and the tray badge; it opens
-/// no socket and never stages or applies anything.
-fn held_candidate(g: &Rc<Gui>) -> bool {
-    g.update_layout
-        .as_ref()
-        .and_then(|layout| usagi::update_apply::staged_candidate(layout).ok().flatten())
-        .is_some()
-}
-
-/// Recompute the tray update badge from durable state: ON exactly when a
-/// candidate is held, OFF otherwise. Called at launch, on every check
-/// completion of any path, and after apply. Display-only — no click
-/// behaviour, no toast, no settings toggle.
+/// Recompute the tray update badge from the session offer: ON exactly
+/// when a check has found a newer build this session, OFF otherwise.
+/// Called at launch, on every check completion of any path, and after
+/// apply. Display-only - no click behaviour, no toast, no settings
+/// toggle.
 fn refresh_update_badge(g: &Rc<Gui>) {
-    let held = held_candidate(g);
+    let held = g
+        .update_offered
+        .lock()
+        .map(|slot| slot.is_some())
+        .unwrap_or(false);
     if let Some(tray) = g.tray.borrow_mut().as_mut() {
         tray.set_update_badge(held);
     }
@@ -2213,12 +2208,13 @@ fn poll_update_checks(g: &Rc<Gui>) {
     let resolved_on = g
         .update_layout
         .as_ref()
-        .is_some_and(|layout| usagi::update_check::checks_enabled(layout));
+        .is_some_and(|layout| usagi::updater::checks_enabled(layout));
     let running = g.update_check_running.load(Ordering::SeqCst);
 
     // A check completion (running true->false) recomputes the badge from
-    // durable state. The completion closure cannot touch the tray itself
-    // (the GUI handle is not Send), so the poll detects the transition.
+    // the session offer. The completion closure cannot touch the tray
+    // itself (the GUI handle is not `Send`), so the poll detects the
+    // transition.
     let was_running = *g.was_check_running.borrow();
     if was_running && !running {
         refresh_update_badge(g);
@@ -2236,11 +2232,12 @@ fn poll_update_checks(g: &Rc<Gui>) {
     }
 }
 
-/// The automatic check: the same factored check and single-flight guard as
-/// the manual path, but it does NOT clear an offer or result already on
-/// screen, and on completion only an Available outcome changes the offer
-/// UI. Any other kind leaves a previously staged candidate offered (its
-/// files are still on disk). It never applies; apply stays a manual act.
+/// The automatic check: the same factored check and single-flight guard
+/// as the manual path, but it does NOT clear an offer or result already
+/// on screen. An Available outcome sets the offer; an AlreadyCurrent
+/// outcome clears a stale one (the build was updated another way); any
+/// other kind leaves the UI as it is. It never applies; apply stays a
+/// manual act.
 fn start_automatic_check(g: &Rc<Gui>) {
     let Some(layout) = g.update_layout.clone() else {
         return;
@@ -2261,112 +2258,92 @@ fn start_automatic_check(g: &Rc<Gui>) {
     ui.set_update_check_busy(true);
     let weak = g.ui.clone();
     let running = g.update_check_running.clone();
+    let offered = g.update_offered.clone();
     std::thread::spawn(move || {
         let outcome = run_check_blocking(&layout);
         let _ = slint::invoke_from_event_loop(move || {
-            running.store(false, Ordering::SeqCst);
-            let Some(ui) = weak.upgrade() else { return };
-            ui.set_update_check_busy(false);
-            if outcome.kind == CheckKind::Available {
-                ui.set_update_available(true);
-                ui.set_update_result(ui.invoke_translate(SharedString::from(outcome.notice)));
+            match outcome.kind {
+                CheckKind::Available => {
+                    if let Ok(mut slot) = offered.lock() {
+                        *slot = outcome.version.clone();
+                    }
+                    if let Some(ui) = weak.upgrade() {
+                        ui.set_update_available(true);
+                        ui.set_update_result(
+                            ui.invoke_translate(SharedString::from(outcome.notice.clone())),
+                        );
+                    }
+                }
+                CheckKind::AlreadyCurrent => {
+                    if let Ok(mut slot) = offered.lock() {
+                        *slot = None;
+                    }
+                    if let Some(ui) = weak.upgrade() {
+                        ui.set_update_available(false);
+                    }
+                }
+                _ => {}
             }
+            if let Some(ui) = weak.upgrade() {
+                ui.set_update_check_busy(false);
+            }
+            running.store(false, Ordering::SeqCst);
         });
     });
 }
 
-/// The explicit Apply action (design section 2.3): swap the held
-/// candidate, then relaunch into the new build. Never fetches, never
-/// opens a session. On a refused exe rename the running GUI hands the
-/// swap to the per-user helper and exits; a missing helper is reported
-/// and the GUI keeps running (startup reconciliation clears the
-/// Prepared journal on the next start, keeping the old build).
+/// The explicit Apply action: download the offered build, verify it
+/// (SHA256SUMS hash, then the Authenticode + SPKI gate on every
+/// executable), swap it into the install tree, then relaunch into the
+/// new build. Runs on a worker thread; the outcome returns through the
+/// event loop. A failure changes nothing outside the staging directory
+/// (a failed swap rolls back) and is reported in the update result
+/// text; the offer stands so the user can retry.
 fn apply_update(g: &Rc<Gui>) {
-    let Some(layout) = g.update_layout.as_ref() else {
+    let Some(layout) = g.update_layout.clone() else {
         toast(g, "cannot locate the install directory".into(), true);
         return;
     };
-    match usagi::update_apply::staged_candidate(layout) {
-        Ok(Some(_)) => {}
-        Ok(None) => {
-            if let Some(ui) = g.ui.upgrade() {
-                ui.set_update_available(false);
-            }
-            toast(g, "no update is staged".into(), false);
-            return;
+    let version = g.update_offered.lock().ok().and_then(|slot| slot.clone());
+    let Some(version) = version else {
+        if let Some(ui) = g.ui.upgrade() {
+            ui.set_update_available(false);
         }
-        Err(e) => {
-            toast(g, e.to_string(), true);
-            return;
-        }
-    }
-    let trust = match apply_trust(layout) {
-        Ok(trust) => trust,
-        Err(e) => {
-            toast(g, format!("Update apply failed: {e}"), true);
-            return;
-        }
+        toast(g, "no update is available".into(), false);
+        return;
     };
-    let now_unix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    match usagi::update_apply::apply_staged_with_trust(layout, &trust, now_unix) {
-        Ok(journal) => {
-            tracing::info!(
-                version = %journal.new_version,
-                step = ?journal.step,
-                "update applied; relaunching into the new build"
-            );
-            // main.rs starts the new exe only after the engine has shut
-            // down, so both databases are released first. The new
-            // process's startup confirmation is the receipt.
-            g.relaunch_after_apply.store(true, Ordering::SeqCst);
-            let _ = slint::quit_event_loop();
-        }
-        Err(ApplyError::ExeRenameRefused { path, source }) => {
-            tracing::warn!(
-                path = %path.display(),
-                error = %source,
-                "exe rename refused; handing the swap to the updater helper"
-            );
-            match usagi::update_apply::spawn_helper(layout) {
-                Ok(_child) => {
-                    // The helper waits for this process to exit, completes
-                    // the swap and starts the new build itself.
+    if g.update_apply_running
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+    if let Some(ui) = g.ui.upgrade() {
+        ui.set_update_check_busy(true);
+    }
+    let weak = g.ui.clone();
+    let running = g.update_apply_running.clone();
+    let relaunch = g.relaunch_after_apply.clone();
+    std::thread::spawn(move || {
+        let result = usagi::updater::download_and_install(&layout, &version);
+        let _ = slint::invoke_from_event_loop(move || {
+            running.store(false, Ordering::SeqCst);
+            let Some(ui) = weak.upgrade() else { return };
+            ui.set_update_check_busy(false);
+            match result {
+                Ok(()) => {
+                    // main.rs starts the new exe only after the engine
+                    // has shut down, so both databases are released
+                    // first.
+                    relaunch.store(true, Ordering::SeqCst);
                     let _ = slint::quit_event_loop();
                 }
-                Err(ApplyError::HelperMissing(missing)) => {
-                    toast(
-                        g,
-                        format!(
-                            "Update apply failed: the updater helper is missing ({}). \
-                             Restart UDM to clear the pending swap, then apply again.",
-                            missing.display()
-                        ),
-                        true,
-                    );
+                Err(f) => {
+                    ui.set_update_result(ui.invoke_translate(SharedString::from(f.message())));
                 }
-                Err(e) => toast(g, format!("Update apply failed: {e}"), true),
             }
-        }
-        Err(e) => toast(g, format!("Update apply failed: {e}"), true),
-    }
-    // The GUI kept running (a refused or failed apply): recompute the badge
-    // from durable state, since a partial apply may have changed what is
-    // held. The success and helper paths quit and re-initialise at launch.
-    refresh_update_badge(g);
-}
-
-/// Trust for an apply without a fetch session: bootstrap from the
-/// compiled pin, then load any rotation/revocation state already stored
-/// on this install (envelope W2 item 6). Opens no socket.
-fn apply_trust(layout: &InstallLayout) -> Result<ClientTrust, usagi::update_records::RecordError> {
-    let root = TrustRoot::pinned();
-    let identity = Ed25519Identity::from_pinning(root.public_key, &root.pin)?;
-    let mut trust = ClientTrust::bootstrap(identity)?;
-    trust.load_into(&layout.updater_trust_file())?;
-    Ok(trust)
+        });
+    });
 }
 
 /// OS dark-mode preference for the Auto theme (Windows: the per-user
@@ -2489,7 +2466,7 @@ pub fn push_settings_to_ui(ui: &AppWindow, s: &Settings, update_layout: Option<&
     // is (like the startup toggle mirrors the registry). Save re-mirrors
     // it here but never writes it: the flag is not a Settings field.
     ui.set_set_checks_enabled(
-        update_layout.is_some_and(|layout| usagi::update_check::checks_enabled(layout)),
+        update_layout.is_some_and(|layout| usagi::updater::checks_enabled(layout)),
     );
     ui.set_set_user_agent(SharedString::from(s.user_agent.clone()));
     ui.set_set_log_index(match s.log_level.as_str() {

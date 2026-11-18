@@ -2,6 +2,21 @@
 
 Các thay đổi đáng chú ý của UDM. Tiếng Anh: [CHANGELOG.md](CHANGELOG.md).
 
+## 0.2.4
+
+- **Kiểm tra cập nhật, đã sửa**: sau một lần kiểm tra thành công, kiểm tra lại không còn báo lỗi từ chối "manifest epoch". Kiểm tra nay là thao tác chỉ đọc thuần túy — kiểm tra lại bao nhiêu lần cũng cho cùng một đáp án, và "Đã là bản mới nhất" được báo đúng.
+- **Bộ cập nhật viết lại theo hai host phát hành**: UDM nay hỏi GitHub và GitLab bản phát hành mới nhất song song và lấy bản mới hơn. Một bản cập nhật chỉ được chấp nhận khi SHA-256 của file nén khớp `SHA256SUMS.txt` đã công bố và mọi file chương trình mang chữ ký số hợp lệ của UDM.
+
+## 0.2.3
+
+- **Đóng xuống khay, đã sửa**: đóng cửa sổ khi bật "Đóng xuống khay" nay giữ UDM chạy trong khay; ứng dụng không còn tự thoát khi cửa sổ bị ẩn.
+- **Thu nhỏ xuống khay, đã sửa**: thu nhỏ khi bật "Thu nhỏ xuống khay" không còn bật cửa sổ trở lại ngay.
+- **Cài đặt từ dòng lệnh**: `udm-cli settings set` nay nhận `close_to_tray`, `minimize_to_tray`, `start_minimized` và `start_with_windows`.
+- **Nhận lượt tải từ trình duyệt, chắc chắn hơn**: tiện ích hủy lượt tải của trình duyệt trước, nên hộp thoại Save As của Chrome không còn chặn việc bàn giao; lượt tải nào trình duyệt giữ lại sẽ được trình duyệt tiếp tục thay vì bị bỏ.
+- **Khay hệ thống**: **Kiểm tra cập nhật** nay mở lại cửa sổ chính trước khi bắt đầu kiểm tra, nên kết quả hiển thị được.
+- **Sửa căn chỉnh**: các nhãn ở trang Giới thiệu, biểu tượng và nhãn của nút thương hiệu, và các chấm trạng thái trình duyệt ở Cài đặt đã được căn giữa theo hàng.
+- **Menu khay theo giao diện**: menu khay nay tối khi ứng dụng tối, sáng khi ứng dụng sáng.
+
 ## 0.2.2
 
 - **Tải không còn chết vì nghẽn**: khi một kết nối của một lượt tải

@@ -12,13 +12,13 @@
 //! Needs recovery rows, distinct from engine tasks.
 //!
 //! No telemetry, administrator rights or services are required or
-//! implemented. Startup reconciles a pending updater swap journal
-//! before the engine and the window start (design section 2.3).
-//! Update checks are on by default and run at startup and every 6 hours
-//! while the app runs, as well as from the manual Check for Updates
-//! button; a durable opt-out turns them off. An explicit Apply swaps the
-//! staged update and relaunches into the new build - apply is never
-//! automatic. Application data
+//! implemented. Startup removes the previous update's `.old` backups
+//! before the engine and the window start. Update checks are on by
+//! default and run at startup and every 6 hours while the app runs, as
+//! well as from the manual Check for Updates button; a durable opt-out
+//! turns them off. An explicit Apply downloads the new build, verifies
+//! it, swaps it in and relaunches into it - apply is never automatic.
+//! Application data
 //! is per-user, or in `data/` beside the
 //! executable in portable mode; downloads have their own destination.
 //! Panic diagnostics stay in the local log. See `docs/PRIVACY.md` and
@@ -44,7 +44,7 @@ use std::sync::Arc;
 
 use usagi::engine::EngineBuilder;
 use usagi::paths::Paths;
-use usagi::update_apply::{current_journal, recover_updater, InstallLayout, Step};
+use usagi::updater::InstallLayout;
 
 slint::include_modules!();
 
@@ -78,45 +78,19 @@ fn main() {
         "udm starting"
     );
 
-    // Wiring W1 (design section 2.3): reconcile a swap journal a
-    // previous apply left behind, before the engine builds and before
-    // the window is created. A rollback carries a user notice, which
-    // the first UI shows (it is passed into state::setup below). If
-    // the journal still sits at NewStaged after recovery, this start
-    // is the receipt the swap protocol waits for; it is confirmed once
-    // the UI is ready, further below. A recovery failure is logged and
-    // startup continues on the install as it lies. The automatic update
-    // check is scheduled separately, in the GUI poll timer (state.rs);
-    // reconciliation itself opens no socket.
+    // Updater startup (Yeager model): a previous apply left `.old`
+    // backups of the files it replaced; remove them, and any staging
+    // remnant, on a background thread - the previous process may still
+    // be exiting. Nothing else is reconciled: a check stores nothing,
+    // and there is no swap journal or first-start receipt.
     let update_layout = paths.exe_dir.clone().map(InstallLayout::new);
-    // Wiring W2 (item 7): the Apply action sets this flag and quits the
-    // event loop; the new exe starts below, after the engine released
-    // its databases, so the new build can open them.
+    // The Apply action sets this flag and quits the event loop; the new
+    // exe starts below, after the engine released its databases, so the
+    // new build can open them.
     let relaunch_after_apply = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let mut notice: Option<String> = None;
-    let mut confirm_first_start = false;
+    let notice: Option<String> = None;
     if let Some(layout) = &update_layout {
-        let now_unix = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        match recover_updater(layout, now_unix) {
-            Ok(report) => {
-                notice = report.notice;
-                match current_journal(layout) {
-                    Ok(Some(journal)) if journal.step == Step::NewStaged => {
-                        confirm_first_start = true;
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::warn!(error = %e, "cannot read the swap journal after recovery");
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "updater startup reconciliation failed");
-            }
-        }
+        usagi::updater::finish_previous_update(layout);
     }
 
     let handoff_paths = paths.clone();
@@ -183,22 +157,6 @@ fn main() {
     let eng = engine.clone();
     state::setup(&ui, eng, handoff, hidden, notice, layout, relaunch);
 
-    // The UI has reached ready state: when recovery left the journal
-    // at NewStaged, this running build is the new build's first start,
-    // so record the receipt exactly once (design section 2.3). No
-    // other recovery outcome calls this.
-    if confirm_first_start {
-        if let Some(layout) = &update_layout {
-            match usagi::update_apply::confirm_successful_start(layout) {
-                Ok(outcome) => {
-                    tracing::info!(outcome = ?outcome, "update first start confirmed");
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "cannot confirm the update first start");
-                }
-            }
-        }
-    }
     tracing::info!("entering event loop");
 
     // 0.2.3 U1: the app must outlive its window. Both `ui.run()` and
@@ -227,12 +185,10 @@ fn main() {
         std::process::exit(1);
     }
 
-    // Wiring W2 (item 7): an explicit Apply succeeded, so start the new
-    // build now. The swap target is the install base's udm.exe; the
-    // new process's startup reconciliation confirms the receipt when
-    // the journal sits at NewStaged. Arguments carry over (e.g.
-    // --minimized). A failed spawn is logged; the old files are already
-    // swapped, so the next manual start runs the new build.
+    // An explicit Apply succeeded, so start the new build now. The
+    // swap target is the install base's udm.exe. Arguments carry over
+    // (e.g. --minimized). A failed spawn is logged; the files are
+    // already swapped, so the next manual start runs the new build.
     if relaunch_after_apply.load(std::sync::atomic::Ordering::SeqCst) {
         if let Some(layout) = &update_layout {
             let exe = layout.base().join("udm.exe");

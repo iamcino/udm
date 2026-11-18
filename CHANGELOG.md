@@ -2,6 +2,21 @@
 
 All notable changes to UDM are listed here. Vietnamese: [CHANGELOG.vi.md](CHANGELOG.vi.md).
 
+## 0.2.4
+
+- **Update checks, fixed**: after a successful check, checking again no longer fails with a "manifest epoch" refusal. A check is now a pure read — repeating it gives the same answer, and "Already current" is reported correctly.
+- **Updater rebuilt on the release hosts**: UDM now asks GitHub and GitLab for their latest release in parallel and takes the newest. An update is accepted only when the archive's SHA-256 matches the published `SHA256SUMS.txt` and every program file carries a valid UDM code signature.
+
+## 0.2.3
+
+- **Close to tray, fixed**: closing the window with "Close to tray" on now keeps UDM running in the tray; the app no longer exits when the window is hidden.
+- **Minimize to tray, fixed**: minimizing with "Minimize to tray" on no longer brings the window straight back.
+- **Settings from the command line**: `udm-cli settings set` now accepts `close_to_tray`, `minimize_to_tray`, `start_minimized` and `start_with_windows`.
+- **Browser handoff, more reliable**: the extension cancels the browser's own download first, so Chrome's Save As dialog no longer blocks the handoff; a download the browser keeps is resumed in the browser instead of being dropped.
+- **Tray**: **Check for Updates** now restores the main window before it starts checking, so the result is visible.
+- **Alignment fixes**: the About page pills, the brand button icon and label, and the browser status dots in Settings are centred on their rows.
+- **Tray menu follows the theme**: the tray menu is now dark when the app is dark, and light when the app is light.
+
 ## 0.2.2
 
 - **Downloads survive stalls**: when one connection of a multi-part

@@ -35,24 +35,21 @@ $dist = Join-Path $root "dist"
 $version = (Select-String -Path (Join-Path $root "Cargo.toml") -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
 if (-not $version) { throw "could not read workspace version from Cargo.toml" }
 
-# U2 pin (REV1 sec. 2.1/2.5): the single source of truth is the compiled
-# constant in crates/core/src/update_pin.rs. The installer never generates
-# or fetches a pin; build.ps1 reads it from the Rust source and passes it
-# to makensis as build-time defines (installer.nsi refuses to build
-# without them). tools/check-update-pin.py enforces the same in CI.
-$pinSource = Join-Path $root "crates\core\src\update_pin.rs"
-# rustfmt splits the 64-hex constants across two lines (the declaration
-# line ends at `=`, the value sits on the next line), so match against
-# the raw file text: \s spans the line break. This still reads the
-# single-line spelling too. (U1-1: the old single-line Select-String
-# patterns could not read either constant after cargo fmt split them.)
+# Update trust pin: the single source of truth is the compiled constant
+# in crates/core/src/updater.rs - PINNED_SPKI_SHA256_HEX, the SHA-256 of
+# the code-signing key's SubjectPublicKeyInfo. The installer never
+# generates or fetches a pin; build.ps1 reads it from the Rust source
+# and passes it to makensis as a build-time define (installer.nsi
+# refuses to build without it). tools/check-update-pin.py enforces the
+# same in CI.
+$pinSource = Join-Path $root "crates\core\src\updater.rs"
+# rustfmt splits the constant across two lines (the declaration line
+# ends at `=`, the value sits on the next line), so match against the
+# raw file text: \s spans the line break.
 $pinText = Get-Content -Path $pinSource -Raw
-$pinMatch = [regex]::Match($pinText, 'pub const PUBLISHER_PIN_SHA256: &str\s*=\s*"([0-9a-f]{64})"')
-if (-not $pinMatch.Success) { throw "could not read PUBLISHER_PIN_SHA256 from crates/core/src/update_pin.rs" }
+$pinMatch = [regex]::Match($pinText, 'pub const PINNED_SPKI_SHA256_HEX: &str\s*=\s*"([0-9a-f]{64})"')
+if (-not $pinMatch.Success) { throw "could not read PINNED_SPKI_SHA256_HEX from crates/core/src/updater.rs" }
 $updatePin = $pinMatch.Groups[1].Value
-$pubkeyMatch = [regex]::Match($pinText, 'pub const PUBLISHER_PUBLIC_KEY_HEX: &str\s*=\s*"([0-9a-f]{64})"')
-if (-not $pubkeyMatch.Success) { throw "could not read PUBLISHER_PUBLIC_KEY_HEX from crates/core/src/update_pin.rs" }
-$updatePubkey = $pubkeyMatch.Groups[1].Value
 
 # Zip writing with byte-exact entry names. Compress-Archive writes
 # subdirectory entries with '\' separators on Windows, which strict
@@ -190,7 +187,7 @@ if ($Sign) {
 if (-not $SkipInstaller) {
     Write-Host "==> makensis"
     Push-Location (Join-Path $root "packaging\windows")
-    makensis /V2 /DVERSION=$version /DUDM_UPDATE_PIN=$updatePin /DUDM_UPDATE_PUBKEY_HEX=$updatePubkey installer.nsi
+    makensis /V2 /DVERSION=$version /DUDM_SPKI_PIN=$updatePin installer.nsi
     Pop-Location
     if ($LASTEXITCODE -ne 0) { throw "makensis failed" }
     if ($Sign) {

@@ -51,110 +51,81 @@ stack to check QUIC availability.
 
 ## Updates and the built-in updater
 
-The engine contains a complete authenticated updater: it can fetch a signed
-update manifest and payload, verify them, stage the files and swap them into
-the install directory with a rollback journal. Three surfaces invoke its
-fetch and staging, all only when update checks resolve on: the desktop app's
-automatic check (once at startup and every 6 hours while it runs), the
-graphical interface's Check for Updates button, and `udm-cli update check`.
-Checks resolve on by default: an absent flag file means on. `udm-cli update
+The updater is deliberately simple. Every release is published on two
+hosts, GitHub (`iamcino/udm`) and GitLab (`cino-group/udm`). A check asks
+both hosts at the same time where their "latest release" link points and
+reads the version from the answer; the newest version either host has is
+the latest. If one host cannot be reached, the other is enough. A check
+stores nothing: it is a pure read, so checking again gives the same
+answer, and a published version that is not newer than the installed one
+is simply reported as already current.
+
+Three surfaces run a check, all only when update checks resolve on: the
+desktop app's automatic check (once at startup and every 6 hours while
+it runs), the graphical interface's Check for Updates button (and the
+tray menu's Check for Updates item), and `udm-cli update check`. Checks
+resolve on by default: an absent flag file means on. `udm-cli update
 checks on` writes the flag file on the install base, and `udm-cli update
 checks off` writes durable opt-out content to that same file rather than
 deleting it; the settings page's Enable update checks checkbox reads and
-writes the flag directly — it is not a field of the saved settings form.
-Turning checks off stops new checks from starting; a check already running
-finishes, and no new check opens an update socket while checks are off.
-A successful check only stages the verified update; applying it is a
-separate, explicit action: the graphical interface's Apply Update button and
-`udm-cli update apply` each swap the staged files into the install directory
-and start the new build. Applying is always manual — nothing is installed
-until you press Apply, and neither apply action fetches anything. If the
-running executable refuses to be renamed, the graphical interface hands the
-swap to a small per-user
-helper (`udm-updater-helper.exe`) that waits for UDM to exit, completes the
-swap and starts the new build; the helper never fetches anything, needs
-no administrator rights, and leaves local breadcrumbs in
-`updater-helper.log` on the install base. If that helper file is absent,
-UDM reports it and keeps running; the next start clears the pending
-swap. The command-line apply never starts the helper: it reports the
-refusal and leaves the pending swap for the next graphical start, which
-reconciles it.
-At startup the graphical interface reconciles a swap journal an interrupted
-apply left behind, and then runs its first automatic check when checks
-resolve on. `udm-cli update pin` prints the compiled publisher pin, the
-publisher public key and the recovery pin, so you can compare them with a
-release you downloaded by hand; it opens no update socket. The CLI itself
-never schedules a check; only the desktop app runs the automatic startup and
-6-hour checks, and applying an update is always your explicit Apply.
+writes the flag directly - it is not a field of the saved settings form.
+Turning checks off stops new checks from starting; a check already
+running finishes, and no new check opens an update socket while checks
+are off.
 
-Rotation and revocation records — the signed records that replace or retire a
-publisher key — are verified only when a caller passes their bytes to the
-engine. The fetch flow does not download those records, and no command in
-this version passes them.
+Applying an update is a separate, explicit action - the graphical
+interface's Apply Update button or `udm-cli update apply` - and nothing
+is installed until you invoke it. Apply downloads two files from the
+host the check found the version on (or the other host if that fails):
+`SHA256SUMS.txt` and the portable zip. Acceptance is a fixed gate,
+identical for both hosts: the zip's SHA-256 must match `SHA256SUMS.txt`;
+the zip is then extracted, and every executable in it (`udm.exe`,
+`udm-cli.exe`, `udm-host.exe`) must carry an Authenticode signature that
+verifies, whose signer certificate's public key hashes (SHA-256 over
+the SubjectPublicKeyInfo) to the pin compiled into the updater. The
+signing certificate is self-issued, so the pin - not a public root - is
+the trust anchor; a valid RFC 3161 timestamp is also required, and
+validity is judged at signing time, so a countersigned build stays
+acceptable after the signing certificate expires. A tampered zip served
+with recomputed sums still fails the signature gate. Anything that
+fails is discarded and nothing is installed.
 
-### If the engine's fetch is invoked
+The swap replaces the install tree file by file: each current file
+steps aside to a `.old` sibling, the new file takes its place, and any
+failure puts the replaced files back. The graphical interface then
+relaunches into the new build; after a command-line apply, restart UDM
+yourself. At the next start, UDM deletes the `.old` backups and any
+staging remnant. `udm-cli update pin` prints the compiled signing-key
+pin so you can compare it with the `update-pin.txt` the installer
+writes into the install directory and with the fingerprint published
+with the release; it opens no update socket. The CLI itself never
+schedules a check; only the desktop app runs the automatic startup and
+6-hour checks.
 
-The updater's fetch takes exactly two HTTPS manifest addresses from its
-caller. It has no built-in origin and no third slot. A caller that follows
-the project's release layout passes the GitHub (`iamcino/udm`) and GitLab
-(`cino-group/udm`) release manifests, GitHub first; if a fetch succeeds on
-the second origin, that origin is tried first for the rest of that session,
-in memory only. The callers in this version are the desktop app's automatic
-startup and 6-hour checks, the graphical Check for Updates button, and
-`udm-cli update check`, all only with checks resolved on, as described
-above. The payload addresses are the HTTPS URLs inside the
-signed manifest, not a compiled host list; the `sha256` query parameter on
-them is stripped before the payload request. HTTPS redirects are followed,
-so a release CDN can be contacted. A manifest, payload or redirect address
-that is not HTTPS is refused.
+### What an update request looks like
 
-A fetch sends one manifest request per origin tried, then the payload
-requests. Every manifest request carries a `nonce` query parameter: 16
-random bytes written as hex. It is a cache-buster, not an identity, and
-payload requests do not carry it. Payload requests send `Range: bytes=N-`
-only when a partial file already holds bytes; otherwise they start at
-byte 0. The User-Agent is the built-in `udm/<version>` string, not the
-configurable download User-Agent. The updater uses the system HTTP proxy and
-does not consult the download setting that turns that proxy off. Its TLS is
-rustls with the operating-system trust store, over HTTP/1.1 and HTTP/2 only —
-not the download engine's HTTP/3 path — and the publisher pin is not a TLS
-root. No account, machine fingerprint, usage data or telemetry is added.
-
-Before any payload is downloaded, the engine checks, in order: the manifest
-signature against the publisher keys the trust state currently allows (a
-revoked key is refused); the manifest epoch, strictly greater than the stored
-last-seen epoch; the manifest version, strictly greater than the installed
-version; the installed version, at or above the manifest's `min_version`; and
-the validity window (not expired, at most 14 days, `issued_at` at most one
-day ahead). On acceptance the new epoch is stored before any payload byte is
-requested, and a later payload failure does not undo that store. The whole
-archive is then checked against the SHA-256 named in the signed payload URLs,
-and every extracted file is checked against the manifest's path, hash and
-size, both ways. Staging and the rollback journal run only when a caller
-invokes them; startup reconciles a journal left behind by an interrupted
-apply but never fetches.
+A check sends one HTTPS GET per host to its latest-release address and
+reads the redirect target without following it. An apply sends HTTPS
+GETs for `SHA256SUMS.txt` and the portable zip; redirects are followed,
+so a release CDN can be contacted. A redirect or address that is not
+HTTPS is refused. Requests go through WinHTTP (the operating system's
+HTTP stack, with its proxy configuration), not the download engine's
+HTTP/3 path. The User-Agent is `UDM/<version>`. No nonce, account,
+machine fingerprint, usage data or telemetry is added to any update
+request.
 
 ### What the updater can write
 
-The engine writes updater files when a check or apply runs: the command line
-when you enable checks, run `udm-cli update check` or run `udm-cli update
-apply`, and the graphical interface during its automatic startup and 6-hour
-checks (with checks resolved on), when you press Check for Updates, or when
-you press Apply Update. With checks turned off, ordinary use creates none of
-these. The checks flag itself is the file `update-checks-enabled` on the
-install base. When a check runs: the last-seen epoch is a JSON file named
-`update-epoch` on the install base; the scratch download directory is
-`update-download` there; each check outcome appends one line to
-`update-check.log` there; the trust state is `updater-trust.json` on the
-install base (`%LOCALAPPDATA%\Programs\UDM`, or the portable executable's
-directory); and the rollback journal is a table in `udm.redb` on that same
-install base — not the application database under `%LOCALAPPDATA%\udm`.
-Staging files, `updater-recovery.log`, `updater-helper.log` (the trampoline
-helper's local breadcrumbs) and `.old` copies sit on that install base too,
-and a payload partial sits in the destination directory the caller
-supplied. None of this is sent anywhere. Removing the application data
-directory does not remove the install base; removing the install directory,
-or the portable folder, is what removes these files.
+The updater writes only on the install base (the install directory, or
+the portable executable's directory): the checks flag
+`update-checks-enabled` when you toggle checks; one line per check in
+`update-check.log`; the `update-staging` directory while an apply runs
+(removed when it finishes); and the `.old` backups of replaced files
+until the next start removes them. With checks turned off and no apply
+invoked, ordinary use creates none of these. None of this is sent
+anywhere. Removing the application data directory does not remove the
+install base; removing the install directory, or the portable folder,
+is what removes these files.
 
 ## What stays on your computer
 
