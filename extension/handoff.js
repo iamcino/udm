@@ -2,19 +2,21 @@
 /*
  * UDM Handoff - shared logic for the browser extension (G4).
  *
- * Implements the extension side of the frozen browser-handoff contract
- * (review-artifacts/zed-ipc-handoff-freeze-2026-11-08) over the wire
- * settled in the G5 design handoff: JSON objects {v: 1, op, tx, ...}
- * exchanged with the udm-host native messaging host, which bridges to
- * the coordinator in the UDM app.
+ * Implements the extension side of the browser-handoff contract over
+ * the wire settled in the G5 design handoff: JSON objects {v: 1, op,
+ * tx, ...} exchanged with the udm-host native messaging host, which
+ * bridges to the coordinator in the UDM app.
  *
  * This file is environment-free: it touches no browser APIs, so the unit
  * tests can load it under Node. background.js wires it to chrome.* APIs.
  *
  * Contract points honoured here:
- *  - the transaction id is an opaque string, stable per download;
- *  - commit is sent only after the browser-side cancel is confirmed
- *    (confirm.browser_cancelled stays truthful);
+ *  - the transaction id is an opaque string, stable per download, and a
+ *    pending record is never given a replacement id;
+ *  - before any browser effect, the pending record (tx + intent +
+ *    stage) is durable. The stage advances recorded → cancelled →
+ *    prepared → a terminal outcome, and that outcome is durable before
+ *    the pending record is cleared;
  *  - the browser download is cancelled FIRST (0.2.3): with "ask where
  *    to save" on, Chrome parks a new download behind its Save As
  *    prompt and no other browser effect lands until the user dismisses
@@ -23,20 +25,30 @@
  *    (field case 2026-11-17). Cancelling a prompt-parked download
  *    dismisses the prompt. The freeze's no-loss property is kept by
  *    the re-issue fallback below instead of by the old ordering;
- *  - if the coordinator is unavailable, refuses the prepare, or
- *    refuses a commit after preparing, the download is RE-ISSUED in
- *    the browser (fx.download) and the outcome is kept-by-browser:
- *    the download always ends up owned by UDM or by the browser,
- *    never silently dropped. The wiring layer (background.js) marks
- *    re-issued downloads so they are not handed off a second time;
+ *  - prepare carries browser_cancelled: true only after that cancel
+ *    and the following erase are confirmed for this transaction. The
+ *    GUI commits or discards; this side learns the result by polling
+ *    query (about once a second, slower while association is pending);
+ *  - a lost reply is an unknown outcome: query the same tx and act
+ *    only on that answer. A record at prepared or later is never
+ *    re-issued and its cancel/erase is never repeated;
+ *  - if prepare answers unavailable while the record is still
+ *    cancelled (the GUI is not running), the download is RE-ISSUED in
+ *    the browser — the pre-existing lossy fallback. The wiring layer
+ *    (background.js) marks re-issued downloads so they are not handed
+ *    off a second time;
  *  - if the cancel itself cannot be confirmed, the browser copy
  *    stands untouched and prepare is never sent;
- *  - an expired commit answers recovery_required: the handoff is NOT
- *    retried automatically and the download is NOT restarted - the
- *    coordinator keeps the intent recoverable and the popup says so.
+ *  - recovery-required means the commitment is durable but the task
+ *    association is still pending. Keep the record, poll about every
+ *    5 s, surface it on the existing handoff log, and never re-issue.
+ *    query of an expired record (or recovery-required whose state is
+ *    expired) is the expired outcome.
  */
 
 const WIRE_VERSION = 1;
+const POLL_MS = 1000;
+const RECOVERY_POLL_MS = 5000;
 
 /** Host names registered by `udm-host --register` (one per browser). */
 const HOST_NAMES = {
@@ -119,11 +131,14 @@ function buildIntent(item) {
  * replies are matched to requests in send order. `portFactory` returns a
  * fresh port ({postMessage, onMessage.addListener, onDisconnect.addListener,
  * disconnect}) or null when the host cannot be started.
+ * `hooks.onDisconnect` fires when the live port drops so the wiring
+ * layer can resume pending records on the next connection.
  */
-function createHandoffClient(portFactory) {
+function createHandoffClient(portFactory, hooks) {
   let port = null;
   let pending = null; // {resolve} of the one outstanding request
   const queue = [];
+  const onDisconnect = hooks && typeof hooks.onDisconnect === "function" ? hooks.onDisconnect : null;
 
   function ensurePort() {
     if (port) return port;
@@ -145,6 +160,7 @@ function createHandoffClient(portFactory) {
         pending = null;
         resolve({ status: "unavailable" });
       }
+      if (onDisconnect) onDisconnect();
       // Queued requests try a fresh port on their turn via pump().
       pump();
     });
@@ -182,8 +198,15 @@ function createHandoffClient(portFactory) {
   }
 
   return {
-    prepare(tx, intent) {
-      return request({ v: WIRE_VERSION, op: "prepare", tx, intent });
+    prepare(tx, intent, attestation) {
+      const message = { v: WIRE_VERSION, op: "prepare", tx, intent };
+      // Top-level boolean: the prepare-time attestation the coordinator
+      // stores as CancelledForHandoff. Omitted unless this transaction's
+      // cancel and erase have both been confirmed.
+      if (attestation && attestation.browser_cancelled === true) {
+        message.browser_cancelled = true;
+      }
+      return request(message);
     },
     commit(tx) {
       return request({
@@ -207,9 +230,48 @@ function createHandoffClient(portFactory) {
   };
 }
 
+function intentSnapshot(intent) {
+  return {
+    url: intent.url,
+    method: intent.method || "GET",
+    filename_hint: intent.filename_hint ?? null,
+    size_hint: intent.size_hint ?? null,
+    browser_download_id: String(intent.browser_download_id),
+    dest_dir: intent.dest_dir ?? null,
+  };
+}
+
+function pendingRecord(tx, intent, stage, extra) {
+  const rec = {
+    tx,
+    intent: intentSnapshot(intent),
+    stage,
+    task_ref: null,
+    reissued: false,
+  };
+  if (extra) {
+    if (extra.task_ref !== undefined) rec.task_ref = extra.task_ref;
+    if (extra.reissued) rec.reissued = true;
+    if (extra.reissueFailed) rec.reissueFailed = true;
+  }
+  return rec;
+}
+
+function browserDownloadId(intent) {
+  const raw = intent.browser_download_id;
+  if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+  if (typeof raw === "string" && /^[0-9]+$/.test(raw)) return Number(raw);
+  return raw;
+}
+
+function taskRefOf(reply) {
+  if (!reply || reply.task_ref == null || reply.task_ref === "") return null;
+  return String(reply.task_ref);
+}
+
 /**
- * The per-download handoff state machine, with every browser effect
- * injected through `fx` so tests can drive it:
+ * The per-download handoff state machine, with every browser and storage
+ * effect injected through `fx` so tests can drive it:
  *   fx.cancel(id) -> Promise<bool>
  *     (resolves true only when the browser confirms the download is
  *      cancelled; false when it completed or the cancel failed)
@@ -217,104 +279,336 @@ function createHandoffClient(portFactory) {
  *   fx.download(url) -> Promise<id>  (re-issue a download in the
  *     browser; rejects when the browser refuses)
  *   fx.record(entry) -> Promise<void>  (bounded handoff log for the popup)
- * Returns the terminal outcome string.
+ *   fx.persist(record) -> Promise<void>  (durable pending record)
+ *   fx.clearPending(tx) -> Promise<void>
+ *   fx.sleep(ms) -> Promise<void>  (optional; defaults to setTimeout)
+ *   fx.claimTx(tx) / fx.releaseTx(tx) / fx.notifyPending() optional
+ * `options.pollMs` (default 1000) and `options.recoveryPollMs` (default
+ * 5000) are the waiting-loop intervals.
+ * Returns the terminal outcome string, or "pending" when the port dropped
+ * and the same record must be resumed later.
  */
-function createHandoffFlow(client, fx) {
-  async function handoff(item) {
-    const tx = newTransactionId();
-    const intent = buildIntent(item);
-    let prepared = false;
-    let cancelled = false;
+function createHandoffFlow(client, fx, options) {
+  const opts = options || {};
+  const pollMs = opts.pollMs ?? POLL_MS;
+  const recoveryPollMs = opts.recoveryPollMs ?? RECOVERY_POLL_MS;
+  const sleep =
+    typeof fx.sleep === "function"
+      ? (ms) => fx.sleep(ms)
+      : (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-    // Give the download back to the browser as a fresh download after
-    // the original was cancelled. Resolves false when even that failed;
-    // the caller then records recovery-required with the URL, so the
-    // download is surfaced in the popup instead of silently dropped.
-    // Attempted at most once per handoff: the catch-all below must
-    // never re-issue a second copy.
-    let reissueAttempted = false;
-    async function reissue() {
-      if (reissueAttempted) return false;
-      reissueAttempted = true;
-      try {
-        await fx.download(intent.url);
-        return true;
-      } catch {
-        return false;
-      }
-    }
-    async function recordKept() {
-      if (await reissue()) {
-        await fx.record({ tx, name: intent.filename_hint || intent.url, status: "kept-by-browser", at: Date.now() });
-      } else {
-        await fx.record({ tx, name: intent.url, status: "recovery-required", at: Date.now() });
-      }
-    }
+  async function persist(rec) {
+    await fx.persist(rec);
+  }
+  async function clear(tx) {
+    await fx.clearPending(tx);
+  }
+  function notify() {
+    if (typeof fx.notifyPending === "function") fx.notifyPending();
+  }
 
+  async function settle(tx, intent, stage, taskRef) {
+    const popup = stage === "committed" ? "handed-off" : stage;
+    // The outcome hits storage before the pending record is removed, so a
+    // crash in between resumes the same tx instead of inventing one.
+    await persist(pendingRecord(tx, intent, stage, { task_ref: taskRef || null }));
+    await fx.record({
+      tx,
+      name: intent.filename_hint || intent.url,
+      status: popup,
+      task_ref: taskRef || null,
+      at: Date.now(),
+    });
+    await clear(tx);
+    return popup;
+  }
+
+  async function wait(tx, intent, stage) {
+    let current = stage;
+    for (;;) {
+      const reply = await client.query(tx);
+      if (!reply || reply.status === "unavailable") {
+        notify();
+        return "pending";
+      }
+      if (reply.status === "committed") return settle(tx, intent, "committed", taskRefOf(reply));
+      if (reply.status === "aborted" || reply.status === "discarded" || reply.status === "expired") {
+        return settle(tx, intent, reply.status, null);
+      }
+      if (reply.status === "recovery-required") {
+        // A late view of an expired record is expiry, not a pending association.
+        if (reply.state === "expired") return settle(tx, intent, "expired", null);
+        if (current !== "recovery-required") {
+          current = "recovery-required";
+          await persist(pendingRecord(tx, intent, "recovery-required"));
+          await fx.record({
+            tx,
+            name: intent.filename_hint || intent.url,
+            status: "recovery-required",
+            at: Date.now(),
+          });
+        }
+        await sleep(recoveryPollMs);
+        continue;
+      }
+      // prepared, not-found, conflict: not a licence to re-issue or to
+      // allocate another transaction. Keep asking this one.
+      await sleep(current === "recovery-required" ? recoveryPollMs : pollMs);
+    }
+  }
+
+  async function enterRecovery(tx, intent) {
+    await persist(pendingRecord(tx, intent, "recovery-required"));
+    await fx.record({
+      tx,
+      name: intent.filename_hint || intent.url,
+      status: "recovery-required",
+      at: Date.now(),
+    });
+    return wait(tx, intent, "recovery-required");
+  }
+
+  /** Act on a query (or a prepare replay) that names a real record.
+   *  Returns null when the reply is missing, unavailable, or not-found. */
+  async function reconcileQuery(tx, intent, reply) {
+    if (!reply || reply.status === "unavailable" || reply.status === "not-found") return null;
+    if (reply.status === "prepared") {
+      await persist(pendingRecord(tx, intent, "prepared"));
+      return wait(tx, intent, "prepared");
+    }
+    if (reply.status === "recovery-required") {
+      if (reply.state === "expired") return settle(tx, intent, "expired", null);
+      return enterRecovery(tx, intent);
+    }
+    if (reply.status === "committed") return settle(tx, intent, "committed", taskRefOf(reply));
+    if (reply.status === "aborted" || reply.status === "discarded" || reply.status === "expired") {
+      return settle(tx, intent, reply.status, null);
+    }
+    await persist(pendingRecord(tx, intent, "conflict"));
+    await fx.record({
+      tx,
+      name: intent.url,
+      status: "recovery-required",
+      at: Date.now(),
+    });
+    await clear(tx);
+    return "recovery-required";
+  }
+
+  // Give the download back to the browser as a fresh download after the
+  // original was cancelled and prepare could not reach a running GUI.
+  // Attempted at most once per record: the reissued flag is durable
+  // before fx.download, so a restart cannot issue a second copy.
+  async function finishReissue(tx, intent) {
+    let ok = false;
+    await persist(pendingRecord(tx, intent, "cancelled", { reissued: true }));
     try {
+      await fx.download(intent.url);
+      ok = true;
+    } catch {
+      ok = false;
+    }
+    if (ok) {
+      await persist(pendingRecord(tx, intent, "kept-by-browser", { reissued: true }));
+      await fx.record({
+        tx,
+        name: intent.filename_hint || intent.url,
+        status: "kept-by-browser",
+        at: Date.now(),
+      });
+    } else {
+      await persist(pendingRecord(tx, intent, "kept-by-browser", { reissued: true, reissueFailed: true }));
+      await fx.record({
+        tx,
+        name: intent.url,
+        status: "recovery-required",
+        at: Date.now(),
+      });
+    }
+    await clear(tx);
+    return "kept-by-browser";
+  }
+
+  async function handlePrepare(tx, intent, prep, allowRetry) {
+    if (prep && prep.status === "prepared") {
+      await persist(pendingRecord(tx, intent, "prepared"));
+      return wait(tx, intent, "prepared");
+    }
+    if (prep && prep.status === "committed") return settle(tx, intent, "committed", taskRefOf(prep));
+    if (prep && (prep.status === "aborted" || prep.status === "discarded" || prep.status === "expired")) {
+      return settle(tx, intent, prep.status, null);
+    }
+    if (prep && prep.status === "recovery-required") {
+      if (prep.state === "expired") return settle(tx, intent, "expired", null);
+      return enterRecovery(tx, intent);
+    }
+    if (!prep || prep.status === "unavailable") {
+      // The prepare reply was lost, or the host never came up. Query
+      // before deciding; re-issue only when that query also cannot show
+      // a live or terminal record.
+      const q = await client.query(tx);
+      const acted = await reconcileQuery(tx, intent, q);
+      if (acted !== null) return acted;
+      if (allowRetry && q && q.status === "not-found") {
+        const again = await client.prepare(tx, intent, { browser_cancelled: true });
+        return handlePrepare(tx, intent, again, false);
+      }
+      return finishReissue(tx, intent);
+    }
+    const q = await client.query(tx);
+    if (q && q.status && q.status !== "unavailable" && q.status !== "not-found" && q.status !== "conflict") {
+      const acted = await reconcileQuery(tx, intent, q);
+      if (acted !== null) return acted;
+    }
+    await persist(pendingRecord(tx, intent, "conflict"));
+    await fx.record({
+      tx,
+      name: intent.url,
+      status: "recovery-required",
+      at: Date.now(),
+    });
+    await clear(tx);
+    return "recovery-required";
+  }
+
+  async function reconcileSettled(tx, intent, stage, prior) {
+    if (stage === "committed" || stage === "aborted" || stage === "discarded" || stage === "expired") {
+      const q = await client.query(tx);
+      if (!q || q.status === "unavailable") {
+        notify();
+        return "pending";
+      }
+      const acted = await reconcileQuery(tx, intent, q);
+      if (acted !== null) return acted;
+    }
+    const failed = !!prior.reissueFailed || stage === "conflict";
+    const popup =
+      stage === "committed"
+        ? "handed-off"
+        : failed
+          ? "recovery-required"
+          : stage === "kept-by-browser"
+            ? "kept-by-browser"
+            : stage;
+    await fx.record({
+      tx,
+      name: failed ? intent.url : intent.filename_hint || intent.url,
+      status: popup,
+      task_ref: prior.task_ref || null,
+      at: Date.now(),
+    });
+    await clear(tx);
+    return stage === "kept-by-browser" ? "kept-by-browser" : popup;
+  }
+
+  async function drive(tx, intent, stage, browserId, flags) {
+    const prior = (flags && flags.pending) || {};
+    const fresh = !!(flags && flags.fresh);
+    const resumed = !!(flags && flags.resumed);
+
+    if (fresh) {
+      await persist(pendingRecord(tx, intent, "recorded"));
+      stage = "recorded";
+    } else if (
+      stage !== "recorded" &&
+      stage !== "cancelled" &&
+      stage !== "prepared" &&
+      stage !== "recovery-required"
+    ) {
+      return reconcileSettled(tx, intent, stage, prior);
+    }
+
+    if (stage === "recorded") {
+      if (!fresh) {
+        const early = await reconcileQuery(tx, intent, await client.query(tx));
+        if (early !== null) return early;
+      }
       // Cancel FIRST (0.2.3): a prompt-parked download accepts no other
       // effect until the Save As prompt is dismissed, and cancelling
       // dismisses it. An unconfirmed cancel means the browser copy
       // stands (it completed, or the browser refused): prepare is
       // never sent and nothing is lost.
-      cancelled = await fx.cancel(item.id).catch(() => false);
+      const cancelled = await fx.cancel(browserId).catch(() => false);
       if (!cancelled) {
-        await fx.record({ tx, name: intent.filename_hint || intent.url, status: "kept-by-browser", at: Date.now() });
-        return "kept-by-browser";
-      }
-      await fx.erase(item.id).catch(() => {});
-
-      const prep = await client.prepare(tx, intent);
-      if (!prep || prep.status !== "prepared") {
-        // Coordinator unavailable or conflicted: the browser gets the
-        // download back as a fresh download.
-        await recordKept();
-        return "kept-by-browser";
-      }
-      prepared = true;
-
-      const commit = await client.commit(tx);
-      if (commit && commit.status === "committed") {
+        await persist(pendingRecord(tx, intent, "kept-by-browser"));
         await fx.record({
           tx,
           name: intent.filename_hint || intent.url,
-          status: "handed-off",
-          task_ref: commit.task_ref || null,
+          status: "kept-by-browser",
           at: Date.now(),
         });
-        return "handed-off";
+        await clear(tx);
+        return "kept-by-browser";
       }
-      if (commit && commit.status === "recovery-required") {
-        // The lease expired between prepare and commit. The browser copy
-        // is already cancelled; the coordinator keeps the intent
-        // recoverable. Surface it - never silently re-download.
-        await fx.record({ tx, name: intent.filename_hint || intent.url, status: "recovery-required", at: Date.now() });
-        return "recovery-required";
+      await fx.erase(browserId).catch(() => {});
+      await persist(pendingRecord(tx, intent, "cancelled"));
+      stage = "cancelled";
+    }
+
+    if (stage === "cancelled") {
+      if (prior.reissued) {
+        await fx.record({
+          tx,
+          name: prior.reissueFailed ? intent.url : intent.filename_hint || intent.url,
+          status: prior.reissueFailed ? "recovery-required" : "kept-by-browser",
+          at: Date.now(),
+        });
+        await clear(tx);
+        return "kept-by-browser";
       }
-      // The commit was refused or its answer is unknown after a
-      // successful prepare: release the intent and give the download
-      // back to the browser.
-      await client.abort(tx).catch(() => null);
-      prepared = false;
-      await recordKept();
-      return "kept-by-browser";
+      if (resumed) {
+        const early = await reconcileQuery(tx, intent, await client.query(tx));
+        if (early !== null) return early;
+      }
+      const prep = await client.prepare(tx, intent, { browser_cancelled: true });
+      return handlePrepare(tx, intent, prep, true);
+    }
+
+    if (stage === "prepared" || stage === "recovery-required") {
+      return wait(tx, intent, stage);
+    }
+    return "pending";
+  }
+
+  async function guarded(tx, run) {
+    if (typeof fx.claimTx === "function" && fx.claimTx(tx) === false) return "pending";
+    try {
+      return await run();
     } catch {
-      if (prepared) {
-        // Best-effort release of the prepared intent.
-        await client.abort(tx).catch(() => null);
-      }
-      if (cancelled && !reissueAttempted) {
-        await recordKept().catch(() => {});
-      }
-      return "kept-by-browser";
+      notify();
+      return "pending";
+    } finally {
+      if (typeof fx.releaseTx === "function") fx.releaseTx(tx);
     }
   }
-  return { handoff };
+
+  async function handoff(item) {
+    const tx = newTransactionId();
+    const intent = buildIntent(item);
+    return guarded(tx, () => drive(tx, intent, "recorded", item.id, { fresh: true }));
+  }
+
+  async function resume(pending) {
+    if (!pending || typeof pending.tx !== "string" || !pending.intent) return "pending";
+    // The stored id is the transaction. Never allocate another one, and
+    // never cancel/erase again once the stage is cancelled or later —
+    // drive() only cancels from "recorded".
+    return guarded(pending.tx, () =>
+      drive(pending.tx, pending.intent, pending.stage || "recorded", browserDownloadId(pending.intent), {
+        resumed: true,
+        pending,
+      }),
+    );
+  }
+
+  return { handoff, resume };
 }
 
 const handoffApi = {
   WIRE_VERSION,
   HOST_NAMES,
+  POLL_MS,
+  RECOVERY_POLL_MS,
   newTransactionId,
   isEligible,
   buildIntent,

@@ -172,6 +172,11 @@ pub struct Settings {
     /// pipe additionally requires the disclosed registration (a callers
     /// list), which remains the user opt-in gate.
     pub handoff_lease_secs: Option<u64>,
+    /// Directories the handoff dialog has confirmed, newest first.
+    /// Empty for pre-0.3.0 configs. Core does not consume the list;
+    /// the dialog writes it through settings.
+    #[serde(default)]
+    pub recent_download_dirs: Vec<String>,
     /// Chrome extension ID for browser integration item 1, copied
     /// from the extension options page (chrome.runtime.id) into the
     /// Settings row. Empty means the Chrome toggle cannot turn on.
@@ -227,6 +232,7 @@ impl Default for Settings {
             accent: "blue".to_string(),
             log_level: "info".to_string(),
             handoff_lease_secs: Some(60),
+            recent_download_dirs: Vec::new(),
             chrome_extension_id: String::new(),
             browser_hint_dismissed: false,
             close_to_tray: true,
@@ -598,6 +604,19 @@ mod tests {
         // And an explicit value round-trips.
         let set: Settings = serde_json::from_str(r#"{"handoff_lease_secs": 120}"#).unwrap();
         assert_eq!(set.handoff_lease_secs, Some(120));
+    }
+
+    #[test]
+    fn recent_download_dirs_default_empty_and_round_trip() {
+        assert!(Settings::default().recent_download_dirs.is_empty());
+        let fresh: Settings = serde_json::from_str("{}").unwrap();
+        assert!(fresh.recent_download_dirs.is_empty());
+        let set: Settings =
+            serde_json::from_str(r#"{"recent_download_dirs":["C:/a","D:/b"]}"#).unwrap();
+        assert_eq!(
+            set.recent_download_dirs,
+            vec!["C:/a".to_string(), "D:/b".to_string()]
+        );
     }
 
     #[test]

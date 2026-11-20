@@ -5,7 +5,8 @@
 //! dialogs (folder pickers) modally, which is what users expect on Windows.
 
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -13,18 +14,84 @@ use std::time::{Duration, Instant};
 
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel, Weak};
 
+use usagi::category::{classify, CategoryRule};
 use usagi::config::{ConflictPolicy, Settings, TransportPref};
 use usagi::engine::{AddRequest, Engine, Event, TaskSnapshot};
-use usagi::handoff::{Coordinator, RecoveryEntry};
+use usagi::handoff::{Coordinator, DiscoveryEntry, RecoveryEntry};
 use usagi::hash::ExpectedHash;
 use usagi::store::records::TaskState;
 use usagi::updater::{CheckKind, InstallLayout};
 use usagi::util;
 
-use crate::{AppWindow, EndpointRow, StatusInfo, TaskDetail, TaskRow};
+use crate::{AppWindow, CategoryNav, EndpointRow, StatusInfo, TaskDetail, TaskRow};
 
 const REFRESH_MS: u64 = 150;
 const SLOW_REFRESH_MS: u64 = 2000;
+/// Expired-handoff discovery is read on this cadence, not on every 150 ms tick.
+const NOTICE_POLL: Duration = Duration::from_secs(1);
+
+/// Sidebar status axis. Finished is the existing completed value.
+const LIBRARY_ALL: i32 = 0;
+const LIBRARY_ACTIVE: i32 = 1;
+const LIBRARY_FINISHED: i32 = 2;
+const LIBRARY_FAILED: i32 = 3;
+/// `state != Completed`, including Failed. Not the Active predicate.
+const LIBRARY_UNFINISHED: i32 = 4;
+
+/// Virtual bucket for an empty filename or a `classify` result of `None`.
+const OTHER_CATEGORY: &str = "other";
+
+const EXPIRED_HANDOFF_TEXT: &str =
+    "A browser handoff expired before it was confirmed. The file was not downloaded.";
+
+/// Row-key separator. Transaction ids cannot contain control characters.
+const NOTICE_SEP: char = '\u{1e}';
+
+/// One snapshot reduced to the fields the list filter reads.
+struct ViewTask<'a> {
+    filename: &'a str,
+    url: &'a str,
+    state: TaskState,
+}
+
+/// Global badge totals from one snapshot walk. Search does not narrow them.
+struct CategoryCounts {
+    by_id: BTreeMap<String, i32>,
+    total: i32,
+    finished: i32,
+    unfinished: i32,
+}
+
+/// Classify cache: filename plus a fingerprint of the effective rules.
+struct CategoryCache {
+    fingerprint: u64,
+    by_filename: HashMap<String, String>,
+    /// Classifications performed on a cache miss. Tests assert the one-pass bound.
+    #[allow(dead_code)]
+    misses: u64,
+}
+
+impl CategoryCache {
+    fn new() -> Self {
+        CategoryCache {
+            // Not a real fingerprint, so the first ruleset always installs itself.
+            fingerprint: u64::MAX,
+            by_filename: HashMap::new(),
+            misses: 0,
+        }
+    }
+}
+
+/// One expired handoff the All view may show. Not an engine task.
+#[derive(Clone)]
+struct ExpiredNotice {
+    caller: String,
+    tx: String,
+    url: String,
+    filename: String,
+    size_hint: Option<u64>,
+    at_ms: i64,
+}
 
 /// Everything the event loop needs.
 pub struct Gui {
@@ -73,12 +140,12 @@ pub struct Gui {
     /// popup can never straddle two monitors.
     pub popup_area: RefCell<Option<(i32, i32, i32, i32)>>,
     /// G5-closing: the live handoff coordinator, when one is serving.
-    /// Read-only here: the task list renders its recovery entries as
-    /// rows (owner decision 2026-11-09); the GUI never mutates handoff
-    /// records. Behind interior mutability (browser integration item
-    /// 1) so a later register can publish a freshly started
-    /// coordinator into the same Gui.
+    /// Recovery rows stay read-only. The handoff dialog commits and
+    /// discards through this same instance, and it does not hold the
+    /// coordinator lock while the user or a probe is waiting.
     pub handoff: RefCell<Option<Arc<Coordinator>>>,
+    /// Dialog queue and the independent confirmation window.
+    pub handoff_ui: RefCell<crate::handoff_dialog::DialogSession>,
     /// Browser integration (items 1-3): the data root the browser
     /// rows read (registry keys, journal, manifests); the browsers
     /// the startup repair could not repoint (their rows show the
@@ -109,6 +176,15 @@ pub struct Gui {
     pub update_offered: Arc<std::sync::Mutex<Option<String>>>,
     /// Single-flight guard for the download+install worker.
     pub update_apply_running: Arc<AtomicBool>,
+    /// CATEGORIES sidebar rows: All, each effective rule, Finished, Unfinished.
+    pub category_nav: Rc<VecModel<CategoryNav>>,
+    /// Filename → category id. Cleared when the effective rules change.
+    category_cache: RefCell<CategoryCache>,
+    /// Session dismissals of expired-handoff notices, keyed by (caller, tx).
+    /// In memory only: a restart shows the notice again.
+    notice_dismissed: RefCell<BTreeSet<(String, String)>>,
+    notice_cache: RefCell<Vec<ExpiredNotice>>,
+    notice_polled_at: RefCell<Instant>,
 }
 
 /// The automatic-check window. There is one clock instant (`clock_base`,
@@ -201,8 +277,10 @@ pub fn setup(
     });
     let tasks = Rc::new(VecModel::<TaskRow>::default());
     let endpoints = Rc::new(VecModel::<EndpointRow>::default());
+    let category_nav = Rc::new(VecModel::<CategoryNav>::default());
     ui.set_tasks(ModelRc::from(tasks.clone()));
     ui.set_endpoints(ModelRc::from(endpoints.clone()));
+    ui.set_category_nav(ModelRc::from(category_nav.clone()));
     ui.set_version_text(SharedString::from(env!("CARGO_PKG_VERSION")));
     ui.set_http3_available(engine.net().http3_available());
 
@@ -227,6 +305,7 @@ pub fn setup(
         popup_open: RefCell::new(false),
         popup_area: RefCell::new(None),
         handoff: RefCell::new(handoff),
+        handoff_ui: RefCell::new(crate::handoff_dialog::DialogSession::default()),
         paths: engine.paths().clone(),
         browser_broken: RefCell::new(Vec::new()),
         browser_refresh_at: RefCell::new(Instant::now()),
@@ -237,6 +316,15 @@ pub fn setup(
         was_check_running: RefCell::new(false),
         update_offered: Arc::new(std::sync::Mutex::new(None)),
         update_apply_running: Arc::new(AtomicBool::new(false)),
+        category_nav: category_nav.clone(),
+        category_cache: RefCell::new(CategoryCache::new()),
+        notice_dismissed: RefCell::new(BTreeSet::new()),
+        notice_cache: RefCell::new(Vec::new()),
+        notice_polled_at: RefCell::new(
+            Instant::now()
+                .checked_sub(NOTICE_POLL)
+                .unwrap_or_else(Instant::now),
+        ),
     });
 
     // Wiring W1: a rollback at startup reconciliation surfaces its
@@ -567,6 +655,14 @@ pub fn setup(
     ui.on_update_check_clicked(move || start_update_check(&g));
     let g = gui.clone();
     ui.on_update_apply_clicked(move || apply_update(&g));
+
+    let g = gui.clone();
+    ui.on_dismiss_notice(move |key| {
+        if let Some((caller, tx)) = parse_notice_row_key(key.as_str()) {
+            dismiss_expired_notice(&g, caller, tx);
+        }
+        refresh(&g);
+    });
 
     let g = gui.clone();
     ui.on_clear_finished(move || {
@@ -1077,6 +1173,313 @@ fn toast(g: &Rc<Gui>, message: String, is_error: bool) {
     *g.toast_until.borrow_mut() = Instant::now() + Duration::from_secs(6);
 }
 
+fn rules_fingerprint(rules: &[CategoryRule]) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    rules.len().hash(&mut hasher);
+    for rule in rules {
+        rule.id.hash(&mut hasher);
+        rule.folder.hash(&mut hasher);
+        rule.suffixes.len().hash(&mut hasher);
+        for suffix in &rule.suffixes {
+            suffix.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+/// Empty names and a `None` classification both land in the virtual `other`
+/// bucket, including when the effective set has no `other` rule.
+fn category_bucket(filename: &str, rules: &[CategoryRule]) -> String {
+    if filename.is_empty() {
+        return OTHER_CATEGORY.to_string();
+    }
+    classify(filename, rules)
+        .map(|rule| rule.id.clone())
+        .unwrap_or_else(|| OTHER_CATEGORY.to_string())
+}
+
+fn classify_cached(cache: &mut CategoryCache, filename: &str, rules: &[CategoryRule]) -> String {
+    let fingerprint = rules_fingerprint(rules);
+    if cache.fingerprint != fingerprint {
+        cache.by_filename.clear();
+        cache.fingerprint = fingerprint;
+    }
+    if let Some(id) = cache.by_filename.get(filename) {
+        return id.clone();
+    }
+    let id = category_bucket(filename, rules);
+    cache.misses = cache.misses.saturating_add(1);
+    cache.by_filename.insert(filename.to_string(), id.clone());
+    id
+}
+
+fn status_matches(library: i32, state: TaskState) -> bool {
+    match library {
+        LIBRARY_ACTIVE => matches!(
+            state,
+            TaskState::Queued
+                | TaskState::Probing
+                | TaskState::Downloading
+                | TaskState::Verifying
+                | TaskState::Paused
+        ),
+        LIBRARY_FINISHED => state == TaskState::Completed,
+        LIBRARY_FAILED => state == TaskState::Failed,
+        LIBRARY_UNFINISHED => state != TaskState::Completed,
+        _ => true,
+    }
+}
+
+fn category_matches(selected: &str, task_category: &str) -> bool {
+    selected.is_empty() || selected == task_category
+}
+
+fn search_matches(filter_lower: &str, filename: &str, url: &str) -> bool {
+    filter_lower.is_empty()
+        || filename.to_lowercase().contains(filter_lower)
+        || url.to_lowercase().contains(filter_lower)
+}
+
+/// One walk: classify each filename at most once and tally every badge.
+/// `visible` is status AND category AND search. Counts ignore all three.
+struct ListPass {
+    visible: Vec<usize>,
+    counts: CategoryCounts,
+}
+
+fn pass_task_list(
+    tasks: &[ViewTask<'_>],
+    rules: &[CategoryRule],
+    cache: &mut CategoryCache,
+    library: i32,
+    category: &str,
+    filter_lower: &str,
+) -> ListPass {
+    let mut by_id: BTreeMap<String, i32> = BTreeMap::new();
+    for rule in rules {
+        by_id.insert(rule.id.clone(), 0);
+    }
+    by_id.entry(OTHER_CATEGORY.to_string()).or_insert(0);
+    let mut finished = 0i32;
+    let mut unfinished = 0i32;
+    let mut visible = Vec::new();
+    for (index, task) in tasks.iter().enumerate() {
+        let id = classify_cached(cache, task.filename, rules);
+        *by_id.entry(id.clone()).or_default() += 1;
+        if task.state == TaskState::Completed {
+            finished += 1;
+        } else {
+            unfinished += 1;
+        }
+        if status_matches(library, task.state)
+            && category_matches(category, &id)
+            && search_matches(filter_lower, task.filename, task.url)
+        {
+            visible.push(index);
+        }
+    }
+    ListPass {
+        visible,
+        counts: CategoryCounts {
+            by_id,
+            total: i32::try_from(tasks.len()).unwrap_or(i32::MAX),
+            finished,
+            unfinished,
+        },
+    }
+}
+
+/// English source for a built-in category id. A custom id is not a
+/// translation key: callers show the raw id instead.
+fn builtin_category_label(id: &str) -> Option<&'static str> {
+    match id {
+        "documents" => Some("Documents"),
+        "music" => Some("Music"),
+        "videos" => Some("Videos"),
+        "images" => Some("Images"),
+        "archives" => Some("Archives"),
+        "programs" => Some("Programs"),
+        "disk-images" => Some("Disk images"),
+        "other" => Some("Other"),
+        _ => None,
+    }
+}
+
+pub(crate) fn category_item_label(id: &str, vietnamese: bool) -> String {
+    match builtin_category_label(id) {
+        Some(key) => {
+            if vietnamese {
+                crate::i18n::vi(key).to_string()
+            } else {
+                key.to_string()
+            }
+        }
+        None => id.to_string(),
+    }
+}
+
+fn badge_text(count: i32) -> String {
+    if count > 0 {
+        count.to_string()
+    } else {
+        String::new()
+    }
+}
+
+fn category_glyph(id: &str) -> &'static str {
+    match id {
+        "documents" => "D",
+        "music" => "M",
+        "videos" => "V",
+        "images" => "I",
+        "archives" => "Z",
+        "programs" => "P",
+        "disk-images" => "O",
+        _ => "\u{2022}",
+    }
+}
+
+/// All categories, one row per effective rule, then Finished and Unfinished.
+/// Built-in ids go through the translator. A custom id is shown as itself.
+fn publish_category_nav(g: &Gui, ui: &AppWindow, rules: &[CategoryRule], counts: &CategoryCounts) {
+    let vietnamese = ui.get_language_index() == 1;
+    let mut rows = Vec::with_capacity(rules.len() + 3);
+    rows.push(CategoryNav {
+        id: SharedString::from(""),
+        label: ui.invoke_translate("All categories".into()),
+        badge: SharedString::from(badge_text(counts.total)),
+        glyph: SharedString::from("*"),
+        kind: 0,
+    });
+    for rule in rules {
+        let count = counts.by_id.get(&rule.id).copied().unwrap_or(0);
+        rows.push(CategoryNav {
+            id: SharedString::from(rule.id.as_str()),
+            label: SharedString::from(category_item_label(&rule.id, vietnamese)),
+            badge: SharedString::from(badge_text(count)),
+            glyph: SharedString::from(category_glyph(&rule.id)),
+            kind: 0,
+        });
+    }
+    rows.push(CategoryNav {
+        id: SharedString::from(""),
+        label: ui.invoke_translate("Finished".into()),
+        badge: SharedString::from(badge_text(counts.finished)),
+        glyph: SharedString::from("\u{2713}"),
+        kind: 1,
+    });
+    rows.push(CategoryNav {
+        id: SharedString::from(""),
+        label: ui.invoke_translate("Unfinished".into()),
+        badge: SharedString::from(badge_text(counts.unfinished)),
+        glyph: SharedString::from("\u{2026}"),
+        kind: 2,
+    });
+    if g.category_nav.row_count() == rows.len() {
+        for (index, row) in rows.into_iter().enumerate() {
+            g.category_nav.set_row_data(index, row);
+        }
+    } else {
+        g.category_nav.set_vec(rows);
+    }
+}
+
+/// Notices belong to All on both axes. A category or a status filter hides them.
+fn notices_in_view(library: i32, category: &str) -> bool {
+    library == LIBRARY_ALL && category.is_empty()
+}
+
+fn notice_row_key(caller: &str, tx: &str) -> String {
+    format!("notice{NOTICE_SEP}{caller}{NOTICE_SEP}{tx}")
+}
+
+fn parse_notice_row_key(key: &str) -> Option<(&str, &str)> {
+    let rest = key.strip_prefix("notice\u{1e}")?;
+    let (caller, tx) = rest.split_once('\u{1e}')?;
+    if caller.is_empty() || tx.is_empty() {
+        None
+    } else {
+        Some((caller, tx))
+    }
+}
+
+fn notice_from_discovery(entry: &DiscoveryEntry) -> ExpiredNotice {
+    let url = entry
+        .intent
+        .as_ref()
+        .map(|intent| intent.url.clone())
+        .unwrap_or_default();
+    let filename = entry
+        .intent
+        .as_ref()
+        .and_then(|intent| intent.filename_hint.clone())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_default();
+    let size_hint = entry.intent.as_ref().and_then(|intent| intent.size_hint);
+    ExpiredNotice {
+        caller: entry.caller.clone(),
+        tx: entry.tx.clone(),
+        url,
+        filename,
+        size_hint,
+        at_ms: entry.created_at_ms,
+    }
+}
+
+fn collect_expired_notices(
+    entries: &[DiscoveryEntry],
+    dismissed: &BTreeSet<(String, String)>,
+) -> Vec<ExpiredNotice> {
+    entries
+        .iter()
+        .filter(|entry| entry.expired)
+        .filter(|entry| !dismissed.contains(&(entry.caller.clone(), entry.tx.clone())))
+        .map(notice_from_discovery)
+        .collect()
+}
+
+/// Read discovery about once a second. The rendered rows come from the
+/// cached result, so a 150 ms tick does not call the coordinator again.
+fn poll_expired_notices(g: &Gui) {
+    if g.notice_polled_at.borrow().elapsed() < NOTICE_POLL {
+        return;
+    }
+    *g.notice_polled_at.borrow_mut() = Instant::now();
+    let coordinator = g.handoff.borrow().clone();
+    let Some(coordinator) = coordinator else {
+        g.notice_cache.borrow_mut().clear();
+        return;
+    };
+    let callers = usagi::handoff::read_callers(&g.paths);
+    let dismissed = g.notice_dismissed.borrow().clone();
+    let mut found = Vec::new();
+    let mut all = Vec::new();
+    let mut failed = BTreeSet::new();
+    for caller in &callers {
+        match coordinator.discovery(caller) {
+            Ok(entries) => {
+                found.extend(collect_expired_notices(&entries, &dismissed));
+                all.extend(entries);
+            }
+            Err(error) => {
+                failed.insert(caller.clone());
+                tracing::debug!(%caller, %error, "handoff discovery skipped");
+            }
+        }
+    }
+    *g.notice_cache.borrow_mut() = found;
+    crate::handoff_dialog::note_discovery(g, &all, &failed);
+}
+
+fn dismiss_expired_notice(g: &Gui, caller: &str, tx: &str) {
+    g.notice_dismissed
+        .borrow_mut()
+        .insert((caller.to_string(), tx.to_string()));
+    g.notice_cache
+        .borrow_mut()
+        .retain(|notice| notice.caller != caller || notice.tx != tx);
+}
+
 fn refresh(g: &Rc<Gui>) {
     let Some(ui) = g.ui.upgrade() else { return };
     // Slint 1.6 does not clamp ScrollView state when its viewport grows.
@@ -1097,30 +1500,33 @@ fn refresh(g: &Rc<Gui>) {
         }
     }
 
-    // --- rows (sidebar "library" group + toolbar substring filter)
+    // --- rows: status axis AND category axis AND toolbar search.
+    // One walk classifies each filename at most once and tallies every
+    // category badge. Counts are global; the search text does not narrow them.
     let library = ui.get_library();
+    let category = ui.get_category().to_string();
     let filter = ui.get_filter().to_lowercase();
+    let rules = g.engine.settings().category_rules();
     let snapshots = g.engine.snapshot();
-    let visible: Vec<&TaskSnapshot> = snapshots
+    let views: Vec<ViewTask<'_>> = snapshots
         .iter()
-        .filter(|s| match library {
-            1 => matches!(
-                s.state,
-                TaskState::Queued
-                    | TaskState::Probing
-                    | TaskState::Downloading
-                    | TaskState::Verifying
-                    | TaskState::Paused
-            ),
-            2 => s.state == TaskState::Completed,
-            3 => s.state == TaskState::Failed,
-            _ => true,
+        .map(|s| ViewTask {
+            filename: &s.filename,
+            url: &s.url,
+            state: s.state,
         })
-        .filter(|s| {
-            filter.is_empty()
-                || s.filename.to_lowercase().contains(&filter)
-                || s.url.to_lowercase().contains(&filter)
-        })
+        .collect();
+    let listed = {
+        let mut cache = g.category_cache.borrow_mut();
+        pass_task_list(&views, &rules, &mut cache, library, &category, &filter)
+    };
+    // Badge totals from this same walk. Search does not narrow them.
+    let counts = listed.counts;
+    publish_category_nav(g, &ui, &rules, &counts);
+    let visible: Vec<&TaskSnapshot> = listed
+        .visible
+        .iter()
+        .map(|&index| &snapshots[index])
         .collect();
     // Prune selection to currently visible rows, so bulk actions never
     // silently affect a hidden row, and removed tasks drop out.
@@ -1151,6 +1557,26 @@ fn refresh(g: &Rc<Gui>) {
                 {
                     rows.push(row);
                 }
+            }
+        }
+    }
+    // Expired handoffs from this GUI session (or still Prepared at startup
+    // and now expired). Same family as recovery rows: not engine tasks, no
+    // actions, never counted. They stay in All on both axes; a category or
+    // a status selection hides them. Dismissals are in-memory for the session.
+    poll_expired_notices(g);
+    crate::handoff_dialog::tick(g);
+    if notices_in_view(library, &category) {
+        let vietnamese = ui.get_language_index() == 1;
+        let cached = g.notice_cache.borrow().clone();
+        for notice in cached {
+            let row = notice_row(&notice, vietnamese);
+            if filter.is_empty()
+                || row.name.to_lowercase().contains(&filter)
+                || row.url.to_lowercase().contains(&filter)
+                || row.error_text.to_lowercase().contains(&filter)
+            {
+                rows.push(row);
             }
         }
     }
@@ -1620,6 +2046,7 @@ fn row_from(s: &TaskSnapshot, vietnamese: bool, selected: bool) -> TaskRow {
         can_open_file: s.state == TaskState::Completed,
         can_open_folder: matches!(s.state, TaskState::Completed | TaskState::Paused),
         can_remove: true,
+        can_dismiss: false,
         hash_text: SharedString::from(hash),
         glyph: SharedString::from(glyph_for(&name)),
     }
@@ -1674,8 +2101,62 @@ fn recovery_row(e: &RecoveryEntry, _vietnamese: bool) -> TaskRow {
         can_open_file: false,
         can_open_folder: false,
         can_remove: false,
+        can_dismiss: false,
         hash_text: SharedString::from(""),
         glyph: SharedString::from(glyph_for(&name)),
+    }
+}
+
+/// Read-only expired-handoff notice. The sentence is the English i18n key
+/// in `state_label` (the row translates it) and already translated in the
+/// meta line. No task actions: every `can_*` flag stays false.
+fn notice_row(notice: &ExpiredNotice, vietnamese: bool) -> TaskRow {
+    let message = if vietnamese {
+        crate::i18n::vi(EXPIRED_HANDOFF_TEXT).to_string()
+    } else {
+        EXPIRED_HANDOFF_TEXT.to_string()
+    };
+    let name = if notice.filename.is_empty() {
+        message.clone()
+    } else {
+        notice.filename.clone()
+    };
+    TaskRow {
+        id: -1.0,
+        key: SharedString::from(notice_row_key(&notice.caller, &notice.tx)),
+        selected: false,
+        name: SharedString::from(name.clone()),
+        url: SharedString::from(notice.url.clone()),
+        state: SharedString::from("expired-handoff"),
+        state_label: SharedString::from(EXPIRED_HANDOFF_TEXT),
+        received_text: SharedString::from(""),
+        total_text: SharedString::from(match notice.size_hint {
+            Some(size) => util::human_bytes(size as f64),
+            None => String::new(),
+        }),
+        percent: -1.0,
+        speed_text: SharedString::from(""),
+        eta_text: SharedString::from(""),
+        transport: SharedString::from("?"),
+        transport_label: SharedString::from(""),
+        segments_text: SharedString::from(""),
+        error_text: SharedString::from(message),
+        path_text: SharedString::from(""),
+        created_text: SharedString::from(util::format_timestamp(notice.at_ms)),
+        can_pause: false,
+        can_resume: false,
+        can_cancel: false,
+        can_retry: false,
+        can_open_file: false,
+        can_open_folder: false,
+        can_remove: false,
+        can_dismiss: true,
+        hash_text: SharedString::from(""),
+        glyph: SharedString::from(if notice.filename.is_empty() {
+            "FILE"
+        } else {
+            glyph_for(&name)
+        }),
     }
 }
 
@@ -2703,6 +3184,43 @@ mod s2_render_tests {
             verify_bps: 0.0,
         };
         ui.show().unwrap();
+        ui.set_category_nav(ModelRc::new(VecModel::from(vec![
+            CategoryNav {
+                id: "".into(),
+                label: "All categories".into(),
+                badge: "6".into(),
+                glyph: "*".into(),
+                kind: 0,
+            },
+            CategoryNav {
+                id: "documents".into(),
+                label: "Documents".into(),
+                badge: "2".into(),
+                glyph: "D".into(),
+                kind: 0,
+            },
+            CategoryNav {
+                id: "music".into(),
+                label: "Music".into(),
+                badge: "1".into(),
+                glyph: "M".into(),
+                kind: 0,
+            },
+            CategoryNav {
+                id: "".into(),
+                label: "Finished".into(),
+                badge: "1".into(),
+                glyph: "\u{2713}".into(),
+                kind: 1,
+            },
+            CategoryNav {
+                id: "".into(),
+                label: "Unfinished".into(),
+                badge: "5".into(),
+                glyph: "\u{2026}".into(),
+                kind: 2,
+            },
+        ])));
         let mut palette_samples = [None, None];
         for vietnamese in [false, true] {
             for theme in [0, 1] {
@@ -2890,5 +3408,317 @@ mod update_schedule_tests {
             s.due(t1 + SIX_H, false, true),
             "due a full window after enable"
         );
+    }
+}
+
+/// Sidebar category axis, Finished / Unfinished, one-pass counts, and
+/// expired-handoff notice placement. Pure: no window and no engine.
+#[cfg(test)]
+mod category_view_tests {
+    use std::collections::BTreeSet;
+
+    use usagi::category::default_categories;
+    use usagi::handoff::DiscoveryEntry;
+    use usagi::store::records::TaskState;
+
+    use super::{
+        badge_text, category_bucket, category_item_label, collect_expired_notices, notice_row,
+        notice_row_key, notices_in_view, parse_key, parse_notice_row_key, pass_task_list,
+        status_matches, CategoryCache, CategoryRule, ExpiredNotice, ViewTask, EXPIRED_HANDOFF_TEXT,
+        LIBRARY_ACTIVE, LIBRARY_ALL, LIBRARY_FAILED, LIBRARY_FINISHED, LIBRARY_UNFINISHED,
+    };
+
+    fn view<'a>(filename: &'a str, url: &'a str, state: TaskState) -> ViewTask<'a> {
+        ViewTask {
+            filename,
+            url,
+            state,
+        }
+    }
+
+    fn rule(id: &str, folder: &str, suffixes: &[&str]) -> CategoryRule {
+        CategoryRule {
+            id: id.to_string(),
+            folder: folder.to_string(),
+            suffixes: suffixes
+                .iter()
+                .map(|suffix| (*suffix).to_string())
+                .collect(),
+        }
+    }
+
+    fn mixed() -> Vec<ViewTask<'static>> {
+        vec![
+            view("report.pdf", "https://ex/report.pdf", TaskState::Completed),
+            view("song.mp3", "https://ex/song.mp3", TaskState::Failed),
+            view("song.mp3", "https://ex/other", TaskState::Downloading),
+            view("clip.mp4", "https://ex/clip.mp4", TaskState::Paused),
+            view("", "https://ex/unknown", TaskState::Queued),
+            view("notes.txt", "https://ex/notes.txt", TaskState::Canceled),
+        ]
+    }
+
+    fn visible_names(tasks: &[ViewTask<'_>], indexes: &[usize]) -> Vec<String> {
+        indexes
+            .iter()
+            .map(|&index| format!("{}|{}", tasks[index].filename, tasks[index].url))
+            .collect()
+    }
+
+    fn discovery(caller: &str, tx: &str, expired: bool) -> DiscoveryEntry {
+        DiscoveryEntry {
+            caller: caller.to_string(),
+            tx: tx.to_string(),
+            intent: None,
+            created_at_ms: 10,
+            expires_at_ms: Some(20),
+            expired,
+        }
+    }
+
+    /// The same gate refresh uses: notices are listed only in All on both axes,
+    /// and a dismissed (caller, tx) stays out.
+    fn shown_notice_keys(
+        library: i32,
+        category: &str,
+        entries: &[DiscoveryEntry],
+        dismissed: &BTreeSet<(String, String)>,
+    ) -> Vec<String> {
+        if !notices_in_view(library, category) {
+            return Vec::new();
+        }
+        collect_expired_notices(entries, dismissed)
+            .iter()
+            .map(|notice| notice_row_key(&notice.caller, &notice.tx))
+            .collect()
+    }
+
+    #[test]
+    fn empty_filename_and_none_classification_land_in_other() {
+        let rules = default_categories();
+        assert_eq!(category_bucket("", &rules), "other");
+        assert_eq!(category_bucket("readme", &rules), "other");
+        assert_eq!(category_bucket("a.pdf", &rules), "documents");
+        let no_other: Vec<_> = rules
+            .into_iter()
+            .filter(|rule| rule.id != "other")
+            .collect();
+        assert!(usagi::category::classify("readme", &no_other).is_none());
+        assert_eq!(category_bucket("readme", &no_other), "other");
+        assert_eq!(category_bucket("", &no_other), "other");
+        assert_eq!(category_bucket("a.pdf", &no_other), "documents");
+    }
+
+    #[test]
+    fn unfinished_includes_failed_and_finished_is_completed() {
+        let states = [
+            TaskState::Queued,
+            TaskState::Probing,
+            TaskState::Downloading,
+            TaskState::Verifying,
+            TaskState::Paused,
+            TaskState::Completed,
+            TaskState::Failed,
+            TaskState::Canceled,
+        ];
+        for state in states {
+            assert_eq!(
+                status_matches(LIBRARY_FINISHED, state),
+                state == TaskState::Completed,
+                "finished must be the completed set for {state:?}"
+            );
+            assert_eq!(
+                status_matches(LIBRARY_UNFINISHED, state),
+                state != TaskState::Completed,
+                "unfinished must be everything except completed for {state:?}"
+            );
+        }
+        assert!(status_matches(LIBRARY_UNFINISHED, TaskState::Failed));
+        assert!(!status_matches(LIBRARY_UNFINISHED, TaskState::Completed));
+        assert!(!status_matches(LIBRARY_ACTIVE, TaskState::Failed));
+        assert!(status_matches(LIBRARY_ACTIVE, TaskState::Paused));
+    }
+
+    #[test]
+    fn category_status_and_search_combine_and_counts_stay_global() {
+        let tasks = mixed();
+        let rules = default_categories();
+        let mut cache = CategoryCache::new();
+        let all = pass_task_list(&tasks, &rules, &mut cache, LIBRARY_ALL, "", "");
+        assert_eq!(all.counts.total, 6);
+        assert_eq!(all.counts.finished, 1);
+        assert_eq!(all.counts.unfinished, 5);
+        assert_eq!(all.counts.by_id.get("documents").copied(), Some(2));
+        assert_eq!(all.counts.by_id.get("music").copied(), Some(2));
+        assert_eq!(all.counts.by_id.get("videos").copied(), Some(1));
+        assert_eq!(all.counts.by_id.get("other").copied(), Some(1));
+        assert_eq!(all.counts.by_id.get("images").copied(), Some(0));
+        assert_eq!(all.visible.len(), 6);
+
+        let narrowed = pass_task_list(
+            &tasks,
+            &rules,
+            &mut cache,
+            LIBRARY_UNFINISHED,
+            "music",
+            "song",
+        );
+        assert_eq!(
+            visible_names(&tasks, &narrowed.visible),
+            vec![
+                "song.mp3|https://ex/song.mp3".to_string(),
+                "song.mp3|https://ex/other".to_string(),
+            ]
+        );
+        assert_eq!(narrowed.counts.total, all.counts.total);
+        assert_eq!(narrowed.counts.by_id, all.counts.by_id);
+        assert_eq!(narrowed.counts.finished, all.counts.finished);
+        assert_eq!(narrowed.counts.unfinished, all.counts.unfinished);
+
+        let by_url = pass_task_list(
+            &tasks,
+            &rules,
+            &mut cache,
+            LIBRARY_UNFINISHED,
+            "music",
+            "other",
+        );
+        assert_eq!(
+            visible_names(&tasks, &by_url.visible),
+            vec!["song.mp3|https://ex/other".to_string()]
+        );
+
+        let finished_docs = pass_task_list(
+            &tasks,
+            &rules,
+            &mut cache,
+            LIBRARY_FINISHED,
+            "documents",
+            "",
+        );
+        assert_eq!(
+            visible_names(&tasks, &finished_docs.visible),
+            vec!["report.pdf|https://ex/report.pdf".to_string()]
+        );
+        let finished_ids: Vec<_> = tasks
+            .iter()
+            .enumerate()
+            .filter(|(_, task)| task.state == TaskState::Completed)
+            .map(|(index, _)| index)
+            .collect();
+        let finished_view = pass_task_list(&tasks, &rules, &mut cache, LIBRARY_FINISHED, "", "");
+        assert_eq!(finished_view.visible, finished_ids);
+
+        let unknown = pass_task_list(
+            &tasks,
+            &rules,
+            &mut cache,
+            LIBRARY_UNFINISHED,
+            "",
+            "https://ex/unknown",
+        );
+        assert_eq!(
+            visible_names(&tasks, &unknown.visible),
+            vec!["|https://ex/unknown".to_string()]
+        );
+        assert_eq!(unknown.counts.by_id.get("other").copied(), Some(1));
+    }
+
+    #[test]
+    fn one_pass_classifies_each_filename_once_until_rules_change() {
+        let tasks = mixed();
+        let rules = default_categories();
+        let mut cache = CategoryCache::new();
+        let _ = pass_task_list(&tasks, &rules, &mut cache, LIBRARY_ALL, "", "");
+        assert_eq!(cache.misses, 5, "duplicate song.mp3 is classified once");
+        let _ = pass_task_list(
+            &tasks,
+            &rules,
+            &mut cache,
+            LIBRARY_UNFINISHED,
+            "music",
+            "song",
+        );
+        assert_eq!(cache.misses, 5, "a later refresh reuses the cache");
+
+        let renamed = vec![
+            rule("tunes", "Tunes", &[".mp3"]),
+            rule("other", "Other", &[]),
+        ];
+        let again = pass_task_list(&tasks, &renamed, &mut cache, LIBRARY_ALL, "", "");
+        assert_eq!(cache.misses, 10, "a new rules fingerprint drops the cache");
+        assert_eq!(again.counts.by_id.get("tunes").copied(), Some(2));
+        assert_eq!(again.counts.by_id.get("other").copied(), Some(4));
+        assert_eq!(again.counts.total, 6);
+    }
+
+    #[test]
+    fn custom_category_id_is_not_a_translation_key() {
+        assert_eq!(category_item_label("documents", false), "Documents");
+        assert_eq!(category_item_label("documents", true), "Tài liệu");
+        assert_eq!(category_item_label("disk-images", true), "Ảnh đĩa");
+        assert_eq!(category_item_label("Invoices", true), "Invoices");
+        assert_eq!(crate::i18n::vi("Invoices"), "Invoices");
+        assert_ne!(crate::i18n::vi(EXPIRED_HANDOFF_TEXT), EXPIRED_HANDOFF_TEXT);
+        assert_eq!(badge_text(0), "");
+        assert_eq!(badge_text(4), "4");
+    }
+
+    #[test]
+    fn expired_notices_show_in_all_and_hide_under_a_category() {
+        let entries = vec![
+            discovery("chrome:ext", "tx-live", false),
+            discovery("chrome:ext", "tx-old", true),
+            discovery("firefox:ext", "tx-gone", true),
+        ];
+        let dismissed = BTreeSet::new();
+        let all = shown_notice_keys(LIBRARY_ALL, "", &entries, &dismissed);
+        assert_eq!(
+            all,
+            vec![
+                notice_row_key("chrome:ext", "tx-old"),
+                notice_row_key("firefox:ext", "tx-gone"),
+            ]
+        );
+        assert!(shown_notice_keys(LIBRARY_ALL, "documents", &entries, &dismissed).is_empty());
+        assert!(shown_notice_keys(LIBRARY_ALL, "music", &entries, &dismissed).is_empty());
+        assert!(shown_notice_keys(LIBRARY_UNFINISHED, "", &entries, &dismissed).is_empty());
+        assert!(shown_notice_keys(LIBRARY_FINISHED, "", &entries, &dismissed).is_empty());
+        assert!(shown_notice_keys(LIBRARY_FAILED, "", &entries, &dismissed).is_empty());
+        assert!(shown_notice_keys(LIBRARY_ACTIVE, "", &entries, &dismissed).is_empty());
+
+        let mut dismissed = dismissed;
+        dismissed.insert(("chrome:ext".to_string(), "tx-old".to_string()));
+        assert_eq!(
+            shown_notice_keys(LIBRARY_ALL, "", &entries, &dismissed),
+            vec![notice_row_key("firefox:ext", "tx-gone")]
+        );
+
+        let notice = ExpiredNotice {
+            caller: "chrome:ext".to_string(),
+            tx: "tx-old".to_string(),
+            url: "https://ex/file".to_string(),
+            filename: "file.pdf".to_string(),
+            size_hint: None,
+            at_ms: 10,
+        };
+        let row = notice_row(&notice, false);
+        assert!(parse_key(row.key.as_str()).is_none());
+        assert_eq!(
+            parse_notice_row_key(row.key.as_str()),
+            Some(("chrome:ext", "tx-old"))
+        );
+        assert_eq!(row.state.as_str(), "expired-handoff");
+        assert!(!row.can_pause);
+        assert!(!row.can_resume);
+        assert!(!row.can_cancel);
+        assert!(!row.can_retry);
+        assert!(!row.can_remove);
+        assert!(row.can_dismiss);
+        assert!(!row.can_open_file);
+        assert!(!row.can_open_folder);
+        assert!(row.error_text.contains("was not downloaded"));
+        let vietnamese = notice_row(&notice, true);
+        assert!(vietnamese.error_text.contains("chưa được tải"));
     }
 }

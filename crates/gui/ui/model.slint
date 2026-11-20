@@ -26,6 +26,7 @@ export struct TaskRow {
     can-open-file: bool,
     can-open-folder: bool,
     can-remove: bool,
+    can-dismiss: bool,    // expired-handoff notice only; not an engine task action
     hash-text: string,
     glyph: string,        // category emoji, derived from the file extension
 }
@@ -77,4 +78,15 @@ export struct EndpointRow {
     origin: string,
     learned-text: string,
     failures-text: string,
+}
+
+// One sidebar row in the CATEGORIES group.
+// kind 0 = category axis (empty id means every category),
+// kind 1 = Finished (library completed), kind 2 = Unfinished.
+export struct CategoryNav {
+    id: string,
+    label: string,
+    badge: string,
+    glyph: string,
+    kind: int,
 }

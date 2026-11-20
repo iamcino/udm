@@ -30,6 +30,7 @@ const HOST_NAME = IS_FIREFOX ? H.HOST_NAMES.firefox : H.HOST_NAMES.chrome;
 
 const SETTINGS_KEY = "udmSettings";
 const LOG_KEY = "udmHandoffLog";
+const PENDING_KEY = "udmHandoffPending";
 const LOG_CAP = 20;
 
 async function getSettings() {
@@ -46,6 +47,44 @@ async function record(entry) {
   const log = Array.isArray(got[LOG_KEY]) ? got[LOG_KEY] : [];
   log.unshift(entry);
   await api.storage.local.set({ [LOG_KEY]: log.slice(0, LOG_CAP) });
+}
+
+// Pending handoffs, keyed by the extension's own transaction id. One
+// chain so two downloads cannot clobber each other's record.
+let storageChain = Promise.resolve();
+function mutatePending(mutator) {
+  const run = storageChain.then(async () => {
+    const got = await api.storage.local.get(PENDING_KEY);
+    const current = got && got[PENDING_KEY];
+    const all =
+      current && typeof current === "object" && !Array.isArray(current) ? Object.assign({}, current) : {};
+    mutator(all);
+    await api.storage.local.set({ [PENDING_KEY]: all });
+  });
+  storageChain = run.then(
+    () => {},
+    () => {},
+  );
+  return run;
+}
+
+function persistPending(rec) {
+  return mutatePending((all) => {
+    all[rec.tx] = rec;
+  });
+}
+
+function clearPending(tx) {
+  return mutatePending((all) => {
+    delete all[tx];
+  });
+}
+
+async function loadPending() {
+  const got = await api.storage.local.get(PENDING_KEY);
+  const all = got && got[PENDING_KEY];
+  if (!all || typeof all !== "object" || Array.isArray(all)) return [];
+  return Object.values(all).filter((rec) => rec && typeof rec.tx === "string" && rec.intent);
 }
 
 /** Call a chrome.* API that may be callback- or promise-style. */
@@ -73,8 +112,16 @@ function invoke(fn, thisArg, args) {
 // onCreated can fire - consumed on first sight and expired after two
 // minutes. A wrongly skipped item is harmless: skipping only means
 // the browser keeps that download, which is the fallback outcome.
+// Re-issue itself runs only for a download with no pending record, or
+// for a pending record still at stage cancelled whose prepare answered
+// unavailable. A prepared (or later) record is reconciled by query.
 const reissuedAt = new Map();
 const REISSUE_WINDOW_MS = 120000;
+
+// Transactions whose flow is in this worker right now. A service-worker
+// restart begins empty, which is what makes startup reload the journal.
+const inFlightTx = new Set();
+let resumeTimer = null;
 
 const fx = {
   async cancel(id) {
@@ -85,11 +132,15 @@ const fx = {
     // "in_progress" for a few hundred ms after the request resolves
     // (field case 2026-11-16: a single immediate check raced that
     // transition and Chrome handoffs aborted as unconfirmed), so poll
-    // for the transition before giving up.
+    // for the transition before giving up. A restart can also observe
+    // an item that was already erased: the cancel request throws, and
+    // an empty search is still confirmation, not a reason to skip prepare.
+    let requested = false;
     try {
       await invoke(api.downloads.cancel, api.downloads, [id]);
+      requested = true;
     } catch {
-      return false;
+      requested = false;
     }
     for (let waited = 0; ; waited += 100) {
       try {
@@ -100,7 +151,7 @@ const fx = {
       } catch {
         return false;
       }
-      if (waited >= 2000) return false;
+      if (!requested || waited >= 2000) return false;
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
   },
@@ -125,15 +176,49 @@ const fx = {
     );
   },
   record,
+  persist: persistPending,
+  clearPending,
+  claimTx(tx) {
+    if (inFlightTx.has(tx)) return false;
+    inFlightTx.add(tx);
+    return true;
+  },
+  releaseTx(tx) {
+    inFlightTx.delete(tx);
+  },
+  notifyPending() {
+    scheduleResume();
+  },
 };
 
-const client = H.createHandoffClient(() => {
-  try {
-    return api.runtime.connectNative(HOST_NAME);
-  } catch {
-    return null;
-  }
-});
+function scheduleResume() {
+  if (resumeTimer !== null) return;
+  // The dropped port (or a lost reply) is not itself an outcome. Ask
+  // again once the next connection can be opened.
+  resumeTimer = setTimeout(() => {
+    resumeTimer = null;
+    resumePending();
+  }, H.POLL_MS);
+}
+
+function resumePending() {
+  loadPending()
+    .then((records) => {
+      for (const rec of records) flow.resume(rec);
+    })
+    .catch(() => {});
+}
+
+const client = H.createHandoffClient(
+  () => {
+    try {
+      return api.runtime.connectNative(HOST_NAME);
+    } catch {
+      return null;
+    }
+  },
+  { onDisconnect: scheduleResume },
+);
 const flow = H.createHandoffFlow(client, fx);
 
 const inFlight = new Set();
@@ -149,6 +234,15 @@ api.downloads.onCreated.addListener((item) => {
     try {
       const settings = await getSettings();
       if (!H.isEligible(item, settings)) return;
+      // Same browser download already has a transaction. Resume that
+      // record instead of allocating a second one.
+      const existing = (await loadPending()).find(
+        (rec) => rec.intent && rec.intent.browser_download_id === String(item.id),
+      );
+      if (existing) {
+        await flow.resume(existing);
+        return;
+      }
       await flow.handoff(item);
     } catch {
       // A handoff failure must never disturb the browser download.
@@ -157,3 +251,8 @@ api.downloads.onCreated.addListener((item) => {
     }
   })();
 });
+
+// Service-worker startup: reconcile whatever was durable when the
+// worker last stopped. Prepared (and later) records are queried; they
+// are not cancelled and not re-issued.
+resumePending();

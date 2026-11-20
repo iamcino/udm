@@ -21,12 +21,21 @@ use usagi::handoff::{
 };
 use usagi::paths::Paths;
 
+/// Lease passed to the coordinator while the handoff dialog is on.
+///
+/// The stored `handoff_lease_secs` setting is not rewritten. The dialog
+/// counts down to the record deadline, and that deadline is this value:
+/// the setting, floored at 10 minutes. No protocol field changes.
+pub(crate) fn coordinator_lease_secs(configured: u64) -> u64 {
+    configured.max(600)
+}
+
 /// Starts the coordinator when opted in and returns it, so the GUI
 /// can render recovery rows from the same authoritative instance
 /// (owner decision 2026-11-09). `None` = handoff fully inert.
 pub fn start(paths: &Paths, engine: Arc<Engine>) -> Option<Arc<Coordinator>> {
     let lease_secs = match engine.settings().handoff_lease_secs {
-        Some(secs) if secs > 0 => secs,
+        Some(secs) if secs > 0 => coordinator_lease_secs(secs),
         _ => {
             tracing::debug!("handoff: no lease configured; coordinator not started");
             return None;
@@ -56,6 +65,10 @@ pub fn start(paths: &Paths, engine: Arc<Engine>) -> Option<Arc<Coordinator>> {
         CoordinatorConfig {
             lease: Duration::from_secs(lease_secs),
             allowed_callers: callers.clone(),
+            // The handoff dialog is the only commit path in this build.
+            // A pipe commit without a user decision stays Prepared and
+            // returns a conflict, so an older host cannot skip the dialog.
+            require_decision: true,
         },
     ) {
         Ok(c) => Arc::new(c),
@@ -77,4 +90,16 @@ pub fn start(paths: &Paths, engine: Arc<Engine>) -> Option<Arc<Coordinator>> {
         }
     });
     Some(gui_coordinator)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::coordinator_lease_secs;
+
+    #[test]
+    fn dialog_lease_floors_at_ten_minutes() {
+        assert_eq!(coordinator_lease_secs(60), 600);
+        assert_eq!(coordinator_lease_secs(600), 600);
+        assert_eq!(coordinator_lease_secs(900), 900);
+    }
 }

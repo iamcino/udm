@@ -15,7 +15,7 @@
 Unicode true
 !define APPNAME        "udm"
 !ifndef VERSION
-!define VERSION        "0.2.4"
+!define VERSION        "0.3.0"
 !endif
 !define PUBLISHER      "Cino"
 !define EXE            "udm.exe"

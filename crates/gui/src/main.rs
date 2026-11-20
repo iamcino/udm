@@ -9,7 +9,8 @@
 //! and start-with-Windows are separate opt-ins. Startup uses a disclosed
 //! per-user HKCU Run entry. The optional browser-handoff coordinator serves
 //! registered local callers and exposes pending associations as read-only
-//! Needs recovery rows, distinct from engine tasks.
+//! Needs recovery rows, distinct from engine tasks. A prepared handoff
+//! opens its own confirmation window.
 //!
 //! No telemetry, administrator rights or services are required or
 //! implemented. Startup removes the previous update's `.old` backups
@@ -35,6 +36,7 @@
 
 mod browser;
 mod handoff_boot;
+mod handoff_dialog;
 mod i18n;
 mod startup;
 mod state;

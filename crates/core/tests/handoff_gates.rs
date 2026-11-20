@@ -13,6 +13,7 @@ use usagi::error::{Error, Result};
 use usagi::handoff::{
     BrowserDisposition, Coordinator, CoordinatorConfig, EngineAdapter, EnginePort, FileStore,
     HandoffClock, HandoffIntent, HandoffRecord, HandoffState, HandoffStatus, MemoryStore,
+    UserDecision,
 };
 use usagi::store::SCHEMA_VERSION;
 use usagi::{EngineBuilder, Paths, Settings};
@@ -61,7 +62,12 @@ impl FakeEngine {
 }
 
 impl EnginePort for FakeEngine {
-    fn add_handoff_task(&self, _intent: &HandoffIntent, tx: &str) -> Result<u64> {
+    fn add_handoff_task(
+        &self,
+        _intent: &HandoffIntent,
+        tx: &str,
+        _decision: Option<&UserDecision>,
+    ) -> Result<u64> {
         if *self.down.lock().unwrap() {
             return Err(Error::Other("fake engine down".into()));
         }
@@ -117,6 +123,7 @@ fn coordinator(engine: Arc<FakeEngine>, clock: Arc<ManualClock>, lease_ms: u64) 
         CoordinatorConfig {
             lease: Duration::from_millis(lease_ms),
             allowed_callers: vec![ALICE.to_string(), BOB.to_string()],
+            require_decision: false,
         },
     )
     .unwrap()
@@ -137,6 +144,8 @@ fn pending_commit_record(tx: &str) -> HandoffRecord {
         engine_task_id: None,
         association_pending: true,
         outcome: Some("commitment recorded".to_string()),
+        decision: None,
+        materialize_error: None,
     }
 }
 
@@ -149,12 +158,12 @@ fn schema_version_stays_two() {
 fn prepare_persists_and_replay_returns_original_deadline() {
     let clock = Arc::new(ManualClock::new());
     let c = coordinator(Arc::new(FakeEngine::default()), clock.clone(), 60_000);
-    let first = c.prepare(ALICE, "tx-1", intent()).unwrap();
+    let first = c.prepare(ALICE, "tx-1", intent(), false).unwrap();
     assert_eq!(first.status, HandoffStatus::Prepared);
     assert_eq!(first.expires_at_ms, Some(T0 + 60_000));
 
     clock.advance(10_000);
-    let replay = c.prepare(ALICE, "tx-1", intent()).unwrap();
+    let replay = c.prepare(ALICE, "tx-1", intent(), false).unwrap();
     assert_eq!(replay.status, HandoffStatus::Prepared);
     // The original deadline, never renewed by a retry (freeze §3).
     assert_eq!(replay.expires_at_ms, Some(T0 + 60_000));
@@ -164,17 +173,17 @@ fn prepare_persists_and_replay_returns_original_deadline() {
 fn prepare_conflicts_on_changed_intent_even_after_termination() {
     let clock = Arc::new(ManualClock::new());
     let c = coordinator(Arc::new(FakeEngine::default()), clock, 60_000);
-    c.prepare(ALICE, "tx-2", intent()).unwrap();
+    c.prepare(ALICE, "tx-2", intent(), false).unwrap();
     let mut changed = intent();
     changed.size_hint = Some(1);
-    let reply = c.prepare(ALICE, "tx-2", changed.clone()).unwrap();
+    let reply = c.prepare(ALICE, "tx-2", changed.clone(), false).unwrap();
     assert_eq!(reply.status, HandoffStatus::Conflict);
 
     c.abort(ALICE, "tx-2", true).unwrap();
-    let reply = c.prepare(ALICE, "tx-2", changed).unwrap();
+    let reply = c.prepare(ALICE, "tx-2", changed, false).unwrap();
     assert_eq!(reply.status, HandoffStatus::Conflict);
     // The identical intent after termination reports the terminal state.
-    let reply = c.prepare(ALICE, "tx-2", intent()).unwrap();
+    let reply = c.prepare(ALICE, "tx-2", intent(), false).unwrap();
     assert_eq!(reply.status, HandoffStatus::Aborted);
 }
 
@@ -182,14 +191,14 @@ fn prepare_conflicts_on_changed_intent_even_after_termination() {
 fn caller_namespace_is_isolated() {
     let clock = Arc::new(ManualClock::new());
     let c = coordinator(Arc::new(FakeEngine::default()), clock, 60_000);
-    c.prepare(ALICE, "tx-3", intent()).unwrap();
+    c.prepare(ALICE, "tx-3", intent(), false).unwrap();
     // For another caller the transaction does not exist (freeze §3).
     assert_eq!(
         c.query(BOB, "tx-3").unwrap().status,
         HandoffStatus::NotFound
     );
     assert_eq!(
-        c.commit(BOB, "tx-3", true).unwrap().status,
+        c.commit(BOB, "tx-3", true, None).unwrap().status,
         HandoffStatus::NotFound
     );
     // An unapproved caller is refused outright.
@@ -201,13 +210,13 @@ fn commit_happy_path_adds_exactly_once() {
     let clock = Arc::new(ManualClock::new());
     let engine = Arc::new(FakeEngine::default());
     let c = coordinator(engine.clone(), clock, 60_000);
-    c.prepare(ALICE, "tx-4", intent()).unwrap();
-    let reply = c.commit(ALICE, "tx-4", true).unwrap();
+    c.prepare(ALICE, "tx-4", intent(), false).unwrap();
+    let reply = c.commit(ALICE, "tx-4", true, None).unwrap();
     assert_eq!(reply.status, HandoffStatus::Committed);
     assert_eq!(reply.task_ref.as_deref(), Some("1001"));
     assert_eq!(engine.add_calls(), 1);
 
-    let dup = c.commit(ALICE, "tx-4", true).unwrap();
+    let dup = c.commit(ALICE, "tx-4", true, None).unwrap();
     assert_eq!(dup.status, HandoffStatus::Committed);
     assert_eq!(dup.task_ref.as_deref(), Some("1001"));
     assert_eq!(engine.add_calls(), 1, "duplicate commit must not re-Add");
@@ -218,8 +227,8 @@ fn commit_requires_the_cancellation_confirmation() {
     let clock = Arc::new(ManualClock::new());
     let engine = Arc::new(FakeEngine::default());
     let c = coordinator(engine.clone(), clock, 60_000);
-    c.prepare(ALICE, "tx-5", intent()).unwrap();
-    let reply = c.commit(ALICE, "tx-5", false).unwrap();
+    c.prepare(ALICE, "tx-5", intent(), false).unwrap();
+    let reply = c.commit(ALICE, "tx-5", false, None).unwrap();
     assert_eq!(reply.status, HandoffStatus::Conflict);
     assert_eq!(engine.add_calls(), 0);
     assert_eq!(
@@ -228,7 +237,7 @@ fn commit_requires_the_cancellation_confirmation() {
     );
     // The real confirmation still lands afterwards.
     assert_eq!(
-        c.commit(ALICE, "tx-5", true).unwrap().status,
+        c.commit(ALICE, "tx-5", true, None).unwrap().status,
         HandoffStatus::Committed
     );
 }
@@ -238,13 +247,13 @@ fn commit_unknown_is_not_found_and_aborted_conflicts() {
     let clock = Arc::new(ManualClock::new());
     let c = coordinator(Arc::new(FakeEngine::default()), clock, 60_000);
     assert_eq!(
-        c.commit(ALICE, "nope", true).unwrap().status,
+        c.commit(ALICE, "nope", true, None).unwrap().status,
         HandoffStatus::NotFound
     );
-    c.prepare(ALICE, "tx-6", intent()).unwrap();
+    c.prepare(ALICE, "tx-6", intent(), false).unwrap();
     c.abort(ALICE, "tx-6", true).unwrap();
     assert_eq!(
-        c.commit(ALICE, "tx-6", true).unwrap().status,
+        c.commit(ALICE, "tx-6", true, None).unwrap().status,
         HandoffStatus::Conflict
     );
 }
@@ -254,9 +263,9 @@ fn expired_commit_is_recovery_required_and_never_adds() {
     let clock = Arc::new(ManualClock::new());
     let engine = Arc::new(FakeEngine::default());
     let c = coordinator(engine.clone(), clock.clone(), 1_000);
-    c.prepare(ALICE, "tx-7", intent()).unwrap();
+    c.prepare(ALICE, "tx-7", intent(), false).unwrap();
     clock.advance(1_001);
-    let reply = c.commit(ALICE, "tx-7", true).unwrap();
+    let reply = c.commit(ALICE, "tx-7", true, None).unwrap();
     assert_eq!(reply.status, HandoffStatus::RecoveryRequired);
     assert_eq!(reply.state, Some(HandoffState::Expired));
     assert_eq!(
@@ -285,6 +294,7 @@ fn crash_gap_with_marker_present_heals_without_second_add() {
         CoordinatorConfig {
             lease: Duration::from_millis(60_000),
             allowed_callers: vec![ALICE.to_string()],
+            require_decision: false,
         },
     )
     .unwrap();
@@ -311,13 +321,14 @@ fn crash_gap_without_marker_adds_exactly_once() {
         CoordinatorConfig {
             lease: Duration::from_millis(60_000),
             allowed_callers: vec![ALICE.to_string()],
+            require_decision: false,
         },
     )
     .unwrap();
     let reply = c.query(ALICE, "tx-9").unwrap();
     assert_eq!(reply.status, HandoffStatus::Committed);
     assert_eq!(engine.add_calls(), 1);
-    let dup = c.commit(ALICE, "tx-9", true).unwrap();
+    let dup = c.commit(ALICE, "tx-9", true, None).unwrap();
     assert_eq!(dup.task_ref, reply.task_ref);
     assert_eq!(engine.add_calls(), 1);
 }
@@ -327,12 +338,12 @@ fn commit_while_engine_down_stays_pending_then_heals() {
     let clock = Arc::new(ManualClock::new());
     let engine = Arc::new(FakeEngine::default());
     let c = coordinator(engine.clone(), clock, 60_000);
-    c.prepare(ALICE, "tx-10", intent()).unwrap();
+    c.prepare(ALICE, "tx-10", intent(), false).unwrap();
     engine.set_down(true);
-    let reply = c.commit(ALICE, "tx-10", true).unwrap();
+    let reply = c.commit(ALICE, "tx-10", true, None).unwrap();
     assert_eq!(reply.status, HandoffStatus::RecoveryRequired);
     engine.set_down(false);
-    let reply = c.commit(ALICE, "tx-10", true).unwrap();
+    let reply = c.commit(ALICE, "tx-10", true, None).unwrap();
     assert_eq!(reply.status, HandoffStatus::Committed);
     assert_eq!(engine.add_calls(), 1);
     assert_eq!(engine.task_count(), 1);
@@ -344,7 +355,7 @@ fn abort_tombstone_blocks_a_delayed_prepare() {
     let c = coordinator(Arc::new(FakeEngine::default()), clock, 60_000);
     let reply = c.abort(ALICE, "tx-11", false).unwrap();
     assert_eq!(reply.status, HandoffStatus::Aborted);
-    let reply = c.prepare(ALICE, "tx-11", intent()).unwrap();
+    let reply = c.prepare(ALICE, "tx-11", intent(), false).unwrap();
     assert_eq!(reply.status, HandoffStatus::Conflict);
 }
 
@@ -353,8 +364,8 @@ fn abort_after_commit_leaves_the_task_alone() {
     let clock = Arc::new(ManualClock::new());
     let engine = Arc::new(FakeEngine::default());
     let c = coordinator(engine.clone(), clock, 60_000);
-    c.prepare(ALICE, "tx-12", intent()).unwrap();
-    c.commit(ALICE, "tx-12", true).unwrap();
+    c.prepare(ALICE, "tx-12", intent(), false).unwrap();
+    c.commit(ALICE, "tx-12", true, None).unwrap();
     let reply = c.abort(ALICE, "tx-12", true).unwrap();
     assert_eq!(reply.status, HandoffStatus::Committed);
     assert_eq!(engine.task_count(), 1);
@@ -364,7 +375,7 @@ fn abort_after_commit_leaves_the_task_alone() {
 fn abort_prepared_requires_the_retains_confirmation() {
     let clock = Arc::new(ManualClock::new());
     let c = coordinator(Arc::new(FakeEngine::default()), clock, 60_000);
-    c.prepare(ALICE, "tx-13", intent()).unwrap();
+    c.prepare(ALICE, "tx-13", intent(), false).unwrap();
     // Without the confirmation the recovery intent is retained.
     let reply = c.abort(ALICE, "tx-13", false).unwrap();
     assert_eq!(reply.status, HandoffStatus::Prepared);
@@ -377,11 +388,11 @@ fn duplicate_commit_after_task_removal_never_recreates() {
     let clock = Arc::new(ManualClock::new());
     let engine = Arc::new(FakeEngine::default());
     let c = coordinator(engine.clone(), clock, 60_000);
-    c.prepare(ALICE, "tx-14", intent()).unwrap();
-    let first = c.commit(ALICE, "tx-14", true).unwrap();
+    c.prepare(ALICE, "tx-14", intent(), false).unwrap();
+    let first = c.commit(ALICE, "tx-14", true, None).unwrap();
     // The user removes the engine task; the tombstone still answers.
     engine.tasks.lock().unwrap().clear();
-    let replay = c.commit(ALICE, "tx-14", true).unwrap();
+    let replay = c.commit(ALICE, "tx-14", true, None).unwrap();
     assert_eq!(replay.status, HandoffStatus::Committed);
     assert_eq!(replay.task_ref, first.task_ref);
     assert_eq!(engine.add_calls(), 1, "removal must not resurrect the task");
@@ -400,10 +411,11 @@ fn journal_file_round_trips_records_and_tombstones() {
             CoordinatorConfig {
                 lease: Duration::from_millis(60_000),
                 allowed_callers: vec![ALICE.to_string()],
+                require_decision: false,
             },
         )
         .unwrap();
-        c.prepare(ALICE, "tx-15", intent()).unwrap();
+        c.prepare(ALICE, "tx-15", intent(), false).unwrap();
         c.abort(ALICE, "tx-16", true).unwrap();
     }
     let c = Coordinator::open(
@@ -413,6 +425,7 @@ fn journal_file_round_trips_records_and_tombstones() {
         CoordinatorConfig {
             lease: Duration::from_millis(60_000),
             allowed_callers: vec![ALICE.to_string()],
+            require_decision: false,
         },
     )
     .unwrap();
@@ -422,7 +435,7 @@ fn journal_file_round_trips_records_and_tombstones() {
     );
     // The intent-less tombstone survived the round trip.
     assert_eq!(
-        c.prepare(ALICE, "tx-16", intent()).unwrap().status,
+        c.prepare(ALICE, "tx-16", intent(), false).unwrap().status,
         HandoffStatus::Conflict
     );
 }
@@ -506,6 +519,7 @@ fn engine_marker_round_trip() {
         CoordinatorConfig {
             lease: Duration::from_millis(60_000),
             allowed_callers: vec![ALICE.to_string()],
+            require_decision: false,
         },
     )
     .unwrap();
@@ -513,14 +527,14 @@ fn engine_marker_round_trip() {
     // Loopback discard port: the task row is what matters here; its
     // probe fails fast and harmlessly.
     intent.url = "http://127.0.0.1:9/handoff.bin".to_string();
-    c.prepare(ALICE, "tx-real", intent).unwrap();
-    let reply = c.commit(ALICE, "tx-real", true).unwrap();
+    c.prepare(ALICE, "tx-real", intent, false).unwrap();
+    let reply = c.commit(ALICE, "tx-real", true, None).unwrap();
     assert_eq!(reply.status, HandoffStatus::Committed);
     let task_ref = reply.task_ref.expect("associated task");
     let id: u64 = task_ref.parse().unwrap();
     assert!(engine.task(id).is_some());
     assert_eq!(engine.task_by_handoff("tx-real"), Some(id));
-    let dup = c.commit(ALICE, "tx-real", true).unwrap();
+    let dup = c.commit(ALICE, "tx-real", true, None).unwrap();
     assert_eq!(dup.task_ref.as_deref(), Some(task_ref.as_str()));
 }
 
@@ -534,12 +548,12 @@ fn concurrent_duplicate_commits_add_exactly_once() {
     let engine = Arc::new(FakeEngine::default());
     let clock = Arc::new(ManualClock::new());
     let coord = Arc::new(coordinator(engine.clone(), clock, 60_000));
-    coord.prepare(ALICE, "tx-race", intent()).unwrap();
+    coord.prepare(ALICE, "tx-race", intent(), false).unwrap();
     let mut handles = Vec::new();
     for _ in 0..2 {
         let c = coord.clone();
         handles.push(std::thread::spawn(move || {
-            c.commit(ALICE, "tx-race", true).map(|r| r.task_ref)
+            c.commit(ALICE, "tx-race", true, None).map(|r| r.task_ref)
         }));
     }
     let mut refs = Vec::new();
@@ -572,17 +586,17 @@ fn recovery_entries_list_exactly_the_pending_associations() {
     let c = coordinator(engine.clone(), clock, 60_000);
     assert!(c.recovery_entries().is_empty());
     // A healthy commit associates immediately: never listed.
-    c.prepare(ALICE, "tx-ok", intent()).unwrap();
+    c.prepare(ALICE, "tx-ok", intent(), false).unwrap();
     assert_eq!(
-        c.commit(ALICE, "tx-ok", true).unwrap().status,
+        c.commit(ALICE, "tx-ok", true, None).unwrap().status,
         HandoffStatus::Committed
     );
     assert!(c.recovery_entries().is_empty());
     // Engine down: the commitment persists, association stays pending.
     engine.set_down(true);
-    c.prepare(ALICE, "tx-lost", intent()).unwrap();
+    c.prepare(ALICE, "tx-lost", intent(), false).unwrap();
     assert_eq!(
-        c.commit(ALICE, "tx-lost", true).unwrap().status,
+        c.commit(ALICE, "tx-lost", true, None).unwrap().status,
         HandoffStatus::RecoveryRequired
     );
     assert_eq!(engine.add_calls(), 1, "only the healthy commit Added");
@@ -603,7 +617,7 @@ fn recovery_entries_list_exactly_the_pending_associations() {
     );
     // An aborted transaction is never a recovery row.
     engine.set_down(false);
-    c.prepare(ALICE, "tx-ab", intent()).unwrap();
+    c.prepare(ALICE, "tx-ab", intent(), false).unwrap();
     c.abort(ALICE, "tx-ab", true).unwrap();
     let entries = c.recovery_entries();
     assert_eq!(entries.len(), 1);
@@ -621,20 +635,20 @@ fn set_allowed_callers_replaces_the_live_allow_list() {
     // ALICE and BOB start allowed (see `coordinator` above).
     assert!(c.caller_allowed(ALICE));
     assert!(c.caller_allowed(BOB));
-    assert!(c.prepare(ALICE, "tx-1", intent()).is_ok());
+    assert!(c.prepare(ALICE, "tx-1", intent(), false).is_ok());
 
     // Unregister ALICE: the GUI hands the freshly read callers.json.
     c.set_allowed_callers(vec![BOB.to_string()]);
     assert!(!c.caller_allowed(ALICE));
     assert!(c.caller_allowed(BOB));
-    assert!(c.prepare(ALICE, "tx-2", intent()).is_err());
-    assert!(c.prepare(BOB, "tx-3", intent()).is_ok());
+    assert!(c.prepare(ALICE, "tx-2", intent(), false).is_err());
+    assert!(c.prepare(BOB, "tx-3", intent(), false).is_ok());
 
     // Register ALICE again: the list is replaced, not appended to a
     // stale snapshot, and the previously prepared record is unaffected.
     c.set_allowed_callers(vec![ALICE.to_string(), BOB.to_string()]);
     assert!(c.caller_allowed(ALICE));
-    assert!(c.prepare(ALICE, "tx-4", intent()).is_ok());
+    assert!(c.prepare(ALICE, "tx-4", intent(), false).is_ok());
 }
 
 /// Browser integration item 2: the status light reads the newest

@@ -83,6 +83,12 @@ pub struct Store {
     /// [`Store::fail_next_saves`], which integration tests use via the
     /// engine handle; it is never armed in production paths.
     fail_saves: std::sync::atomic::AtomicU32,
+    /// Fault injection for tests of the settings write that quick-add waits
+    /// on. While non-zero, [`Store::save_settings`] decrements it and fails
+    /// before touching the database. Task [`Store::save`] does not consume
+    /// this counter. Armed only through [`Store::fail_next_settings_saves`];
+    /// production leaves it at zero.
+    fail_settings_saves: std::sync::atomic::AtomicU32,
     /// Phase-scoped fault injection for tests: while `true`, EVERY `save`
     /// fails. Fixtures that need a whole phase of persistence failure
     /// (arm -> act -> clear -> act) use [`Store::set_save_failure`]
@@ -152,6 +158,7 @@ impl Store {
             path,
             alt_svc_cache: Mutex::new(Default::default()),
             fail_saves: std::sync::atomic::AtomicU32::new(0),
+            fail_settings_saves: std::sync::atomic::AtomicU32::new(0),
             fail_all_saves: std::sync::atomic::AtomicBool::new(false),
             save_observer: Mutex::new(SaveObserver::default()),
         };
@@ -431,7 +438,33 @@ impl Store {
         })
     }
 
+    /// Make the next `count` calls to [`Store::save_settings`] fail before
+    /// the database write. Exists so a caller that waits on the write can
+    /// be shown the failure. Never called by production code.
+    pub fn fail_next_settings_saves(&self, count: u32) {
+        self.fail_settings_saves
+            .store(count, std::sync::atomic::Ordering::SeqCst);
+    }
+
     pub fn save_settings(&self, settings: &Settings) -> Result<()> {
+        let mut armed = self
+            .fail_settings_saves
+            .load(std::sync::atomic::Ordering::SeqCst);
+        while armed > 0 {
+            match self.fail_settings_saves.compare_exchange_weak(
+                armed,
+                armed - 1,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            ) {
+                Ok(_) => {
+                    return Err(Error::Storage(
+                        "injected settings save failure (test fault)".into(),
+                    ));
+                }
+                Err(actual) => armed = actual,
+            }
+        }
         let json = settings.to_json()?;
         let txn = self.db.begin_write().map_err(map_txn)?;
         {

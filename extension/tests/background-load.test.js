@@ -180,6 +180,65 @@ const tick = () => new Promise((r) => setTimeout(r, 100));
   // ---- re-issue guard (0.2.3): a download this layer re-issued after
   // ---- a cancelled handoff must not start a second handoff, or a
   // ---- down coordinator would loop cancel -> re-issue forever.
+  await test("startup resumes a prepared pending record by query and does not cancel", async () => {
+    const hosts = [];
+    const sent = [];
+    const cancels = [];
+    const downloads = [];
+    const fake = makeFakeApi(hosts, false);
+    fake.api.storage.local.get = async (key) => {
+      if (key === "udmHandoffPending") {
+        return {
+          udmHandoffPending: {
+            "tx-boot": {
+              tx: "tx-boot",
+              stage: "prepared",
+              intent: {
+                url: "https://example.com/file.bin",
+                method: "GET",
+                filename_hint: "file.bin",
+                size_hint: 10,
+                browser_download_id: "7",
+                dest_dir: null,
+              },
+            },
+          },
+        };
+      }
+      return {};
+    };
+    fake.api.downloads.cancel = async () => {
+      cancels.push("cancel");
+    };
+    fake.api.downloads.download = async (opts) => {
+      downloads.push(opts && opts.url);
+      return 99;
+    };
+    fake.api.runtime.connectNative = (name) => {
+      hosts.push(name);
+      return {
+        postMessage(message) {
+          sent.push(message);
+        },
+        disconnect() {},
+        onMessage: { addListener() {} },
+        onDisconnect: { addListener() {} },
+      };
+    };
+    const ctx = vm.createContext({ setTimeout, clearTimeout, console, URL });
+    ctx.chrome = fake.api;
+    ctx.browser = fake.api;
+    ctx.importScripts = (file) => vm.runInContext(read(file), ctx, { filename: file });
+    vm.runInContext(read("background.js"), ctx, { filename: "background.js" });
+    for (let i = 0; i < 20 && sent.length === 0; i++) await tick();
+    assert.strictEqual(sent.length, 1);
+    assert.strictEqual(sent[0].op, "query");
+    assert.strictEqual(sent[0].tx, "tx-boot");
+    assert.deepStrictEqual(hosts, ["pw.cino.udm.handoff.chrome"]);
+    assert.deepStrictEqual(cancels, []);
+    assert.deepStrictEqual(downloads, []);
+  });
+
   await test("a re-issued download is skipped once; a fresh one is not", async () => {
     const hosts = [];
     const fake = makeFakeApi(hosts, false);

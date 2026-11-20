@@ -1,0 +1,338 @@
+// Browser-handoff confirmation. A separate top-level window: the main
+// window is not its parent, and refresh must not focus this window again.
+// Strings that are static go through I18n.tr. The Rust side registers the
+// translator on this window and sets language-index. Dynamic lines (URL,
+// countdown, size, errors) arrive as properties.
+
+import { Theme as CinoTheme, Lang } from "@cino-ui";
+import { TextField } from "@cino-ui";
+import { I18n } from "i18n.slint";
+import { Theme } from "theme.slint";
+import { ActionButton, SectionTitle } from "widgets.slint";
+import { CheckBox, ComboBox } from "std-widgets.slint";
+
+export component HandoffWindow inherits Window {
+    title: I18n.tr("Browser download");
+    icon: @image-url("../assets/icon.png");
+    background: Theme.bg;
+    default-font-family: Theme.family;
+    default-font-size: 13px;
+    preferred-width: 480px;
+    preferred-height: 640px;
+    min-width: 420px;
+    min-height: 520px;
+
+    in-out property <int> language-index: 0;
+    in-out property <int> theme-index: 0;
+    in-out property <int> accent-index: 0;
+
+    in property <string> url-text;
+    in property <string> countdown-text;
+    in property <string> size-text;
+    in property <string> sanitized-text;
+    in property <string> preview-text;
+    in property <string> error-text;
+    in property <string> status-text;
+    in property <bool> expired: false;
+
+    in-out property <bool> use-category: false;
+    in property <[string]> category-labels;
+    in-out property <int> category-index: 0;
+
+    in-out property <string> dir-text;
+    in property <[string]> recent-labels;
+    in-out property <int> recent-index: -1;
+
+    in-out property <string> filename-text;
+
+    in-out property <bool> quick-open: false;
+    in-out property <string> quick-folder;
+    in-out property <string> quick-extensions;
+    in property <string> quick-error;
+
+    callback copy-url;
+    callback use-category-toggled(bool);
+    callback category-picked(int);
+    callback dir-edited;
+    callback browse;
+    callback recent-picked(string);
+    callback filename-edited;
+    callback download;
+    callback add-paused;
+    callback dismiss;
+    callback quick-toggle;
+    callback quick-save;
+    callback quick-cancel;
+
+    public function apply-appearance() {
+        CinoTheme.dark = root.theme-index == 0;
+        CinoTheme.accent = Theme.accents[min(max(root.accent-index, 0), 4)];
+        Lang.english = root.language-index == 0;
+    }
+
+    public function grab-focus() {
+        fs.focus();
+    }
+
+    changed use-category => {
+        root.use-category-toggled(root.use-category);
+    }
+    changed category-index => {
+        root.category-picked(root.category-index);
+    }
+    changed dir-text => {
+        root.dir-edited();
+    }
+    changed filename-text => {
+        root.filename-edited();
+    }
+
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        background: Theme.bg;
+
+        fs := FocusScope {
+            width: 100%;
+            height: 100%;
+            key-pressed(event) => {
+                if (event.text == Key.Escape) {
+                    root.dismiss();
+                    return accept;
+                }
+                return reject;
+            }
+
+            VerticalLayout {
+                padding: 16px;
+                spacing: 8px;
+
+                Text {
+                    text: I18n.tr("The browser download has been handed to UDM. Cancel discards this file.");
+                    color: Theme.text-dim;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 30px;
+                        background: Theme.input-bg;
+                        border-radius: Theme.radius-sm;
+                        border-width: 1px;
+                        border-color: Theme.border;
+                        Text {
+                            x: 8px;
+                            width: parent.width - 16px;
+                            height: 100%;
+                            text: root.url-text;
+                            color: Theme.text;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                    }
+                    ActionButton {
+                        label: I18n.tr("Copy");
+                        clicked => { root.copy-url(); }
+                    }
+                }
+
+                Text {
+                    text: root.countdown-text;
+                    color: root.expired ? Theme.warn : Theme.text-faint;
+                    font-size: 12px;
+                }
+
+                if root.expired: Text {
+                    text: I18n.tr("This handoff has expired. Closing this window does not save or discard it.");
+                    color: Theme.warn;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    CheckBox {
+                        text: I18n.tr("Use category");
+                        checked <=> root.use-category;
+                    }
+                    ComboBox {
+                        horizontal-stretch: 1;
+                        height: 30px;
+                        enabled: root.use-category && !root.expired;
+                        model: root.category-labels;
+                        current-index <=> root.category-index;
+                    }
+                    ActionButton {
+                        label: "+";
+                        compact: true;
+                        is-enabled: !root.expired;
+                        clicked => { root.quick-toggle(); }
+                    }
+                }
+
+                if root.quick-open: VerticalLayout {
+                    width: 100%;
+                    spacing: 6px;
+                    SectionTitle { label: I18n.tr("New category"); }
+                    Rectangle {
+                        height: 30px;
+                        background: Theme.input-bg;
+                        border-radius: Theme.radius-sm;
+                        border-width: 1px;
+                        border-color: Theme.border;
+                        TextField {
+                            x: 0px;
+                            y: 0px;
+                            width: 100%;
+                            height: 100%;
+                            text <=> root.quick-folder;
+                            placeholder: I18n.tr("Folder name");
+                        }
+                    }
+                    Rectangle {
+                        height: 30px;
+                        background: Theme.input-bg;
+                        border-radius: Theme.radius-sm;
+                        border-width: 1px;
+                        border-color: Theme.border;
+                        TextField {
+                            x: 0px;
+                            y: 0px;
+                            width: 100%;
+                            height: 100%;
+                            text <=> root.quick-extensions;
+                            placeholder: I18n.tr("Extensions, comma-separated");
+                        }
+                    }
+                    if root.quick-error != "": Text {
+                        text: root.quick-error;
+                        color: Theme.err;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        ActionButton {
+                            label: I18n.tr("Cancel");
+                            clicked => { root.quick-cancel(); }
+                        }
+                        HorizontalLayout { horizontal-stretch: 1; }
+                        ActionButton {
+                            label: I18n.tr("Add category");
+                            primary: true;
+                            clicked => { root.quick-save(); }
+                        }
+                    }
+                }
+
+                Text {
+                    text: root.size-text;
+                    color: Theme.text-dim;
+                    font-size: 12px;
+                }
+
+                SectionTitle { label: I18n.tr("Save to"); }
+                HorizontalLayout {
+                    spacing: 8px;
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 30px;
+                        background: Theme.input-bg;
+                        border-radius: Theme.radius-sm;
+                        border-width: 1px;
+                        border-color: Theme.border;
+                        TextField {
+                            x: 0px;
+                            y: 0px;
+                            width: 100%;
+                            height: 100%;
+                            text <=> root.dir-text;
+                        }
+                    }
+                    ActionButton {
+                        label: I18n.tr("Browse...");
+                        is-enabled: !root.expired;
+                        clicked => { root.browse(); }
+                    }
+                }
+                if root.recent-labels.length > 0: Rectangle {
+                    width: 100%;
+                    height: 30px;
+                    ComboBox {
+                        width: 100%;
+                        height: 100%;
+                        enabled: !root.expired;
+                        model: root.recent-labels;
+                        current-index: root.recent-index;
+                        selected(value) => { root.recent-picked(value); }
+                    }
+                }
+
+                SectionTitle { label: I18n.tr("File name"); }
+                Rectangle {
+                    height: 30px;
+                    background: Theme.input-bg;
+                    border-radius: Theme.radius-sm;
+                    border-width: 1px;
+                    border-color: Theme.border;
+                    TextField {
+                        x: 0px;
+                        y: 0px;
+                        width: 100%;
+                        height: 100%;
+                        text <=> root.filename-text;
+                    }
+                }
+                if root.sanitized-text != "": Text {
+                    text: root.sanitized-text;
+                    color: Theme.text-faint;
+                    font-size: 11px;
+                    overflow: elide;
+                }
+                if root.preview-text != "": Text {
+                    text: root.preview-text;
+                    color: Theme.text-faint;
+                    font-size: 11px;
+                    overflow: elide;
+                }
+                if root.error-text != "": Text {
+                    text: root.error-text;
+                    color: Theme.err;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+                if root.status-text != "": Text {
+                    text: root.status-text;
+                    color: Theme.text-dim;
+                    font-size: 12px;
+                }
+
+                HorizontalLayout { vertical-stretch: 1; }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    ActionButton {
+                        label: I18n.tr("Cancel");
+                        clicked => { root.dismiss(); }
+                    }
+                    HorizontalLayout { horizontal-stretch: 1; }
+                    ActionButton {
+                        label: I18n.tr("Add");
+                        is-enabled: !root.expired;
+                        clicked => { root.add-paused(); }
+                    }
+                    ActionButton {
+                        label: I18n.tr("Download");
+                        primary: true;
+                        is-enabled: !root.expired;
+                        clicked => { root.download(); }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -18,6 +18,9 @@ const UDM_STRINGS = {
     status_handed_off: "Handed to UDM",
     status_kept: "Kept by browser",
     status_recovery: "Needs recovery in UDM",
+    status_discarded: "Discarded — not downloaded",
+    status_expired: "Handoff expired",
+    status_aborted: "Aborted",
   },
   vi: {
     title: "UDM Handoff",
@@ -36,6 +39,9 @@ const UDM_STRINGS = {
     status_handed_off: "Đã chuyển cho UDM",
     status_kept: "Trình duyệt giữ lại",
     status_recovery: "Cần khôi phục trong UDM",
+    status_discarded: "Đã bỏ — không tải",
+    status_expired: "Lượt chuyển đã hết hạn",
+    status_aborted: "Đã hủy giữa chừng",
   },
 };
 function udmLang() {

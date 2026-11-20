@@ -110,22 +110,27 @@ elsewhere in a URL.
 ## How ownership moves
 
 ```text
-Browser download → pause → prepare → durable acknowledgement
-                                       │
-                       confirm browser cancellation
-                                       │
-                                     commit
-                                       │
-                       durable commitment → associated Usagi task
+Browser download → cancel and erase the browser copy → prepare → durable acknowledgement
+                                                              ↓
+                                          user decision in the UDM dialog
+                                                              ↓
+                       commit (download now, or added paused) → durable commitment → associated Usagi task
+                       discard → the handoff is dropped and no task is created
 ```
 
 The coordinator keys a transaction by registered caller and opaque
-transaction ID. It durably records prepare before acknowledging. The
-extension requests commit only after browser cancellation is confirmed.
-Commit records the commitment before asking the engine to create a task.
-The engine's persisted `handoff_tx` marker lets recovery find a task whose
+transaction ID. The extension cancels and erases the browser's own copy
+first, so the browser's Save As prompt can never block the handoff; only
+then does it prepare, and the coordinator durably records prepare before
+acknowledging. Nothing is committed until the user decides in UDM's
+confirmation dialog: the decision (destination, category, download now
+or added paused) is bound to the transaction and committed, or the
+handoff is discarded and no task is created. Commit records the
+commitment before asking the engine to create a task. The engine's
+persisted `handoff_tx` marker lets recovery find a task whose
 association reply was lost, avoiding duplicate materialization for that
-transaction. An expired prepared record does not authorize automatic transfer.
+transaction. An expired prepared record does not authorize automatic
+transfer; it is surfaced as a notice in the main window instead.
 
 The host uses length-prefixed JSON on stdin/stdout and a paired per-user
 named pipe. It forwards coordinator states rather than inventing a successful
@@ -137,7 +142,7 @@ control an arbitrary engine task.
 | Situation | What the current implementation does |
 |---|---|
 | App/host unavailable before prepare succeeds | Leaves/resumes the browser download. |
-| Browser cancellation cannot be confirmed | Does not commit; sends a best-effort abort. A browser copy that already completed remains the file. |
+| Browser cancellation cannot be confirmed | Stops the handoff before prepare; the browser keeps its download. |
 | Commit arrives after lease expiry | Returns `recovery-required`; no automatic task start. The extension records a recovery outcome. |
 | Commitment is durable but task association is pending | Keeps recovery evidence; the extension can report recovery and UDM shows a read-only Needs recovery row in All. |
 | App restarts with pending committed records | Reconciles them against engine transaction markers and creates/finds the associated task where possible. |

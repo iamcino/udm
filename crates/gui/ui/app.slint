@@ -103,7 +103,7 @@ component ToolbarField inherits Rectangle {
 // second header inside the views.
 
 import { Theme } from "theme.slint";
-import { TaskRow, TaskDetail, StatusInfo, EndpointRow } from "model.slint";
+import { TaskRow, TaskDetail, StatusInfo, EndpointRow, CategoryNav } from "model.slint";
 import { ActionButton, Pill, ProgressBar, KeyValue } from "widgets.slint";
 import { DownloadsView } from "views/downloads.slint";
 import { AddView } from "views/add.slint";
@@ -111,6 +111,8 @@ import { SettingsView } from "views/settings.slint";
 import { AboutView } from "views/about.slint";
 import { PopupWindow } from "popup.slint";
 export { PopupWindow }
+import { HandoffWindow } from "handoff.slint";
+export { HandoffWindow }
 import { ScrollView, Palette } from "std-widgets.slint";
 
 export component AppWindow inherits Window {
@@ -169,8 +171,11 @@ export component AppWindow inherits Window {
     }
     callback appearance-changed;
     public pure function translate(key: string) -> string { return I18n.tr(key); }
-    // downloads-list filter: 0 = all, 1 = active, 2 = completed, 3 = failed
+    // downloads-list filter: 0 = all, 1 = active, 2 = completed, 3 = failed, 4 = unfinished
     in-out property <int> library: 0;
+    // category axis: empty = every category. ANDs with library and the search box.
+    in-out property <string> category: "";
+    in property <[CategoryNav]> category-nav;
     // substring filter on the file name, applied in Rust
     in-out property <string> filter;
 
@@ -300,6 +305,7 @@ export component AppWindow inherits Window {
     callback open-gitlab;
     callback clear-finished;
     callback add-from-clipboard;
+    callback dismiss-notice(string);
 
     // Absolute shell bounds keep view-specific layout hints from resizing the
     // native window during a redraw. Only the content inside this shell flexes.
@@ -322,104 +328,146 @@ export component AppWindow inherits Window {
             Rectangle {
                 width: 220px;
                 height: 100%;
+                clip: true;
                 vertical-stretch: 1;
                 background: Theme.bg-raised;
-                VerticalLayout {
-                    padding: 12px;
-                    spacing: 2px;
 
-                    // brand row
-                    HorizontalLayout {
-                        spacing: 8px;
+                // brand row
+                HorizontalLayout {
+                    x: 12px;
+                    y: 12px;
+                    width: parent.width - 24px;
+                    spacing: 8px;
+                    height: 40px;
+                    alignment: start;
+                    Image {
+                        source: @image-url("../assets/icon-256.png");
+                        width: 26px;
+                        height: 26px;
+                        y: 7px;
+                    }
+                    Text {
+                        text: "UDM";
                         height: 40px;
-                        alignment: start;
-                        Image {
-                            source: @image-url("../assets/icon-256.png");
-                            width: 26px;
-                            height: 26px;
-                            y: 7px;
+                        color: Theme.text;
+                        font-size: 15px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+                    HorizontalLayout { horizontal-stretch: 1; }
+                }
+
+                // The category list grows with the effective rules.
+                // The nav is clipped in the band between the brand and
+                // the storage card so extra rows scroll.
+                Rectangle {
+                    clip: true;
+                    x: 8px;
+                    y: 60px;
+                    width: parent.width - 16px;
+                    // Leave the brand and the storage card outside this
+                    // clip. Reading the card's own height here collapses
+                    // to 0 and the nav paints through the card.
+                    height: max(parent.height - 220px, 72px);
+                    nav-scroll := ScrollView {
+                        width: 100%;
+                        height: 100%;
+                        VerticalLayout {
+                            spacing: 2px;
+                            width: parent.width;
+
+                            SidebarCaption { label: I18n.tr("LIBRARY"); }
+                            NavItem {
+                                glyph: "≡";
+                                label: I18n.tr("All Downloads");
+                                badge: root.status.active-count + root.status.queued-count
+                                    + root.status.paused-count + root.status.completed-count
+                                    + root.status.failed-count > 0
+                                    ? (root.status.active-count + root.status.queued-count
+                                        + root.status.paused-count + root.status.completed-count
+                                        + root.status.failed-count) + ""
+                                    : "";
+                                active: root.view == 0 && root.library == 0;
+                                clicked => { root.view = 0; root.library = 0; }
+                            }
+                            NavItem {
+                                glyph: "▶";
+                                label: I18n.tr("Active");
+                                badge: root.status.active-count + root.status.queued-count > 0
+                                    ? (root.status.active-count + root.status.queued-count) + "" : "";
+                                active: root.view == 0 && root.library == 1;
+                                clicked => { root.view = 0; root.library = 1; }
+                            }
+                            NavItem {
+                                glyph: "✓";
+                                label: I18n.tr("Completed");
+                                badge: root.status.completed-count > 0 ? root.status.completed-count + "" : "";
+                                active: root.view == 0 && root.library == 2;
+                                clicked => { root.view = 0; root.library = 2; }
+                            }
+                            NavItem {
+                                glyph: "!";
+                                label: I18n.tr("Failed");
+                                badge: root.status.failed-count > 0 ? root.status.failed-count + "" : "";
+                                active: root.view == 0 && root.library == 3;
+                                clicked => { root.view = 0; root.library = 3; }
+                            }
+                            NavItem {
+                                glyph: "\u{25bc}";
+                                label: I18n.tr("Active downloads…");
+                                badge: "";
+                                active: false;
+                                clicked => { root.show-popup(); }
+                            }
+
+                            SidebarCaption { label: I18n.tr("CATEGORIES"); }
+                            for item in root.category-nav: NavItem {
+                                glyph: item.glyph;
+                                label: item.label;
+                                badge: item.badge;
+                                active: root.view == 0 && (item.kind == 0 ? root.category == item.id
+                                    : item.kind == 1 ? root.library == 2
+                                    : root.library == 4);
+                                clicked => {
+                                    root.view = 0;
+                                    if (item.kind == 0) {
+                                        root.category = item.id;
+                                    } else if (item.kind == 1) {
+                                        root.library = 2;
+                                    } else {
+                                        root.library = 4;
+                                    }
+                                }
+                            }
+
+                            SidebarCaption { label: I18n.tr("GENERAL"); }
+                            NavItem {
+                                glyph: "+";
+                                label: I18n.tr("Add Download");
+                                active: root.view == 1;
+                                clicked => { root.view = 1; }
+                            }
+                            NavItem {
+                                glyph: "⚙";
+                                label: I18n.tr("Settings");
+                                active: root.view == 2;
+                                clicked => { root.view = 2; }
+                            }
+                            NavItem {
+                                glyph: "ℹ";
+                                label: I18n.tr("About & Privacy");
+                                active: root.view == 3;
+                                clicked => { root.view = 3; }
+                            }
                         }
-                        Text {
-                            text: "UDM";
-                            height: 40px;
-                            color: Theme.text;
-                            font-size: 15px;
-                            font-weight: 700;
-                            vertical-alignment: center;
-                        }
-                        HorizontalLayout { horizontal-stretch: 1; }
                     }
+                }
 
-                    Rectangle { height: 8px; }
-
-                    SidebarCaption { label: I18n.tr("LIBRARY"); }
-                    NavItem {
-                        glyph: "≡";
-                        label: I18n.tr("All Downloads");
-                        badge: root.status.active-count + root.status.queued-count
-                            + root.status.paused-count + root.status.completed-count
-                            + root.status.failed-count > 0
-                            ? (root.status.active-count + root.status.queued-count
-                                + root.status.paused-count + root.status.completed-count
-                                + root.status.failed-count) + ""
-                            : "";
-                        active: root.view == 0 && root.library == 0;
-                        clicked => { root.view = 0; root.library = 0; }
-                    }
-                    NavItem {
-                        glyph: "▶";
-                        label: I18n.tr("Active");
-                        badge: root.status.active-count + root.status.queued-count > 0
-                            ? (root.status.active-count + root.status.queued-count) + "" : "";
-                        active: root.view == 0 && root.library == 1;
-                        clicked => { root.view = 0; root.library = 1; }
-                    }
-                    NavItem {
-                        glyph: "✓";
-                        label: I18n.tr("Completed");
-                        badge: root.status.completed-count > 0 ? root.status.completed-count + "" : "";
-                        active: root.view == 0 && root.library == 2;
-                        clicked => { root.view = 0; root.library = 2; }
-                    }
-                    NavItem {
-                        glyph: "!";
-                        label: I18n.tr("Failed");
-                        badge: root.status.failed-count > 0 ? root.status.failed-count + "" : "";
-                        active: root.view == 0 && root.library == 3;
-                        clicked => { root.view = 0; root.library = 3; }
-                    }
-                    NavItem {
-                        glyph: "\u{25bc}";
-                        label: I18n.tr("Active downloads…");
-                        badge: "";
-                        active: false;
-                        clicked => { root.show-popup(); }
-                    }
-
-                    SidebarCaption { label: I18n.tr("GENERAL"); }
-                    NavItem {
-                        glyph: "+";
-                        label: I18n.tr("Add Download");
-                        active: root.view == 1;
-                        clicked => { root.view = 1; }
-                    }
-                    NavItem {
-                        glyph: "⚙";
-                        label: I18n.tr("Settings");
-                        active: root.view == 2;
-                        clicked => { root.view = 2; }
-                    }
-                    NavItem {
-                        glyph: "ℹ";
-                        label: I18n.tr("About & Privacy");
-                        active: root.view == 3;
-                        clicked => { root.view = 3; }
-                    }
-
-                    VerticalLayout { vertical-stretch: 1; }
-
-                    // storage widget: linear bar, no gauge (HIG: quiet, flat)
-                    Rectangle {
+                // storage widget: linear bar, no gauge (HIG: quiet, flat)
+                storage-box := Rectangle {
+                        x: 12px;
+                        y: parent.height - self.height - 12px;
+                        width: parent.width - 24px;
                         height: storage-col.preferred-height + 20px;
                         background: Theme.panel;
                         border-radius: Theme.radius;
@@ -455,7 +503,6 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                }
             }
 
             // ------------------------------------------------------- content
@@ -570,6 +617,7 @@ export component AppWindow inherits Window {
                             cancel(id) => { root.cancel(id); }
                             retry(id) => { root.retry(id); }
                             remove(id) => { root.remove(id); }
+                            dismiss(key) => { root.dismiss-notice(key); }
                             delete-file(id) => { root.delete-file(id); }
                             copy-url(id) => { root.copy-url(id); }
                             open-file(id) => { root.open-file(id); }

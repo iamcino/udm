@@ -8,7 +8,7 @@ see [Build](BUILD.md) to produce the binaries and packages.
 
 | Form | How to run it | Default application data |
 |---|---|---|
-| Per-user installer | Run `udm-0.2.4-setup.exe`; it installs under `%LOCALAPPDATA%\Programs\udm` and creates shortcuts. | `%LOCALAPPDATA%\udm` |
+| Per-user installer | Run `udm-0.3.0-setup.exe`; it installs under `%LOCALAPPDATA%\Programs\udm` and creates shortcuts. | `%LOCALAPPDATA%\udm` |
 | Portable ZIP | Extract the archive, then run `udm.exe` inside the extracted program folder with its `udm.portable` marker. | `data\` beside the executable |
 | Bare executable | Put `udm.exe` in a user-writable location and run it without a portable marker. | `%LOCALAPPDATA%\udm` |
 

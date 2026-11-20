@@ -2,6 +2,11 @@
 
 Các thay đổi đáng chú ý của UDM. Tiếng Anh: [CHANGELOG.md](CHANGELOG.md).
 
+## 0.3.0
+
+- **Danh mục trong cửa sổ chính**: thanh bên nay hiện các danh mục tải kèm số lượng của từng mục. Chọn một danh mục để lọc danh sách tác vụ, kết hợp được với bộ lọc trạng thái và tìm kiếm; có thêm chế độ xem đã hoàn thành và chưa hoàn thành.
+- **Lượt tải từ trình duyệt nay hỏi trước**: khi tiện ích chuyển một lượt tải sang, UDM hiện hộp thoại xác nhận với tên file, dung lượng và nguồn tải. Bạn chọn thư mục lưu và danh mục, rồi tải ngay, thêm lượt tải ở trạng thái tạm dừng, hoặc bỏ hẳn. Nếu hộp thoại hết hạn mà chưa được trả lời, một thông báo trong cửa sổ chính giữ cho lượt tải không bị mất.
+
 ## 0.2.4
 
 - **Kiểm tra cập nhật, đã sửa**: sau một lần kiểm tra thành công, kiểm tra lại không còn báo lỗi từ chối "manifest epoch". Kiểm tra nay là thao tác chỉ đọc thuần túy — kiểm tra lại bao nhiêu lần cũng cho cùng một đáp án, và "Đã là bản mới nhất" được báo đúng.

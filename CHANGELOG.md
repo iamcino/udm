@@ -2,6 +2,11 @@
 
 All notable changes to UDM are listed here. Vietnamese: [CHANGELOG.vi.md](CHANGELOG.vi.md).
 
+## 0.3.0
+
+- **Categories in the main window**: the sidebar now shows the download categories with a count for each. Selecting a category filters the task list, combined with the status filter and search; Finished and Unfinished views are included.
+- **Browser downloads ask first**: when the extension hands a download over, UDM now shows a confirmation dialog with the file name, size and source. Choose the folder and the category, then download now, add the download paused, or discard it. If the dialog expires unanswered, a notice in the main window keeps the handoff from being lost.
+
 ## 0.2.4
 
 - **Update checks, fixed**: after a successful check, checking again no longer fails with a "manifest epoch" refusal. A check is now a pure read — repeating it gives the same answer, and "Already current" is reported correctly.

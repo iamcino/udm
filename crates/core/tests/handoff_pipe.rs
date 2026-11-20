@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 use usagi::error::Result;
 use usagi::handoff::{
     Coordinator, CoordinatorConfig, EnginePort, HandoffClock, HandoffIntent, MemoryStore,
+    UserDecision,
 };
 use usagi::handoff_pipe::{pipe_name, serve, PipeClient};
 
@@ -25,7 +26,12 @@ struct FakeEngine {
 }
 
 impl EnginePort for FakeEngine {
-    fn add_handoff_task(&self, _intent: &HandoffIntent, tx: &str) -> Result<u64> {
+    fn add_handoff_task(
+        &self,
+        _intent: &HandoffIntent,
+        tx: &str,
+        _decision: Option<&UserDecision>,
+    ) -> Result<u64> {
         let mut adds = self.adds.lock().unwrap();
         *adds += 1;
         let id = 1000 + u64::from(*adds);
@@ -92,6 +98,7 @@ fn pipe_pairs_dispatches_and_isolates_callers() {
             CoordinatorConfig {
                 lease: Duration::from_secs(60),
                 allowed_callers: vec![ALICE.to_string(), BOB.to_string()],
+                require_decision: false,
             },
         )
         .unwrap(),
@@ -155,6 +162,73 @@ fn pipe_pairs_dispatches_and_isolates_callers() {
         .request(&json!({"v": 1, "op": "query", "tx": "tx-v2"}))
         .unwrap();
     assert_eq!(after["status"], "not-found");
+
+    // Dialog wire: attestation on prepare, discard, a decision object,
+    // and discovery. Caller stays the pairing identity.
+    let discarded = alice2
+        .request(&json!({"v": 1, "op": "prepare", "tx": "tx-discard",
+                         "browser_cancelled": true, "intent": intent()}))
+        .unwrap();
+    assert_eq!(discarded["status"], "prepared");
+    let discarded = alice2
+        .request(&json!({"v": 1, "op": "discard", "tx": "tx-discard"}))
+        .unwrap();
+    assert_eq!(discarded["status"], "discarded");
+    let discarded = alice2
+        .request(&json!({"v": 1, "op": "discard", "tx": "tx-discard"}))
+        .unwrap();
+    assert_eq!(discarded["status"], "discarded");
+    let bad_decision = alice2
+        .request(&json!({"v": 1, "op": "commit", "tx": "tx-discard",
+                         "confirm": {"browser_cancelled": true},
+                         "decision": "nope"}))
+        .unwrap();
+    assert_eq!(bad_decision["status"], "conflict");
+    let still = alice2
+        .request(&json!({"v": 1, "op": "query", "tx": "tx-discard"}))
+        .unwrap();
+    assert_eq!(still["status"], "discarded");
+
+    let prepared = alice2
+        .request(&json!({"v": 1, "op": "prepare", "tx": "tx-decided",
+                         "browser_cancelled": true, "intent": intent()}))
+        .unwrap();
+    assert_eq!(prepared["status"], "prepared");
+    let committed = alice2
+        .request(&json!({
+            "v": 1,
+            "op": "commit",
+            "tx": "tx-decided",
+            "confirm": {"browser_cancelled": true},
+            "decision": {
+                "dest_dir": "C:/downloads",
+                "filename": "file.bin",
+                "start_paused": true
+            }
+        }))
+        .unwrap();
+    assert_eq!(committed["status"], "committed");
+    assert_eq!(committed["task_ref"], "1002");
+
+    let prepared = alice2
+        .request(&json!({"v": 1, "op": "prepare", "tx": "tx-live", "intent": intent()}))
+        .unwrap();
+    assert_eq!(prepared["status"], "prepared");
+    let listed = alice2.request(&json!({"v": 1, "op": "discovery"})).unwrap();
+    assert_eq!(listed["status"], "ok");
+    let entries = listed["entries"].as_array().expect("discovery entries");
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry["tx"] == "tx-live" && entry["expired"] == false),
+        "a still-prepared handoff is visible: {entries:?}"
+    );
+    assert!(
+        entries
+            .iter()
+            .all(|entry| entry["tx"] != "tx-decided" && entry["tx"] != "tx-discard"),
+        "committed and discarded handoffs are not discovery rows"
+    );
     drop(alice2);
 
     // Shutdown: set the flag and wake the accept loop with one connection.
@@ -162,5 +236,5 @@ fn pipe_pairs_dispatches_and_isolates_callers() {
     let _ = PipeClient::connect(&name);
     let joined = server.join().expect("server thread panicked");
     assert!(joined.is_ok(), "serve failed: {joined:?}");
-    assert_eq!(*engine.adds.lock().unwrap(), 1);
+    assert_eq!(*engine.adds.lock().unwrap(), 2);
 }

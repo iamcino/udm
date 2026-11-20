@@ -33,7 +33,13 @@ async function load() {
         ? T.status_handed_off + (entry.task_ref ? ` #${entry.task_ref}` : "")
         : entry.status === "recovery-required"
           ? T.status_recovery
-          : T.status_kept;
+          : entry.status === "discarded"
+            ? T.status_discarded
+            : entry.status === "expired"
+              ? T.status_expired
+              : entry.status === "aborted"
+                ? T.status_aborted
+                : T.status_kept;
     li.append(name, status);
     ul.append(li);
   }

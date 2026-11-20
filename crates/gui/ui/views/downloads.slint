@@ -48,6 +48,7 @@ component RowCard inherits Rectangle {
     callback cancel(float);
     callback retry(float);
     callback remove(float);
+    callback dismiss(string);
     callback delete-file(float);
     callback copy-url(float);
     callback open-file(float);
@@ -59,7 +60,7 @@ component RowCard inherits Rectangle {
     // a row stays "hot" while the pointer is on it OR on one of its buttons
     out property <bool> row-hot: hover.has-hover || pause-b.hovered || resume-b.hovered
         || retry-b.hovered || open-b.hovered || folder-b.hovered || cancel-b.hovered
-        || remove-b.hovered || check-touch.has-hover;
+        || remove-b.hovered || dismiss-b.hovered || check-touch.has-hover;
 
     in property <length> row-width;
     in property <length> name-width;
@@ -130,18 +131,24 @@ component RowCard inherits Rectangle {
                         root.retry(root.data.id);
                     }
                 }
-                ContextMenuItem {
+                if !root.data.can-dismiss: ContextMenuItem {
                     label: I18n.tr("Copy URL");
                     clicked => {
                         root.copy-url(root.data.id);
                     }
                 }
-                Rectangle { height: 1px; background: Theme.border-soft; }
-                ContextMenuItem {
+                if !root.data.can-dismiss: Rectangle { height: 1px; background: Theme.border-soft; }
+                if !root.data.can-dismiss: ContextMenuItem {
                     label: I18n.tr("Remove from List");
                     is-danger: true;
                     clicked => {
                         root.remove(root.data.id);
+                    }
+                }
+                if root.data.can-dismiss: ContextMenuItem {
+                    label: I18n.tr("Dismiss");
+                    clicked => {
+                        root.dismiss(root.data.key);
                     }
                 }
                 if (root.data.can-open-file) : ContextMenuItem {
@@ -172,12 +179,14 @@ component RowCard inherits Rectangle {
         }
     }
 
-    // selection checkbox - hand-rolled, same quiet style as the rest
+    // selection checkbox - hand-rolled, same quiet style as the rest.
+    // Notices are not tasks, so the checkbox stays hidden.
     Rectangle {
         x: 8px;
         y: 19px;
         width: 18px;
         height: 18px;
+        visible: !root.data.can-dismiss;
         border-radius: 4px;
         border-width: 1px;
         border-color: root.data.selected ? Theme.accent : Theme.border;
@@ -193,6 +202,7 @@ component RowCard inherits Rectangle {
             font-weight: 700;
         }
         check-touch := TouchArea {
+            enabled: !root.data.can-dismiss;
             mouse-cursor: pointer;
             clicked => { root.toggle-selection(root.data.key); }
         }
@@ -464,6 +474,13 @@ component RowCard inherits Rectangle {
                 tint: Theme.err;
                 clicked => { root.remove(root.data.id); }
             }
+            dismiss-b := ActionButton {
+                compact: true;
+                label: I18n.tr("Dismiss");
+                shown: root.data.can-dismiss;
+                tint: Theme.text;
+                clicked => { root.dismiss(root.data.key); }
+            }
         }
     }
 }
@@ -481,6 +498,7 @@ export component DownloadsView inherits Rectangle {
     callback cancel(float);
     callback retry(float);
     callback remove(float);
+    callback dismiss(string);
     callback delete-file(float);
     callback copy-url(float);
     callback open-file(float);
@@ -684,6 +702,7 @@ export component DownloadsView inherits Rectangle {
                     cancel(id) => { root.cancel(id); }
                     retry(id) => { root.retry(id); }
                     remove(id) => { root.remove(id); }
+                    dismiss(key) => { root.dismiss(key); }
                     delete-file(id) => { root.delete-file(id); }
                     copy-url(id) => { root.copy-url(id); }
                     open-file(id) => { root.open-file(id); }

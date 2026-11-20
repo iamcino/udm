@@ -34,6 +34,7 @@
 //! created per transaction. The only writer of the marker is
 //! [`EngineAdapter::add_handoff_task`], called solely by the coordinator.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -119,6 +120,37 @@ impl HandoffIntent {
     }
 }
 
+/// Destination, filename, and start mode chosen for a handoff.
+/// Bound once, on the first accepted commit, then reused for replay
+/// and materialization. `filename` is stored only after the engine's
+/// filename sanitizer has accepted it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserDecision {
+    pub dest_dir: String,
+    pub filename: String,
+    pub start_paused: bool,
+}
+
+impl UserDecision {
+    /// Reject an empty destination and normalize `filename` with
+    /// [`crate::util::sanitize_filename`]. A filename that sanitizes
+    /// to empty is a validation error. The normalized filename is what
+    /// replay compares and what materialization uses.
+    pub fn validate_and_normalize(&mut self) -> Result<()> {
+        if self.dest_dir.trim().is_empty() {
+            return Err(Error::Other("handoff: decision dest_dir is empty".into()));
+        }
+        let filename = util::sanitize_filename(&self.filename);
+        if filename.is_empty() {
+            return Err(Error::Other(
+                "handoff: decision filename sanitizes to empty".into(),
+            ));
+        }
+        self.filename = filename;
+        Ok(())
+    }
+}
+
 /// Durable handoff phase (freeze §3). These are not engine
 /// [`crate::TaskState`] values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,6 +160,10 @@ pub enum HandoffState {
     Committed,
     Aborted,
     Expired,
+    /// Dialog Cancel (0.3.0): the handoff was dropped before commit.
+    /// Distinct from [`HandoffState::Aborted`], which means the browser
+    /// kept its own download. A durable tombstone, same as the others.
+    Discarded,
 }
 
 /// What the coordinator durably knows about who owns the download on
@@ -179,6 +215,14 @@ pub struct HandoffRecord {
     /// Durable terminal/recovery note, sufficient for deterministic
     /// retries (freeze §4).
     pub outcome: Option<String>,
+    /// Decision bound by the first accepted commit (0.3.0). Absent on
+    /// pre-0.3.0 journals and on legacy commits that supplied none.
+    #[serde(default)]
+    pub decision: Option<UserDecision>,
+    /// Last engine Add failure while the association is still pending.
+    /// Cleared when materialization succeeds. Absent on older journals.
+    #[serde(default)]
+    pub materialize_error: Option<String>,
 }
 
 /// The reply vocabulary of the four operations (freeze §3).
@@ -189,6 +233,8 @@ pub enum HandoffStatus {
     Committed,
     Aborted,
     Expired,
+    /// The transaction was discarded before commit (0.3.0 dialog Cancel).
+    Discarded,
     NotFound,
     Conflict,
     RecoveryRequired,
@@ -201,6 +247,7 @@ impl HandoffStatus {
             HandoffState::Committed => HandoffStatus::Committed,
             HandoffState::Aborted => HandoffStatus::Aborted,
             HandoffState::Expired => HandoffStatus::Expired,
+            HandoffState::Discarded => HandoffStatus::Discarded,
         }
     }
 }
@@ -380,8 +427,14 @@ impl HandoffClock for SystemClock {
 pub trait EnginePort: Send + Sync {
     /// Create the engine task for a committed handoff, with the
     /// transaction marker written in the same durable store write
-    /// that creates the task.
-    fn add_handoff_task(&self, intent: &HandoffIntent, tx: &str) -> Result<u64>;
+    /// that creates the task. A bound decision replaces the intent's
+    /// destination and filename and sets whether the task starts paused.
+    fn add_handoff_task(
+        &self,
+        intent: &HandoffIntent,
+        tx: &str,
+        decision: Option<&UserDecision>,
+    ) -> Result<u64>;
     /// The task already carrying this transaction's marker, if any.
     fn find_handoff_task(&self, tx: &str) -> Result<Option<u64>>;
 }
@@ -404,13 +457,25 @@ impl EngineAdapter {
 }
 
 impl EnginePort for EngineAdapter {
-    fn add_handoff_task(&self, intent: &HandoffIntent, tx: &str) -> Result<u64> {
+    fn add_handoff_task(
+        &self,
+        intent: &HandoffIntent,
+        tx: &str,
+        decision: Option<&UserDecision>,
+    ) -> Result<u64> {
         let mut request = AddRequest::new(intent.url.clone());
-        if let Some(name) = &intent.filename_hint {
-            request = request.filename(name.clone());
-        }
-        if let Some(dir) = &intent.dest_dir {
-            request = request.dest_dir(dir.clone());
+        if let Some(decision) = decision {
+            request = request
+                .dest_dir(decision.dest_dir.clone())
+                .filename(decision.filename.clone())
+                .start_paused(decision.start_paused);
+        } else {
+            if let Some(name) = &intent.filename_hint {
+                request = request.filename(name.clone());
+            }
+            if let Some(dir) = &intent.dest_dir {
+                request = request.dest_dir(dir.clone());
+            }
         }
         request = request.handoff_tx(tx.to_string());
         self.engine.add(request)
@@ -433,6 +498,10 @@ pub struct CoordinatorConfig {
     /// (design handoff §3). Anything else is refused before any
     /// record is read or written.
     pub allowed_callers: Vec<String>,
+    /// When set, committing a `Prepared` record without a user decision
+    /// is a conflict and mutates nothing. Off keeps the pre-0.3.0 commit
+    /// path so a non-GUI caller still works.
+    pub require_decision: bool,
 }
 
 impl std::fmt::Debug for Coordinator {
@@ -450,6 +519,11 @@ struct Inner {
     /// while the pipe is serving: pairing and check_caller read it
     /// from here, never from a stale snapshot.
     allowed_callers: Vec<String>,
+    /// `(caller, tx)` keys that moved `Prepared` → `Expired` during
+    /// this process. Seeded by the open-time reconciliation and
+    /// extended by every later expiry. Records already expired in the
+    /// journal at load are not inserted.
+    expiry_notices: HashSet<(String, String)>,
 }
 
 /// The single coordinator for one user/data-directory instance
@@ -461,6 +535,7 @@ pub struct Coordinator {
     engine: Arc<dyn EnginePort>,
     clock: Arc<dyn HandoffClock>,
     lease_ms: i64,
+    require_decision: bool,
 }
 
 impl Coordinator {
@@ -478,12 +553,18 @@ impl Coordinator {
                 records,
                 store,
                 allowed_callers: config.allowed_callers,
+                expiry_notices: HashSet::new(),
             }),
             engine,
             clock,
             lease_ms: i64::try_from(config.lease.as_millis()).unwrap_or(i64::MAX),
+            require_decision: config.require_decision,
         };
         coordinator.recover();
+        // Expiry is reconciled here, not only on a later touch, so a
+        // record that was still Prepared in the journal but is past
+        // its deadline becomes a session notice before anyone asks.
+        coordinator.reconcile_deadlines();
         Ok(coordinator)
     }
 
@@ -516,56 +597,101 @@ impl Coordinator {
     }
 
     /// Materialize a `Prepared` record whose deadline has passed.
-    /// Returns true when a transition was persisted.
+    /// Returns true when a transition was persisted. This is the only
+    /// place a record becomes `Expired`, so the session notice set is
+    /// updated here and nowhere else.
     fn reconcile_expiry(inner: &mut Inner, idx: usize, now: i64) -> Result<bool> {
-        let rec = &inner.records[idx];
-        if rec.state == HandoffState::Prepared
-            && rec.expires_at_ms.map(|e| now >= e).unwrap_or(false)
+        let due = inner.records[idx].state == HandoffState::Prepared
+            && inner.records[idx]
+                .expires_at_ms
+                .map(|expires| now >= expires)
+                .unwrap_or(false);
+        if !due {
+            return Ok(false);
+        }
+        let notice = (
+            inner.records[idx].caller.clone(),
+            inner.records[idx].tx.clone(),
+        );
         {
             let rec = &mut inner.records[idx];
             rec.state = HandoffState::Expired;
             rec.transition_at_ms = now;
             rec.outcome = Some("lease expired before commit".to_string());
-            Self::persist(inner)?;
-            return Ok(true);
         }
-        Ok(false)
+        inner.expiry_notices.insert(notice);
+        Self::persist(inner)?;
+        Ok(true)
+    }
+
+    /// Walk every record and expire those past their deadline. Used at
+    /// open, where a persist failure must not refuse to serve: the
+    /// in-memory transition and its notice remain, and a later
+    /// successful persist writes the journal.
+    fn reconcile_deadlines(&self) {
+        let now = self.clock.now_ms();
+        let mut inner = self.inner.lock().expect("handoff lock poisoned");
+        let len = inner.records.len();
+        for idx in 0..len {
+            let _ = Self::reconcile_expiry(&mut inner, idx, now);
+        }
+    }
+
+    /// Append a recorded Add failure to a recovery detail. The base
+    /// sentence stays stable for callers that only match the prefix.
+    fn detail_with_materialize_error(base: &str, rec: &HandoffRecord) -> String {
+        match rec.materialize_error.as_deref() {
+            Some(err) if !err.is_empty() => format!("{base}: {err}"),
+            _ => base.to_string(),
+        }
     }
 
     /// Complete a durable commitment by establishing its one engine
     /// association. Marker first (a previous Add already landed),
-    /// Add second (exactly once, only when no marker exists).
-    /// Returns true when the association is recorded. Engine failures
-    /// leave the record pending for recovery; they are not errors of
-    /// the commitment itself.
+    /// Add second (exactly once, only when no marker exists). A bound
+    /// decision is applied on that Add. Returns true when the
+    /// association is recorded. An Add failure is written onto the
+    /// record as `materialize_error` and persisted; it is not an error
+    /// of the commitment itself. Success clears that field.
     fn materialize(&self, inner: &mut Inner, idx: usize) -> bool {
         if inner.records[idx].engine_task_id.is_some() {
             inner.records[idx].association_pending = false;
+            inner.records[idx].materialize_error = None;
             let _ = Self::persist(inner);
             return true;
         }
-        let (tx, intent) = {
+        let (tx, intent, decision) = {
             let rec = &inner.records[idx];
-            (rec.tx.clone(), rec.intent.clone())
+            (rec.tx.clone(), rec.intent.clone(), rec.decision.clone())
         };
         let found = self.engine.find_handoff_task(&tx).unwrap_or(None);
-        let id = match found {
-            Some(id) => Some(id),
+        let added = match found {
+            Some(id) => Some(Ok(id)),
             None => match intent {
-                Some(intent) => self.engine.add_handoff_task(&intent, &tx).ok(),
+                Some(intent) => Some(
+                    self.engine
+                        .add_handoff_task(&intent, &tx, decision.as_ref()),
+                ),
                 None => None,
             },
         };
-        match id {
-            Some(id) => {
+        match added {
+            Some(Ok(id)) => {
                 let rec = &mut inner.records[idx];
                 rec.engine_task_id = Some(id);
                 rec.association_pending = false;
+                rec.materialize_error = None;
                 // If this write fails the journal still says pending;
                 // recovery re-finds the marker and rewrites it. The
                 // association itself is already durable in the engine.
                 let _ = Self::persist(inner);
                 true
+            }
+            Some(Err(err)) => {
+                let rec = &mut inner.records[idx];
+                rec.materialize_error = Some(err.to_string());
+                let _ = Self::persist(inner);
+                false
             }
             None => false,
         }
@@ -591,11 +717,19 @@ impl Coordinator {
     /// current state and the original deadline; a replay with a
     /// different intent conflicts without mutation, even after the
     /// transaction terminated.
+    ///
+    /// `browser_cancelled` is the extension's attestation that it
+    /// already cancelled and erased the browser download. On creation
+    /// it sets the disposition to `CancelledForHandoff`. On an
+    /// identical-intent replay of a still-`Prepared` record whose
+    /// disposition is still `Unresolved`, a true attestation upgrades
+    /// that disposition and persists it. It does not renew the lease.
     pub fn prepare(
         &self,
         caller: &str,
         tx: &str,
         mut intent: HandoffIntent,
+        browser_cancelled: bool,
     ) -> Result<HandoffReply> {
         self.check_caller(caller)?;
         Self::check_tx(tx)?;
@@ -614,6 +748,17 @@ impl Coordinator {
                 return Ok(HandoffReply::of_record(HandoffStatus::Conflict, rec)
                     .with_detail("same key, different intent"));
             }
+            // A late attestation can still be bound while the handoff
+            // is prepared and the disposition was never established.
+            // Any other state keeps the disposition already recorded.
+            if browser_cancelled
+                && inner.records[idx].state == HandoffState::Prepared
+                && inner.records[idx].disposition == BrowserDisposition::Unresolved
+            {
+                inner.records[idx].disposition = BrowserDisposition::CancelledForHandoff;
+                Self::persist(&mut inner)?;
+            }
+            let rec = &inner.records[idx];
             return Ok(HandoffReply::of_record(HandoffStatus::of(rec.state), rec));
         }
         let expires_at_ms = now.saturating_add(self.lease_ms);
@@ -626,10 +771,16 @@ impl Coordinator {
             created_at_ms: now,
             expires_at_ms: Some(expires_at_ms),
             transition_at_ms: now,
-            disposition: BrowserDisposition::Unresolved,
+            disposition: if browser_cancelled {
+                BrowserDisposition::CancelledForHandoff
+            } else {
+                BrowserDisposition::Unresolved
+            },
             engine_task_id: None,
             association_pending: false,
             outcome: None,
+            decision: None,
+            materialize_error: None,
         };
         inner.records.push(rec);
         Self::persist(&mut inner)?;
@@ -637,12 +788,25 @@ impl Coordinator {
         Ok(HandoffReply::of_record(HandoffStatus::Prepared, rec))
     }
 
-    /// Freeze §3 `commit`: the commitment is persisted (and fsynced by
-    /// the store) before the engine is touched and before success is
-    /// reported. Materialization then follows the marker protocol in
-    /// the design handoff §4, so a crash anywhere in this operation
-    /// converges to exactly one associated task.
-    pub fn commit(&self, caller: &str, tx: &str, browser_cancelled: bool) -> Result<HandoffReply> {
+    /// Freeze §3 `commit`, amended in 0.3.0: the commitment is persisted
+    /// (and fsynced by the store) before the engine is touched and
+    /// before success is reported. A supplied [`UserDecision`] is
+    /// validated and bound in that same write. Materialization then
+    /// follows the marker protocol in the design handoff §4, so a crash
+    /// anywhere in this operation converges to exactly one associated
+    /// task.
+    ///
+    /// Replay of a `Committed` record with an identical decision, or
+    /// with no decision, returns the existing outcome. A supplied
+    /// decision that differs from the bound one (including supplying
+    /// one when none was bound) conflicts and mutates nothing.
+    pub fn commit(
+        &self,
+        caller: &str,
+        tx: &str,
+        browser_cancelled: bool,
+        decision: Option<UserDecision>,
+    ) -> Result<HandoffReply> {
         self.check_caller(caller)?;
         Self::check_tx(tx)?;
         let now = self.clock.now_ms();
@@ -658,37 +822,90 @@ impl Coordinator {
                 Ok(HandoffReply::of_record(HandoffStatus::Conflict, rec)
                     .with_detail("commit against an aborted handoff"))
             }
+            HandoffState::Discarded => {
+                let rec = &inner.records[idx];
+                Ok(HandoffReply::of_record(HandoffStatus::Conflict, rec)
+                    .with_detail("commit against a discarded handoff"))
+            }
             HandoffState::Expired => {
                 let rec = &inner.records[idx];
                 Ok(
-                    HandoffReply::of_record(HandoffStatus::RecoveryRequired, rec)
-                        .with_detail("lease expired before commit; no automatic start"),
+                    HandoffReply::of_record(HandoffStatus::RecoveryRequired, rec).with_detail(
+                        Self::detail_with_materialize_error(
+                            "lease expired before commit; no automatic start",
+                            rec,
+                        ),
+                    ),
                 )
             }
             HandoffState::Committed => {
+                if let Some(mut supplied) = decision {
+                    let matches = supplied.validate_and_normalize().is_ok()
+                        && inner.records[idx].decision.as_ref() == Some(&supplied);
+                    if !matches {
+                        let rec = &inner.records[idx];
+                        return Ok(HandoffReply::of_record(HandoffStatus::Conflict, rec)
+                            .with_detail(
+                                "commit replay decision differs from the bound decision",
+                            ));
+                    }
+                }
                 if inner.records[idx].association_pending {
                     self.materialize(&mut inner, idx);
                 }
                 let rec = &inner.records[idx];
                 if rec.association_pending {
                     Ok(
-                        HandoffReply::of_record(HandoffStatus::RecoveryRequired, rec)
-                            .with_detail("commitment durable; association pending"),
+                        HandoffReply::of_record(HandoffStatus::RecoveryRequired, rec).with_detail(
+                            Self::detail_with_materialize_error(
+                                "commitment durable; association pending",
+                                rec,
+                            ),
+                        ),
                     )
                 } else {
                     Ok(HandoffReply::of_record(HandoffStatus::Committed, rec))
                 }
             }
             HandoffState::Prepared => {
+                // Dialog mode does not treat the commit flag as proof.
+                // The disposition has to have been attested at prepare.
+                if self.require_decision
+                    && inner.records[idx].disposition != BrowserDisposition::CancelledForHandoff
+                {
+                    let rec = &inner.records[idx];
+                    return Ok(
+                        HandoffReply::of_record(HandoffStatus::Conflict, rec).with_detail(
+                            "commit requires a prepare-time browser-cancelled attestation",
+                        ),
+                    );
+                }
                 if !browser_cancelled {
                     let rec = &inner.records[idx];
                     return Ok(HandoffReply::of_record(HandoffStatus::Conflict, rec)
                         .with_detail("commit requires the browser-cancelled confirmation"));
                 }
+                let bound = match decision {
+                    Some(mut decision) => {
+                        if let Err(err) = decision.validate_and_normalize() {
+                            let rec = &inner.records[idx];
+                            return Ok(HandoffReply::of_record(HandoffStatus::Conflict, rec)
+                                .with_detail(err.to_string()));
+                        }
+                        Some(decision)
+                    }
+                    None if self.require_decision => {
+                        let rec = &inner.records[idx];
+                        return Ok(HandoffReply::of_record(HandoffStatus::Conflict, rec)
+                            .with_detail("commit requires a user decision"));
+                    }
+                    None => None,
+                };
                 {
                     let rec = &mut inner.records[idx];
                     rec.state = HandoffState::Committed;
                     rec.disposition = BrowserDisposition::CancelledForHandoff;
+                    rec.decision = bound;
                     rec.association_pending = true;
                     rec.transition_at_ms = now;
                     rec.outcome = Some("commitment recorded".to_string());
@@ -700,8 +917,12 @@ impl Coordinator {
                 let rec = &inner.records[idx];
                 if rec.association_pending {
                     Ok(
-                        HandoffReply::of_record(HandoffStatus::RecoveryRequired, rec)
-                            .with_detail("commitment durable; association pending"),
+                        HandoffReply::of_record(HandoffStatus::RecoveryRequired, rec).with_detail(
+                            Self::detail_with_materialize_error(
+                                "commitment durable; association pending",
+                                rec,
+                            ),
+                        ),
                     )
                 } else {
                     Ok(HandoffReply::of_record(HandoffStatus::Committed, rec))
@@ -740,6 +961,8 @@ impl Coordinator {
                     engine_task_id: None,
                     association_pending: false,
                     outcome: Some("aborted before prepare".to_string()),
+                    decision: None,
+                    materialize_error: None,
                 };
                 inner.records.push(rec);
                 Self::persist(&mut inner)?;
@@ -757,6 +980,10 @@ impl Coordinator {
             HandoffState::Aborted => {
                 let rec = &inner.records[idx];
                 Ok(HandoffReply::of_record(HandoffStatus::Aborted, rec))
+            }
+            HandoffState::Discarded => {
+                let rec = &inner.records[idx];
+                Ok(HandoffReply::of_record(HandoffStatus::Discarded, rec))
             }
             HandoffState::Prepared | HandoffState::Expired => {
                 if !browser_retains {
@@ -781,6 +1008,51 @@ impl Coordinator {
         }
     }
 
+    /// Dialog Cancel (0.3.0): drop a still-prepared handoff. The
+    /// transition is persisted with the same commitment write as
+    /// `commit` before success is reported. Only `Prepared` (after
+    /// expiry reconciliation) may discard. A replay of `Discarded`
+    /// returns the recorded outcome. `Committed` conflicts with no
+    /// mutation. `Aborted` and `Expired` answer that state.
+    /// `abort` stays the browser-retains path and is not used here.
+    pub fn discard(&self, caller: &str, tx: &str) -> Result<HandoffReply> {
+        self.check_caller(caller)?;
+        Self::check_tx(tx)?;
+        let now = self.clock.now_ms();
+        let mut inner = self.inner.lock().expect("handoff lock poisoned");
+        let idx = match Self::find(&inner.records, caller, tx) {
+            Some(idx) => idx,
+            None => return Ok(HandoffReply::bare(HandoffStatus::NotFound, tx)),
+        };
+        Self::reconcile_expiry(&mut inner, idx, now)?;
+        match inner.records[idx].state {
+            HandoffState::Prepared => {
+                {
+                    let rec = &mut inner.records[idx];
+                    rec.state = HandoffState::Discarded;
+                    rec.transition_at_ms = now;
+                    rec.outcome = Some("discarded before commit".to_string());
+                }
+                Self::persist(&mut inner)?;
+                let rec = &inner.records[idx];
+                Ok(HandoffReply::of_record(HandoffStatus::Discarded, rec))
+            }
+            HandoffState::Discarded => {
+                let rec = &inner.records[idx];
+                Ok(HandoffReply::of_record(HandoffStatus::Discarded, rec))
+            }
+            HandoffState::Committed => {
+                let rec = &inner.records[idx];
+                Ok(HandoffReply::of_record(HandoffStatus::Conflict, rec)
+                    .with_detail("discard against a committed handoff"))
+            }
+            HandoffState::Aborted | HandoffState::Expired => {
+                let rec = &inner.records[idx];
+                Ok(HandoffReply::of_record(HandoffStatus::of(rec.state), rec))
+            }
+        }
+    }
+
     /// Freeze §3 `query`: read-only. Never creates, starts, or renews;
     /// expiry is materialized before the read so the answer is the
     /// authoritative current state, not a cached one.
@@ -797,12 +1069,106 @@ impl Coordinator {
         let rec = &inner.records[idx];
         if rec.association_pending {
             return Ok(
-                HandoffReply::of_record(HandoffStatus::RecoveryRequired, rec)
-                    .with_detail("commitment durable; association pending"),
+                HandoffReply::of_record(HandoffStatus::RecoveryRequired, rec).with_detail(
+                    Self::detail_with_materialize_error(
+                        "commitment durable; association pending",
+                        rec,
+                    ),
+                ),
             );
         }
         Ok(HandoffReply::of_record(HandoffStatus::of(rec.state), rec))
     }
+
+    /// Re-run materialization for a committed handoff whose engine
+    /// association has not landed. Answers like `query`: `Committed`
+    /// with `task_ref` once the association is recorded, or
+    /// `RecoveryRequired` carrying the recorded Add error while it is
+    /// still pending. Any other state is reported as it stands. This
+    /// does not renew a lease.
+    pub fn retry_materialize(&self, caller: &str, tx: &str) -> Result<HandoffReply> {
+        self.check_caller(caller)?;
+        Self::check_tx(tx)?;
+        let now = self.clock.now_ms();
+        let mut inner = self.inner.lock().expect("handoff lock poisoned");
+        let idx = match Self::find(&inner.records, caller, tx) {
+            Some(idx) => idx,
+            None => return Ok(HandoffReply::bare(HandoffStatus::NotFound, tx)),
+        };
+        Self::reconcile_expiry(&mut inner, idx, now)?;
+        if inner.records[idx].state == HandoffState::Committed
+            && inner.records[idx].association_pending
+        {
+            self.materialize(&mut inner, idx);
+        }
+        let rec = &inner.records[idx];
+        if rec.association_pending {
+            return Ok(
+                HandoffReply::of_record(HandoffStatus::RecoveryRequired, rec).with_detail(
+                    Self::detail_with_materialize_error(
+                        "commitment durable; association pending",
+                        rec,
+                    ),
+                ),
+            );
+        }
+        Ok(HandoffReply::of_record(HandoffStatus::of(rec.state), rec))
+    }
+
+    /// Live prepared handoffs for `caller`, plus records that expired
+    /// during this coordinator's lifetime (including the open-time
+    /// pass). Records that were already expired in the journal at load
+    /// are not notices. Read-only for the caller: deadlines are
+    /// reconciled, never renewed. Order is preparation time, then
+    /// caller, then transaction id.
+    pub fn discovery(&self, caller: &str) -> Result<Vec<DiscoveryEntry>> {
+        self.check_caller(caller)?;
+        let now = self.clock.now_ms();
+        let mut inner = self.inner.lock().expect("handoff lock poisoned");
+        let len = inner.records.len();
+        for idx in 0..len {
+            Self::reconcile_expiry(&mut inner, idx, now)?;
+        }
+        let mut entries = Vec::new();
+        for rec in &inner.records {
+            if rec.caller != caller {
+                continue;
+            }
+            let noticed = inner
+                .expiry_notices
+                .contains(&(rec.caller.clone(), rec.tx.clone()));
+            let expired_notice = noticed && rec.state == HandoffState::Expired;
+            if rec.state != HandoffState::Prepared && !expired_notice {
+                continue;
+            }
+            entries.push(DiscoveryEntry {
+                caller: rec.caller.clone(),
+                tx: rec.tx.clone(),
+                intent: rec.intent.clone(),
+                created_at_ms: rec.created_at_ms,
+                expires_at_ms: rec.expires_at_ms,
+                expired: expired_notice,
+            });
+        }
+        entries.sort_by(|a, b| {
+            a.created_at_ms
+                .cmp(&b.created_at_ms)
+                .then(a.caller.cmp(&b.caller))
+                .then(a.tx.cmp(&b.tx))
+        });
+        Ok(entries)
+    }
+}
+
+/// One row of [`Coordinator::discovery`]. Not an engine task.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiscoveryEntry {
+    pub caller: String,
+    pub tx: String,
+    pub intent: Option<HandoffIntent>,
+    pub created_at_ms: i64,
+    pub expires_at_ms: Option<i64>,
+    pub expired: bool,
 }
 
 impl Coordinator {

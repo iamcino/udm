@@ -40,7 +40,7 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 
-use crate::handoff::{Coordinator, HandoffIntent};
+use crate::handoff::{Coordinator, HandoffIntent, UserDecision};
 
 /// Maximum framed message size, both directions (design handoff §2).
 pub const MAX_FRAME_BYTES: usize = 1_048_576;
@@ -106,6 +106,40 @@ fn dispatch(coordinator: &Coordinator, caller: &str, req: &Value) -> Value {
             .and_then(Value::as_bool)
             .unwrap_or(false)
     };
+    // Prepare's attestation is a top-level boolean, with the confirm
+    // object accepted as the same default-false fallback commit uses.
+    let attested = |name: &str| -> bool {
+        if let Some(value) = req.get(name).and_then(Value::as_bool) {
+            return value;
+        }
+        bool_field(name)
+    };
+    if op == "discovery" {
+        return match coordinator.discovery(caller) {
+            Ok(entries) => {
+                let entries: Vec<Value> = entries
+                    .into_iter()
+                    .map(|entry| {
+                        json!({
+                            "caller": entry.caller,
+                            "tx": entry.tx,
+                            "intent": entry.intent,
+                            "created_at_ms": entry.created_at_ms,
+                            "expires_at_ms": entry.expires_at_ms,
+                            "expired": entry.expired,
+                        })
+                    })
+                    .collect();
+                json!({
+                    "v": 1,
+                    "op": "discovery",
+                    "status": "ok",
+                    "entries": entries,
+                })
+            }
+            Err(_) => conflict("request rejected"),
+        };
+    }
     let result = match op {
         "prepare" => {
             let intent = req
@@ -113,13 +147,26 @@ fn dispatch(coordinator: &Coordinator, caller: &str, req: &Value) -> Value {
                 .cloned()
                 .and_then(|v| serde_json::from_value::<HandoffIntent>(v).ok());
             match intent {
-                Some(intent) => coordinator.prepare(caller, &tx, intent),
+                Some(intent) => {
+                    coordinator.prepare(caller, &tx, intent, attested("browser_cancelled"))
+                }
                 None => return conflict("invalid intent"),
             }
         }
-        "commit" => coordinator.commit(caller, &tx, bool_field("browser_cancelled")),
+        "commit" => {
+            let decision = match req.get("decision") {
+                None | Some(Value::Null) => None,
+                Some(value) => match serde_json::from_value::<UserDecision>(value.clone()) {
+                    Ok(decision) => Some(decision),
+                    Err(_) => return conflict("invalid decision"),
+                },
+            };
+            coordinator.commit(caller, &tx, bool_field("browser_cancelled"), decision)
+        }
         "abort" => coordinator.abort(caller, &tx, bool_field("browser_retains")),
         "query" => coordinator.query(caller, &tx),
+        "discard" => coordinator.discard(caller, &tx),
+        "retry_materialize" => coordinator.retry_materialize(caller, &tx),
         _ => return conflict("unknown op"),
     };
     match result {

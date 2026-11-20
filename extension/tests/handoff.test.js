@@ -116,11 +116,27 @@ function item(overrides) {
     assert.strictEqual((await p).status, "unavailable");
   });
 
+  await test("client puts browser_cancelled on prepare only when attested", async () => {
+    const port = fakePort();
+    const client = H.createHandoffClient(() => port);
+    const attested = client.prepare("tx-1", { url: "https://a.b/f" }, { browser_cancelled: true });
+    assert.strictEqual(port.sent[0].op, "prepare");
+    assert.strictEqual(port.sent[0].browser_cancelled, true);
+    port._reply({ status: "prepared" });
+    await attested;
+    const plain = client.prepare("tx-2", { url: "https://a.b/g" });
+    assert.strictEqual(port.sent[1].browser_cancelled, undefined);
+    port._reply({ status: "prepared" });
+    await plain;
+  });
+
   // ---- handoff flow ---------------------------------------------------
   function fakeFx(behavior) {
     const calls = [];
+    const pending = new Map();
     return {
       calls,
+      pending,
       cancel: async (id) => (calls.push(["cancel", id]), behavior.cancel),
       erase: async (id) => calls.push(["erase", id]),
       download: async (url) => {
@@ -128,86 +144,243 @@ function item(overrides) {
         if (behavior.downloadFails) throw new Error("browser refused");
         return 99;
       },
-      record: async (e) => calls.push(["record", e.status, e.name]),
+      record: async (e) => calls.push(["record", e.status, e.name, e.task_ref || null]),
+      persist: async (rec) => {
+        calls.push(["persist", rec.stage, rec.tx, rec.intent, rec.task_ref || null]);
+        pending.set(rec.tx, JSON.parse(JSON.stringify(rec)));
+      },
+      clearPending: async (tx) => {
+        calls.push(["clear", tx]);
+        pending.delete(tx);
+      },
+      sleep: async (ms) => {
+        calls.push(["sleep", ms, [...pending.values()].map((rec) => rec.stage)]);
+      },
     };
   }
   function fakeClient(replies) {
     const calls = [];
-    const next = (op) => async (tx) => (calls.push(op), replies[op]);
-    return { calls, prepare: next("prepare"), commit: next("commit"), abort: next("abort"), query: next("query") };
+    const sent = [];
+    const take = (op) => {
+      const spec = replies[op];
+      if (typeof spec === "function") return spec();
+      if (Array.isArray(spec)) return spec.length ? spec.shift() : { status: "unavailable" };
+      return spec;
+    };
+    return {
+      calls,
+      sent,
+      prepare: async (tx, intent, attestation) => {
+        calls.push("prepare");
+        sent.push({
+          op: "prepare",
+          tx,
+          intent,
+          browser_cancelled: !!(attestation && attestation.browser_cancelled),
+        });
+        return take("prepare");
+      },
+      commit: async (tx) => {
+        calls.push("commit");
+        sent.push({ op: "commit", tx });
+        return take("commit");
+      },
+      abort: async (tx) => {
+        calls.push("abort");
+        sent.push({ op: "abort", tx });
+        return take("abort");
+      },
+      query: async (tx) => {
+        calls.push("query");
+        sent.push({ op: "query", tx });
+        return take("query");
+      },
+    };
   }
 
-  await test("flow: happy path cancels first, then hands off exactly once", async () => {
+  function persistBefore(calls, stage) {
+    return calls.find((c) => c[0] === "persist" && c[1] === stage);
+  }
+
+  await test("pending record is persisted before cancel is attempted", async () => {
     const fx = fakeFx({ cancel: true });
     const client = fakeClient({
       prepare: { status: "prepared" },
-      commit: { status: "committed", task_ref: "1001" },
+      query: { status: "committed", task_ref: "1001" },
+    });
+    await H.createHandoffFlow(client, fx).handoff(item());
+    const recorded = persistBefore(fx.calls, "recorded");
+    const cancelAt = fx.calls.findIndex((c) => c[0] === "cancel");
+    assert.ok(recorded, "a recorded-stage pending record must exist");
+    assert.ok(fx.calls.indexOf(recorded) < cancelAt);
+    assert.strictEqual(recorded[3].url, "https://files.example.com/pub/report.pdf");
+    assert.strictEqual(recorded[3].filename_hint, "report.pdf");
+    assert.strictEqual(recorded[3].size_hint, 12345);
+    assert.strictEqual(recorded[3].browser_download_id, "42");
+    assert.strictEqual(recorded[3].dest_dir, null);
+    assert.strictEqual(recorded[3].method, "GET");
+    // The cancel is still the first browser effect (0.2.3).
+    const browser = fx.calls.filter((c) => c[0] === "cancel" || c[0] === "erase" || c[0] === "download");
+    assert.deepStrictEqual(browser[0], ["cancel", 42]);
+  });
+
+  await test("prepare carries browser_cancelled only after cancel and erase are confirmed", async () => {
+    const fx = fakeFx({ cancel: true });
+    const client = fakeClient({
+      prepare: { status: "prepared" },
+      query: { status: "committed", task_ref: "1001" },
     });
     const out = await H.createHandoffFlow(client, fx).handoff(item());
     assert.strictEqual(out, "handed-off");
-    assert.deepStrictEqual(client.calls, ["prepare", "commit"]);
-    // The cancel is the FIRST browser effect (0.2.3): a prompt-parked
-    // download accepts no other effect until it is cancelled.
-    assert.deepStrictEqual(fx.calls[0], ["cancel", 42]);
+    const prep = client.sent.find((s) => s.op === "prepare");
+    assert.strictEqual(prep.browser_cancelled, true);
+    assert.strictEqual(prep.intent.url, "https://files.example.com/pub/report.pdf");
+    const cancelAt = fx.calls.findIndex((c) => c[0] === "cancel");
+    const eraseAt = fx.calls.findIndex((c) => c[0] === "erase");
+    const cancelledAt = fx.calls.findIndex((c) => c[0] === "persist" && c[1] === "cancelled");
+    assert.ok(cancelAt !== -1 && eraseAt > cancelAt && cancelledAt > eraseAt);
+    assert.ok(!client.calls.includes("commit"));
+    assert.ok(!client.calls.includes("abort"));
+
+    const refused = fakeFx({ cancel: false });
+    const refusedClient = fakeClient({ prepare: { status: "prepared" } });
+    const kept = await H.createHandoffFlow(refusedClient, refused).handoff(item());
+    assert.strictEqual(kept, "kept-by-browser");
+    assert.deepStrictEqual(refusedClient.calls, []);
+    assert.ok(persistBefore(refused.calls, "recorded"));
+    assert.ok(!refused.calls.some((c) => c[0] === "download"));
+  });
+
+  async function settleVia(status, reply, expected, taskRef) {
+    const fx = fakeFx({ cancel: true });
+    const client = fakeClient({
+      prepare: { status: "prepared" },
+      query: [{ status: "prepared" }, reply],
+    });
+    const out = await H.createHandoffFlow(client, fx).handoff(item());
+    assert.strictEqual(out, expected);
+    assert.ok(fx.calls.some((c) => c[0] === "sleep" && c[1] === H.POLL_MS));
+    const recorded = fx.calls.find((c) => c[0] === "record" && c[1] === expected);
+    assert.ok(recorded, expected);
+    assert.strictEqual(recorded[3], taskRef);
+    const outcomeAt = fx.calls.findIndex((c) => c[0] === "persist" && c[1] === status);
+    const recordAt = fx.calls.indexOf(recorded);
+    const clearAt = fx.calls.findIndex((c) => c[0] === "clear");
+    assert.ok(outcomeAt !== -1 && outcomeAt < recordAt && recordAt < clearAt);
+    assert.strictEqual(fx.pending.size, 0);
     assert.ok(!fx.calls.some((c) => c[0] === "download"));
-    assert.ok(fx.calls.some((c) => c[0] === "record" && c[1] === "handed-off"));
+    assert.ok(!client.calls.includes("commit"));
+    return { fx, client };
+  }
+
+  await test("waiting loop resolves on a committed reply and records task_ref", async () => {
+    const { fx } = await settleVia("committed", { status: "committed", task_ref: "1001" }, "handed-off", "1001");
+    assert.ok(fx.calls.some((c) => c[0] === "record" && c[1] === "handed-off" && c[2] === "report.pdf"));
+  });
+
+  await test("waiting loop resolves on a discarded reply", async () => {
+    await settleVia("discarded", { status: "discarded" }, "discarded", null);
+  });
+
+  await test("waiting loop resolves on an expired reply", async () => {
+    await settleVia("expired", { status: "expired" }, "expired", null);
+  });
+
+  await test("recovery-required keeps polling and never re-issues", async () => {
+    const fx = fakeFx({ cancel: true });
+    const client = fakeClient({
+      prepare: { status: "prepared" },
+      query: [
+        { status: "recovery-required", state: "committed" },
+        { status: "recovery-required", state: "committed" },
+        { status: "committed", task_ref: "9" },
+      ],
+    });
+    const out = await H.createHandoffFlow(client, fx).handoff(item());
+    assert.strictEqual(out, "handed-off");
+    const sleeps = fx.calls.filter((c) => c[0] === "sleep");
+    assert.deepStrictEqual(
+      sleeps.map((c) => c[1]),
+      [H.RECOVERY_POLL_MS, H.RECOVERY_POLL_MS],
+    );
+    assert.ok(sleeps.every((c) => c[2].includes("recovery-required")));
+    const recoveryRecords = fx.calls.filter((c) => c[0] === "record" && c[1] === "recovery-required");
+    assert.strictEqual(recoveryRecords.length, 1);
+    assert.ok(!fx.calls.some((c) => c[0] === "download"));
+    assert.strictEqual(client.calls.filter((op) => op === "prepare").length, 1);
+    assert.ok(!client.calls.includes("commit"));
+    assert.strictEqual(fx.pending.size, 0);
+  });
+
+  await test("a lost prepare reply is queried before any re-issue", async () => {
+    const fx = fakeFx({ cancel: true });
+    const client = fakeClient({
+      prepare: { status: "unavailable" },
+      query: [{ status: "prepared" }, { status: "discarded" }],
+    });
+    const out = await H.createHandoffFlow(client, fx).handoff(item());
+    assert.strictEqual(out, "discarded");
+    const tx = persistBefore(fx.calls, "recorded")[2];
+    assert.ok(client.sent.filter((s) => s.op === "query").every((s) => s.tx === tx));
+    assert.ok(!fx.calls.some((c) => c[0] === "download"));
+    assert.ok(!client.calls.includes("commit"));
+  });
+
+  await test("prepare conflict is not re-issued", async () => {
+    const fx = fakeFx({ cancel: true });
+    const client = fakeClient({
+      prepare: { status: "conflict" },
+      query: { status: "not-found" },
+    });
+    const out = await H.createHandoffFlow(client, fx).handoff(item());
+    assert.strictEqual(out, "recovery-required");
+    assert.ok(!fx.calls.some((c) => c[0] === "download"));
+    assert.strictEqual(fx.pending.size, 0);
   });
 
   await test("flow: coordinator unavailable re-issues the download in the browser", async () => {
     const fx = fakeFx({ cancel: true });
-    const client = fakeClient({ prepare: { status: "unavailable" } });
+    const client = fakeClient({
+      prepare: { status: "unavailable" },
+      query: { status: "unavailable" },
+    });
     const out = await H.createHandoffFlow(client, fx).handoff(item());
     assert.strictEqual(out, "kept-by-browser");
-    assert.deepStrictEqual(client.calls, ["prepare"]);
-    assert.deepStrictEqual(fx.calls[0], ["cancel", 42]);
+    assert.ok(client.calls.includes("prepare"));
+    assert.ok(client.calls.includes("query"));
+    assert.deepStrictEqual(
+      fx.calls.find((c) => c[0] === "cancel"),
+      ["cancel", 42],
+    );
     assert.ok(fx.calls.some((c) => c[0] === "download" && c[1] === "https://files.example.com/pub/report.pdf"));
     assert.ok(fx.calls.some((c) => c[0] === "record" && c[1] === "kept-by-browser"));
+    assert.strictEqual(fx.calls.filter((c) => c[0] === "download").length, 1);
+    assert.strictEqual(fx.pending.size, 0);
   });
 
   await test("flow: unconfirmed cancel never prepares and loses nothing", async () => {
     const fx = fakeFx({ cancel: false });
-    const client = fakeClient({ prepare: { status: "prepared" }, abort: { status: "aborted" } });
+    const client = fakeClient({ prepare: { status: "prepared" }, query: { status: "prepared" } });
     const out = await H.createHandoffFlow(client, fx).handoff(item());
     assert.strictEqual(out, "kept-by-browser");
     // The browser copy stands (it completed or refused the cancel):
     // prepare is never sent and no re-issue happens.
     assert.deepStrictEqual(client.calls, []);
+    assert.ok(fx.calls.indexOf(persistBefore(fx.calls, "recorded")) < fx.calls.findIndex((c) => c[0] === "cancel"));
     assert.ok(!fx.calls.some((c) => c[0] === "download"));
     assert.ok(
       fx.calls.some((c) => c[0] === "record" && c[1] === "kept-by-browser"),
-      "the kept-by-browser outcome must be recorded"
+      "the kept-by-browser outcome must be recorded",
     );
-  });
-
-  await test("flow: expired commit surfaces recovery-required", async () => {
-    const fx = fakeFx({ cancel: true });
-    const client = fakeClient({
-      prepare: { status: "prepared" },
-      commit: { status: "recovery-required" },
-    });
-    const out = await H.createHandoffFlow(client, fx).handoff(item());
-    assert.strictEqual(out, "recovery-required");
-    assert.deepStrictEqual(client.calls, ["prepare", "commit"]);
-    assert.ok(!fx.calls.some((c) => c[0] === "download"));
-  });
-
-  await test("flow: refused commit aborts the intent and re-issues", async () => {
-    const fx = fakeFx({ cancel: true });
-    const client = fakeClient({
-      prepare: { status: "prepared" },
-      commit: { status: "unavailable" },
-      abort: { status: "aborted" },
-    });
-    const out = await H.createHandoffFlow(client, fx).handoff(item());
-    assert.strictEqual(out, "kept-by-browser");
-    assert.deepStrictEqual(client.calls, ["prepare", "commit", "abort"]);
-    assert.ok(fx.calls.some((c) => c[0] === "download"));
-    assert.ok(fx.calls.some((c) => c[0] === "record" && c[1] === "kept-by-browser"));
+    assert.strictEqual(fx.pending.size, 0);
   });
 
   await test("flow: failed re-issue surfaces recovery-required with the URL", async () => {
     const fx = fakeFx({ cancel: true, downloadFails: true });
-    const client = fakeClient({ prepare: { status: "unavailable" } });
+    const client = fakeClient({
+      prepare: { status: "unavailable" },
+      query: { status: "unavailable" },
+    });
     const out = await H.createHandoffFlow(client, fx).handoff(item());
     assert.strictEqual(out, "kept-by-browser");
     assert.ok(
@@ -216,6 +389,54 @@ function item(overrides) {
       ),
       "a download that could not be re-issued must be surfaced, never dropped",
     );
+    assert.strictEqual(fx.calls.filter((c) => c[0] === "download").length, 1);
+  });
+
+  await test("restart with a prepared record resumes by query with the same tx", async () => {
+    const fx = fakeFx({ cancel: true });
+    const client = fakeClient({
+      query: [{ status: "prepared" }, { status: "committed", task_ref: "55" }],
+      prepare: { status: "prepared" },
+    });
+    const intent = H.buildIntent(item());
+    const out = await H.createHandoffFlow(client, fx).resume({
+      tx: "tx-same",
+      stage: "prepared",
+      intent,
+    });
+    assert.strictEqual(out, "handed-off");
+    assert.deepStrictEqual(
+      client.sent.map((s) => [s.op, s.tx]),
+      [
+        ["query", "tx-same"],
+        ["query", "tx-same"],
+      ],
+    );
+    assert.ok(fx.calls.some((c) => c[0] === "sleep" && c[1] === H.POLL_MS));
+    assert.ok(!fx.calls.some((c) => c[0] === "cancel" || c[0] === "erase" || c[0] === "download"));
+    assert.ok(!client.calls.includes("prepare"));
+    assert.ok(!client.calls.includes("commit"));
+    assert.ok(fx.calls.some((c) => c[0] === "record" && c[1] === "handed-off" && c[3] === "55"));
+    assert.strictEqual(fx.pending.size, 0);
+  });
+
+  await test("restart at cancelled prepares the same tx and does not cancel again", async () => {
+    const fx = fakeFx({ cancel: true });
+    const client = fakeClient({
+      query: [{ status: "not-found" }, { status: "committed", task_ref: "3" }],
+      prepare: { status: "prepared" },
+    });
+    const out = await H.createHandoffFlow(client, fx).resume({
+      tx: "tx-c",
+      stage: "cancelled",
+      intent: H.buildIntent(item()),
+    });
+    assert.strictEqual(out, "handed-off");
+    assert.ok(!fx.calls.some((c) => c[0] === "cancel" || c[0] === "erase" || c[0] === "download"));
+    const prep = client.sent.find((s) => s.op === "prepare");
+    assert.strictEqual(prep.tx, "tx-c");
+    assert.strictEqual(prep.browser_cancelled, true);
+    assert.ok(client.sent.filter((s) => s.op === "query").every((s) => s.tx === "tx-c"));
   });
 
   console.log(`\n${passed} tests passed`);

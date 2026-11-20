@@ -238,6 +238,14 @@ pub(crate) enum Command {
         filename: Option<String>,
     },
     SetSettings(Settings),
+    /// Persist settings and reply with the disk-write result. Unlike
+    /// [`Command::SetSettings`], a failed write does not replace the
+    /// in-memory settings. Quick-add is the caller; other settings
+    /// updates stay on the fire-and-forget command.
+    SaveSettings {
+        settings: Settings,
+        reply: std::sync::mpsc::Sender<Result<()>>,
+    },
     Flush,
     Shutdown,
 }
@@ -1652,6 +1660,27 @@ impl Engine {
         Ok(())
     }
 
+    /// Persist settings and return the disk-write result.
+    ///
+    /// [`update_settings`] returns once the command is queued. A later
+    /// failed write is only logged, and the in-memory settings are still
+    /// replaced. That is what the other settings callers use. Quick-add
+    /// has to show the failure instead of treating the queue as success,
+    /// so this call waits until the store write finishes. A failed write
+    /// leaves the in-memory settings as they were. The wait is the redb
+    /// transaction on the supervisor, not network I/O.
+    pub fn save_settings(&self, settings: Settings) -> Result<()> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.cmd
+            .send(Command::SaveSettings {
+                settings,
+                reply: tx,
+            })
+            .map_err(|_| Error::Other("engine has stopped".to_string()))?;
+        rx.recv()
+            .map_err(|_| Error::Other("engine dropped the settings save".to_string()))?
+    }
+
     /// Force a durable write of all progress.
     pub fn flush(&self) -> Result<()> {
         let _ = self.cmd.send(Command::Flush);
@@ -2050,6 +2079,27 @@ async fn handle_command(state: &Arc<SharedState>, cmd: Command) -> bool {
             *state.settings.write() = settings;
             state.emit(Event::SettingsChanged);
             admit_queued(state);
+        }
+        Command::SaveSettings {
+            mut settings,
+            reply,
+        } => {
+            settings.sanitize();
+            match state.store.save_settings(&settings) {
+                Ok(()) => {
+                    if let Err(e) = state.net.update_settings(&settings) {
+                        state.log(LogLevel::Warn, format!("settings applied partially: {e}"));
+                    }
+                    *state.settings.write() = settings;
+                    state.emit(Event::SettingsChanged);
+                    admit_queued(state);
+                    let _ = reply.send(Ok(()));
+                }
+                Err(error) => {
+                    state.log(LogLevel::Error, format!("cannot save settings: {error}"));
+                    let _ = reply.send(Err(error));
+                }
+            }
         }
         Command::Flush => state.flush_all(),
         Command::Shutdown => return true,
