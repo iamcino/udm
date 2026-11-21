@@ -2,6 +2,14 @@
 
 All notable changes to UDM are listed here. Vietnamese: [CHANGELOG.vi.md](CHANGELOG.vi.md).
 
+## 0.3.2
+
+- **Sidebar, straightened**: the Library and Categories rows now line up in one column instead of drifting toward the middle.
+- **Browser icons, accurate**: the Chrome and Firefox icons in Settings are now the real brand marks.
+- **Download detail window**: the figures (size, progress, speed) stand out from their labels, and the window opens hugging its content instead of leaving a large empty area.
+- **Buttons, aligned**: the icons on Add Download and Clear finished now sit on the same line as their text.
+- **Version info, correct**: the version shown for `udm.exe` in Windows now matches the release (it previously stayed at 0.2.0).
+
 ## 0.3.1
 
 - **Handoff dialog, finished properly**: the browser-download confirmation dialog now sizes to its content, can be resized, and comes to the front when a download arrives.

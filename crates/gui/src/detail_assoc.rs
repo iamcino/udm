@@ -24,9 +24,9 @@ pub const ACTION_UNAVAILABLE: &str = "This action is no longer available.";
 /// Default client size, logical pixels. Min is strictly below max so the
 /// native window stays resizable.
 pub const DETAIL_DEFAULT_LOGICAL_W: f64 = 600.0;
-pub const DETAIL_DEFAULT_LOGICAL_H: f64 = 360.0;
+pub const DETAIL_DEFAULT_LOGICAL_H: f64 = 292.0;
 pub const DETAIL_MIN_LOGICAL_W: f64 = 480.0;
-pub const DETAIL_MIN_LOGICAL_H: f64 = 320.0;
+pub const DETAIL_MIN_LOGICAL_H: f64 = 280.0;
 /// Each window after the first is shifted by this many logical pixels
 /// down and to the right of the centered origin.
 pub const DETAIL_CASCADE_LOGICAL: f64 = 24.0;
@@ -1332,7 +1332,7 @@ mod tests {
         assert_eq!((second.x - first.x, second.y - first.y), (24, 24));
         assert_eq!((third.x - first.x, third.y - first.y), (48, 48));
         assert_eq!(first.inner_width, 600);
-        assert_eq!(first.inner_height, 360);
+        assert_eq!(first.inner_height, 292);
 
         let tight = MonitorSnap {
             work: crate::handoff_dialog::PxRect {
@@ -1348,9 +1348,9 @@ mod tests {
         assert!(far.x >= tight.work.left);
         assert!(far.y >= tight.work.top);
         assert!(far.x + 600 <= tight.work.right);
-        assert!(far.y + 360 <= tight.work.bottom);
+        assert!(far.y + 292 <= tight.work.bottom);
         assert!(far.x > origin.x || far.x + 600 == tight.work.right);
-        assert!(far.y > origin.y || far.y + 360 == tight.work.bottom);
+        assert!(far.y > origin.y || far.y + 292 == tight.work.bottom);
 
         let mut book = Book::default();
         assert_eq!(open_download(&mut book, "chrome", "one"), 0);

@@ -93,11 +93,28 @@ fn embed_windows_resources() {
     // which is the crate root here, not the .rc's directory. Hand them both
     // locations explicitly so embedding works on Windows *and* when cross
     // compiling from Linux/macOS.
+    // The version resource must never carry a hand-written version again:
+    // stamp it from the crate version (driven by the workspace version).
+    let version = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".into());
+    let core = version.split('-').next().unwrap_or("0.0.0").to_string();
+    let mut nums = core.split('.').map(|p| p.parse::<u32>().unwrap_or(0));
+    let (a, b, c) = (
+        nums.next().unwrap_or(0),
+        nums.next().unwrap_or(0),
+        nums.next().unwrap_or(0),
+    );
+    let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
+    let inc = format!(
+        "#define VER_FILEVERSION          {a},{b},{c},0\n#define VER_FILEVERSION_STR      \"{a}.{b}.{c}.0\"\n#define VER_PRODUCTVERSION       {a},{b},{c},0\n#define VER_PRODUCTVERSION_STR   \"{core}\"\n"
+    );
+    std::fs::write(out_dir.join("udm-version.inc"), inc).expect("write version include");
+
     let include_dirs = vec![
         rc.parent()
             .map(std::path::Path::to_path_buf)
             .unwrap_or_default(),
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets"),
+        out_dir,
     ];
 
     // On Windows, windres or rc.exe might be located in toolchains

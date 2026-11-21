@@ -259,8 +259,10 @@ try {
 
     # ------------------------------------------------------------ upload
     Step 'Uploading to the GitLab package registry'
-    # stable paths, so .../-/releases/permalink/latest/downloads/<path> always gets the newest file
-    $stable = @{ $setup = 'udm-setup.exe'; $zip = 'udm-portable.zip' }
+    # stable path for the installer only, so .../-/releases/permalink/latest/downloads/udm-setup.exe always gets the newest file.
+    # The portable zip must keep its versioned name as its direct path: the in-app updater downloads
+    # .../-/releases/v<version>/downloads/udm-<version>-portable.zip and a shortened path 404s there.
+    $stable = @{ $setup = 'udm-setup.exe' }
     $links = @()
     foreach ($f in $files) {
         $url = "$api/packages/generic/udm/$version/$f"

@@ -44,6 +44,8 @@ export global IconPalette {
     out property <color> violet: Theme.dark ? #a78bfa : #7c3aed;
     out property <color> pink: Theme.dark ? #f472b6 : #be185d;
     out property <color> ink: Theme.dark ? #f5f5f7 : #1d1d1f;
+    // Brand white (the Chrome ring): theme-invariant on purpose.
+    out property <color> paper: #ffffff;
 }
 
 export global Icons {
@@ -294,25 +296,31 @@ export global Icons {
             { stroke: "M 15.5 8.2 a 1.15 1.15 0 1 0 2.3 0 a 1.15 1.15 0 1 0 -2.3 0", fill: "", ink: IconPalette.ink },
         ],
     };
-    // Circle, hub, and three spokes (Chrome). Original geometry, not a brand logo.
+        // The Chrome mark: three filled segments around a blue hub with a
+    // white ring, drawn from the logo's own geometry (each segment's
+    // chord is tangent to the hub circle). Fill-only parts, palette inks.
     out property <IconData> chrome: {
         stroke: "",
         fill: "",
         parts: [
-            { stroke: "M 3.5 12 a 8.5 8.5 0 1 0 17 0 a 8.5 8.5 0 1 0 -17 0 M 9 12 a 3 3 0 1 0 6 0 a 3 3 0 1 0 -6 0", fill: "", ink: IconPalette.blue },
-            { stroke: "M 12 9 V 3.5", fill: "", ink: IconPalette.red },
-            { stroke: "M 9.4 13.5 L 4.6 16.3", fill: "", ink: IconPalette.green },
-            { stroke: "M 14.6 13.5 L 19.4 16.3", fill: "", ink: IconPalette.amber },
+            { stroke: "", fill: "M 14.33 20.69 A 9 9 0 0 1 5.64 5.64 L 8.65 13.31 A 3.6 3.6 0 0 0 15.56 12.54 Z", ink: IconPalette.green },
+            { stroke: "", fill: "M 18.36 5.64 A 9 9 0 0 1 9.67 20.69 L 14.81 14.24 A 3.6 3.6 0 0 0 10.69 8.65 Z", ink: IconPalette.amber },
+            { stroke: "", fill: "M 3.31 9.67 A 9 9 0 0 1 20.69 9.67 L 12.54 8.44 A 3.6 3.6 0 0 0 9.76 14.81 Z", ink: IconPalette.red },
+            { stroke: "", fill: "M 7.30 12.00 a 4.7 4.7 0 1 0 9.40 0 a 4.7 4.7 0 1 0 -9.40 0 Z", ink: IconPalette.paper },
+            { stroke: "", fill: "M 8.40 12.00 a 3.6 3.6 0 1 0 7.20 0 a 3.6 3.6 0 1 0 -7.20 0 Z", ink: IconPalette.blue },
         ],
     };
-    // Globe, ear, and tail (Firefox). Original geometry, not a brand logo.
+        // The Firefox mark: the orange fox wrapped around a blue globe with
+    // a violet shade and a cyan light, drawn from the logo's own shapes.
+    // Fill-only parts, palette inks.
     out property <IconData> firefox: {
         stroke: "",
         fill: "",
         parts: [
-            { stroke: "M 8.3 13 a 5.2 5.2 0 1 0 10.4 0 a 5.2 5.2 0 1 0 -10.4 0", fill: "", ink: IconPalette.orange },
-            { stroke: "M 11.4 9.6 L 8.2 3.5 L 13.4 8.4", fill: "", ink: IconPalette.amber },
-            { stroke: "M 9.6 11.2 C 4.8 12.4 5 18.2 9.4 19.4 C 13.6 20.6 19.2 18.4 18.4 14.2", fill: "", ink: IconPalette.violet },
+            { stroke: "", fill: "M 5.00 12.80 a 7.4 7.4 0 1 0 14.80 0 a 7.4 7.4 0 1 0 -14.80 0 Z", ink: IconPalette.blue },
+            { stroke: "", fill: "M 12.39 20.20 A 7.4 7.4 0 0 0 19.78 13.40 A 5.2 5.2 0 0 0 12.39 20.20 Z", ink: IconPalette.violet },
+            { stroke: "", fill: "M 7.10 8.60 a 1.9 1.9 0 1 0 3.80 0 a 1.9 1.9 0 1 0 -3.80 0 Z", ink: IconPalette.cyan },
+            { stroke: "", fill: "M 18.05 2.55 C 19.0 4.8 19.15 7.2 18.55 9.9 C 18.75 10.6 18.4 11.2 17.91 11.32 A 5.7 5.7 0 1 0 9.99 17.97 C 12.6 19.2 16.2 19.6 18.9 16.7 C 16.8 20.6 13.4 21.6 9.9 21.1 C 6.9 20.6 4.6 19.3 3.6 16.9 C 2.7 14.6 2.75 12.0 3.3 10.3 C 3.15 10.0 3.0 9.8 2.95 9.6 C 3.9 6.9 6.4 4.9 9.6 3.9 C 12.6 3.1 15.2 2.95 16.9 3.35 C 17.5 3.5 17.85 3.1 18.05 2.55 Z", ink: IconPalette.orange },
         ],
     };
 

@@ -2,6 +2,14 @@
 
 Các thay đổi đáng chú ý của UDM. Tiếng Anh: [CHANGELOG.md](CHANGELOG.md).
 
+## 0.3.2
+
+- **Thanh bên đã căn thẳng**: các hàng Library và Categories nay thẳng một cột thay vì lệch dần vào giữa.
+- **Icon trình duyệt chính xác**: icon Chrome và Firefox trong Settings nay là logo thật của hãng.
+- **Cửa sổ chi tiết download**: các thông số (dung lượng, tiến độ, tốc độ) nổi bật hơn nhãn, và cửa sổ mở ra ôm sát nội dung thay vì thừa khoảng trống lớn.
+- **Nút bấm đã căn thẳng**: icon trên các nút Add Download và Clear finished nay ngang hàng với chữ.
+- **Thông tin phiên bản đã đúng**: phiên bản hiển thị của `udm.exe` trong Windows nay khớp với bản phát hành (trước đây đứng yên ở 0.2.0).
+
 ## 0.3.1
 
 - **Hộp thoại chuyển tải, hoàn thiện**: hộp thoại xác nhận lượt tải từ trình duyệt nay vừa nội dung, kéo giãn được, và tự nổi lên trước khi có lượt tải đến.
