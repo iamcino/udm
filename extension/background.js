@@ -1,6 +1,6 @@
 "use strict";
 /*
- * UDM Handoff - background entry point.
+ * Universal Download Manager - background entry point.
  *
  * Chrome MV3 loads this as the service worker (handoff.js is pulled in
  * via importScripts); Firefox MV3 loads handoff.js then this file as
@@ -42,11 +42,50 @@ async function getSettings() {
   };
 }
 
+// Log writes share one chain so a migration and a new attention row cannot
+// clobber each other. This chain is not the pending-journal chain: the
+// pending map's semantics stay on `storageChain`.
+let logChain = Promise.resolve();
+function mutateLog(mutator) {
+  const run = logChain.then(async () => {
+    const got = await api.storage.local.get(LOG_KEY);
+    const stored = got && Object.prototype.hasOwnProperty.call(got, LOG_KEY) ? got[LOG_KEY] : undefined;
+    await mutator(stored);
+  });
+  logChain = run.then(
+    () => {},
+    () => {},
+  );
+  return run;
+}
+
+// Drop handed-off rows already in storage. The key stays, including when
+// the cleaned value is an empty array. A missing or non-array value is
+// left alone.
+function migrateStoredLog() {
+  return mutateLog(async (stored) => {
+    const migrated = H.migrateHandoffLog(stored);
+    if (!migrated || !Array.isArray(stored) || migrated.length === stored.length) return;
+    await api.storage.local.set({ [LOG_KEY]: migrated });
+  });
+}
+
 async function record(entry) {
-  const got = await api.storage.local.get(LOG_KEY);
-  const log = Array.isArray(got[LOG_KEY]) ? got[LOG_KEY] : [];
-  log.unshift(entry);
-  await api.storage.local.set({ [LOG_KEY]: log.slice(0, LOG_CAP) });
+  return mutateLog(async (stored) => {
+    const migrated = H.migrateHandoffLog(stored);
+    const hadArray = Array.isArray(stored);
+    // Success presentation is not stored. An existing array that still
+    // contains those rows is cleaned in place; the key is not removed.
+    if (!entry || H.isSuccessLogStatus(entry.status)) {
+      if (hadArray && migrated && migrated.length !== stored.length) {
+        await api.storage.local.set({ [LOG_KEY]: migrated });
+      }
+      return;
+    }
+    const base = migrated ? migrated.slice() : [];
+    base.unshift(entry);
+    await api.storage.local.set({ [LOG_KEY]: base.slice(0, LOG_CAP) });
+  });
 }
 
 // Pending handoffs, keyed by the extension's own transaction id. One
@@ -252,7 +291,11 @@ api.downloads.onCreated.addListener((item) => {
   })();
 });
 
-// Service-worker startup: reconcile whatever was durable when the
-// worker last stopped. Prepared (and later) records are queried; they
-// are not cancelled and not re-issued.
-resumePending();
+// Service-worker startup: strip handed-off history from the shared log,
+// then reconcile whatever was durable when the worker last stopped.
+// Prepared (and later) records are queried; they are not cancelled and
+// not re-issued. Migration does not read or write the pending journal.
+migrateStoredLog().then(
+  () => resumePending(),
+  () => resumePending(),
+);

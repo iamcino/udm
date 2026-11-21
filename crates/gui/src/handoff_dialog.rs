@@ -16,9 +16,7 @@ use std::time::{Duration, Instant};
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
 use usagi::category::{classify, validate_categories, CategoryRule};
-use usagi::handoff::{
-    DiscoveryEntry, HandoffIntent, HandoffState, HandoffStatus, UserDecision,
-};
+use usagi::handoff::{DiscoveryEntry, HandoffIntent, HandoffState, HandoffStatus, UserDecision};
 use usagi::util::{self, display_path};
 
 use crate::state::Gui;
@@ -63,9 +61,9 @@ pub fn next_live<'a>(
     queue: &'a [DiscoveryEntry],
     skip: &BTreeSet<(String, String)>,
 ) -> Option<&'a DiscoveryEntry> {
-    queue.iter().find(|entry| {
-        !entry.expired && !skip.contains(&(entry.caller.clone(), entry.tx.clone()))
-    })
+    queue
+        .iter()
+        .find(|entry| !entry.expired && !skip.contains(&(entry.caller.clone(), entry.tx.clone())))
 }
 
 /// What a fresh discovery pass says about the row currently on screen.
@@ -148,6 +146,257 @@ pub fn close_request_hides_window(close_completed: bool, successor_open: bool) -
 /// nothing differs. Later paints apply only when an index changed.
 pub fn appearance_pending(applied: bool, differs: bool) -> bool {
     !applied || differs
+}
+
+/// window declares the same numbers. One logical-to-physical conversion
+/// uses the target monitor's scale; refresh never converts again.
+pub const HANDOFF_DEFAULT_LOGICAL_W: f64 = 560.0;
+pub const HANDOFF_DEFAULT_LOGICAL_H: f64 = 460.0;
+pub const HANDOFF_MIN_LOGICAL_W: f64 = 460.0;
+pub const HANDOFF_MIN_LOGICAL_H: f64 = 360.0;
+
+/// What one poll tick does with the dialog. A row that is already open
+/// is only repainted. Opening the next head is the only path that may
+/// place and focus the window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TickAction {
+    OpenNext,
+    Refresh,
+}
+
+pub fn tick_action(has_open_row: bool) -> TickAction {
+    if has_open_row {
+        TickAction::Refresh
+    } else {
+        TickAction::OpenNext
+    }
+}
+
+/// Work area in physical pixels, virtual-screen coordinates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PxRect {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PxSize {
+    pub width: i32,
+    pub height: i32,
+}
+
+/// Where the first presentation looked for a monitor. The hidden main
+/// window is not one of these sources.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MonitorSource {
+    Foreground,
+    Cursor,
+    Primary,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MonitorSnap {
+    pub work: PxRect,
+    pub scale: f64,
+}
+
+/// Foreground monitor, then the cursor's monitor, then the primary work
+/// area. `None` means that source was not available. There is no argument
+/// for the main window: a hidden main window must not become the default.
+pub fn choose_monitor(
+    foreground: Option<MonitorSnap>,
+    cursor: Option<MonitorSnap>,
+    primary: MonitorSnap,
+) -> (MonitorSource, MonitorSnap) {
+    if let Some(snap) = foreground {
+        (MonitorSource::Foreground, snap)
+    } else if let Some(snap) = cursor {
+        (MonitorSource::Cursor, snap)
+    } else {
+        (MonitorSource::Primary, primary)
+    }
+}
+
+/// One logical-to-physical conversion. A non-positive or non-finite scale
+/// is 1, so a failed DPI read still yields a pixel size.
+pub fn logical_to_physical(logical: f64, scale: f64) -> i32 {
+    let scale = if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    };
+    let px = (logical * scale).round();
+    if !px.is_finite() || px <= 0.0 {
+        1
+    } else if px >= i32::MAX as f64 {
+        i32::MAX
+    } else {
+        px as i32
+    }
+}
+
+/// The native client size is usable for frame measurement. Zero means the
+/// window has not been realized yet, and placement waits for the single
+/// continuation instead of focusing on a poll tick.
+pub fn native_size_settled(inner_w: u32, inner_h: u32, outer_w: u32, outer_h: u32) -> bool {
+    inner_w > 0 && inner_h > 0 && outer_w > 0 && outer_h > 0
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OuterPlacement {
+    pub x: i32,
+    pub y: i32,
+    pub outer_width: i32,
+    pub outer_height: i32,
+}
+
+/// Center `outer` in the work area. Shrink it to the work area when that
+/// stays at or above `min_outer`. When the work area is smaller than the
+/// minimum, keep the minimum and pin the origin to the work area's
+/// top-left. The scroll body, not this function, keeps the buttons
+/// reachable inside the window.
+pub fn place_outer(work: PxRect, outer: PxSize, min_outer: PxSize) -> OuterPlacement {
+    let area_w = work.right.saturating_sub(work.left).max(0);
+    let area_h = work.bottom.saturating_sub(work.top).max(0);
+    let width = fit_edge(outer.width, min_outer.width, area_w);
+    let height = fit_edge(outer.height, min_outer.height, area_h);
+    OuterPlacement {
+        x: centered_origin(work.left, area_w, width),
+        y: centered_origin(work.top, area_h, height),
+        outer_width: width,
+        outer_height: height,
+    }
+}
+
+fn fit_edge(outer: i32, min_outer: i32, area: i32) -> i32 {
+    let outer = outer.max(1);
+    let min_outer = min_outer.max(1);
+    if area <= 0 || outer <= area {
+        outer
+    } else if min_outer <= area {
+        area
+    } else {
+        min_outer
+    }
+}
+
+fn centered_origin(origin: i32, area: i32, size: i32) -> i32 {
+    if area <= 0 || size >= area {
+        return origin;
+    }
+    origin.saturating_add((area - size) / 2)
+}
+
+/// Settled native size plus the frame it implies, turned into one
+/// position and one client size for the target monitor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeSize {
+    pub inner_width: u32,
+    pub inner_height: u32,
+    pub outer_width: u32,
+    pub outer_height: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AppliedPlacement {
+    pub x: i32,
+    pub y: i32,
+    pub inner_width: i32,
+    pub inner_height: i32,
+}
+
+pub fn placement_for(target: &MonitorSnap, native: NativeSize) -> AppliedPlacement {
+    let want_w = logical_to_physical(HANDOFF_DEFAULT_LOGICAL_W, target.scale);
+    let want_h = logical_to_physical(HANDOFF_DEFAULT_LOGICAL_H, target.scale);
+    let min_w = logical_to_physical(HANDOFF_MIN_LOGICAL_W, target.scale);
+    let min_h = logical_to_physical(HANDOFF_MIN_LOGICAL_H, target.scale);
+    let frame_w = (native.outer_width as i32)
+        .saturating_sub(native.inner_width as i32)
+        .max(0);
+    let frame_h = (native.outer_height as i32)
+        .saturating_sub(native.inner_height as i32)
+        .max(0);
+    let placed = place_outer(
+        target.work,
+        PxSize {
+            width: want_w.saturating_add(frame_w),
+            height: want_h.saturating_add(frame_h),
+        },
+        PxSize {
+            width: min_w.saturating_add(frame_w),
+            height: min_h.saturating_add(frame_h),
+        },
+    );
+    AppliedPlacement {
+        x: placed.x,
+        y: placed.y,
+        inner_width: (placed.outer_width - frame_w).max(min_w),
+        inner_height: (placed.outer_height - frame_h).max(min_h),
+    }
+}
+
+/// Whether this queue head still needs its one presentation.
+///
+/// `Now` places and calls `focus_window` once. `Later` arms exactly one
+/// continuation for when the native window did not exist yet. `NotNow` is
+/// a refresh, a repeat of the same head, or a continuation that is no
+/// longer the head. Nothing here runs from the poll loop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FirstShow {
+    Now,
+    Later,
+    NotNow,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct FirstShowGate {
+    done: Option<(String, String)>,
+    armed: Option<(String, String)>,
+}
+
+pub(crate) fn decide_first_show(
+    gate: &mut FirstShowGate,
+    caller: &str,
+    tx: &str,
+    native_settled: bool,
+) -> FirstShow {
+    let key = (caller.to_string(), tx.to_string());
+    if gate.done.as_ref() == Some(&key) || gate.armed.as_ref() == Some(&key) {
+        return FirstShow::NotNow;
+    }
+    // A new head replaces a continuation that has not run yet.
+    gate.armed = None;
+    if native_settled {
+        gate.done = Some(key);
+        FirstShow::Now
+    } else {
+        gate.armed = Some(key);
+        FirstShow::Later
+    }
+}
+
+pub(crate) fn decide_continuation(gate: &mut FirstShowGate, caller: &str, tx: &str) -> FirstShow {
+    let key = (caller.to_string(), tx.to_string());
+    if gate.armed.as_ref() != Some(&key) || gate.done.as_ref() == Some(&key) {
+        return FirstShow::NotNow;
+    }
+    gate.armed = None;
+    gate.done = Some(key);
+    FirstShow::Now
+}
+
+pub(crate) fn disarm_continuation(gate: &mut FirstShowGate, caller: &str, tx: &str) {
+    let key = (caller.to_string(), tx.to_string());
+    if gate.armed.as_ref() == Some(&key) {
+        gate.armed = None;
+    }
+}
+
+/// Refresh, countdown, and probe paints. Never `Now` or `Later`.
+pub(crate) fn decide_refresh(_gate: &FirstShowGate) -> FirstShow {
+    FirstShow::NotNow
 }
 
 /// Submit buttons lock once `now` has reached the record deadline.
@@ -347,7 +596,12 @@ impl DialogDraft {
         }
     }
 
-    pub fn decision(&self, root: &Path, rules: &[CategoryRule], start_paused: bool) -> UserDecision {
+    pub fn decision(
+        &self,
+        root: &Path,
+        rules: &[CategoryRule],
+        start_paused: bool,
+    ) -> UserDecision {
         let preview = self.preview(root, rules);
         UserDecision {
             dest_dir: preview.dest_dir,
@@ -542,6 +796,10 @@ pub struct DialogSession {
     /// Stays false until that first paint, including when the indexes
     /// already match the window defaults.
     appearance_applied: bool,
+    /// One place-and-focus per queue head. Refresh does not touch it.
+    first_show: FirstShowGate,
+    /// Monitor this dialog was presented on. The detail window inherits it.
+    presented_monitor: Option<MonitorSnap>,
 }
 
 impl Default for DialogSession {
@@ -572,6 +830,8 @@ impl Default for DialogSession {
             category_sig: String::new(),
             recent_sig: String::new(),
             appearance_applied: false,
+            first_show: FirstShowGate::default(),
+            presented_monitor: None,
         }
     }
 }
@@ -594,8 +854,9 @@ pub fn note_discovery(g: &Gui, entries: &[DiscoveryEntry], failed: &BTreeSet<Str
     ui.queue = queue;
 }
 
-/// Countdown, probe results, and the next dialog. Never focuses a window
-/// that is already showing the same transaction.
+/// Countdown, probe results, and the next dialog. A row that is already
+/// open is only repainted: that path calls [`decide_refresh`], which
+/// cannot place or focus. A new head goes through [`open_front`].
 pub fn tick(g: &Rc<Gui>) {
     if g.handoff.borrow().is_none() {
         return;
@@ -607,16 +868,42 @@ pub fn tick(g: &Rc<Gui>) {
     }
     drain_probe(g);
     refresh_lock(g);
-    if g.handoff_ui.borrow().open.is_none() {
-        open_next(g);
-        return;
+    // The scrutinee borrow lives until the match ends. OpenNext stores
+    // the dialog window with a second borrow of this RefCell; holding
+    // the first one panics at that store (U8: no dialog while running,
+    // and a silent exit when setup presents Prepared rows).
+    let action = tick_action(g.handoff_ui.borrow().open.is_some());
+    match action {
+        TickAction::OpenNext => open_next(g),
+        TickAction::Refresh => {
+            // The result is fixed. Calling it here keeps the refresh
+            // path on the function the tests assert never focuses.
+            let _ = decide_refresh(&g.handoff_ui.borrow().first_show);
+            sync_rules(g);
+            paint(g);
+        }
     }
-    sync_rules(g);
-    paint(g);
 }
 
 fn window(g: &Gui) -> Option<Rc<crate::HandoffWindow>> {
     g.handoff_ui.borrow().window.as_ref().map(Rc::clone)
+}
+
+/// Put the open handoff dialog back in front without moving it.
+///
+/// Showing a detail window can activate that new window. When a successor
+/// dialog was just presented, it has to end in front of the detail window.
+/// This does not count as a new presentation and does not change position.
+pub(crate) fn refocus_open_dialog(g: &Gui) {
+    if g.handoff_ui.borrow().open.is_none() {
+        return;
+    }
+    let Some(window) = window(g) else { return };
+    use slint::winit_030::WinitWindowAccessor;
+    let _ = window.window().with_winit_window(|winit_window| {
+        winit_window.focus_window();
+    });
+    window.invoke_grab_focus();
 }
 
 fn ensure_window(g: &Rc<Gui>) {
@@ -630,13 +917,15 @@ fn ensure_window(g: &Rc<Gui>) {
             return;
         }
     };
-    created.global::<crate::I18n>().on_translate(|key, language| {
-        if language == 1 {
-            crate::i18n::vi(key.as_str()).into()
-        } else {
-            key
-        }
-    });
+    created
+        .global::<crate::I18n>()
+        .on_translate(|key, language| {
+            if language == 1 {
+                crate::i18n::vi(key.as_str()).into()
+            } else {
+                key
+            }
+        });
     let gui = Rc::clone(g);
     created.window().on_close_requested(move || {
         let completed = request_close(&gui);
@@ -662,10 +951,7 @@ fn ensure_window(g: &Rc<Gui>) {
             return;
         }
         let mut ui = gui.handoff_ui.borrow_mut();
-        let id = ui
-            .rules
-            .get(index as usize)
-            .map(|rule| rule.id.clone());
+        let id = ui.rules.get(index as usize).map(|rule| rule.id.clone());
         ui.draft.note_category_pick(id);
     });
     let gui = Rc::clone(g);
@@ -799,9 +1085,400 @@ fn open_front(g: &Rc<Gui>, entry: DiscoveryEntry) {
     }
     paint(g);
     let Some(window) = window(g) else { return };
+    // Monitor choice is taken before show(), so the dialog itself is not
+    // the foreground window we measure, and the hidden main window is not
+    // consulted at all. The detail window inherits this same monitor.
+    let (source, target) = current_presentation_target();
+    g.handoff_ui.borrow_mut().presented_monitor = Some(target);
     let _ = window.show();
-    window.invoke_grab_focus();
+    let caller = entry.caller.clone();
+    let tx = entry.tx.clone();
+    let settled = handoff_native_settled(&window);
+    let decision = {
+        let mut ui = g.handoff_ui.borrow_mut();
+        decide_first_show(&mut ui.first_show, &caller, &tx, settled)
+    };
+    match decision {
+        FirstShow::Now => {
+            if !raise_handoff_window(&window, source, &target) {
+                tracing::error!(
+                    caller,
+                    tx,
+                    "handoff: the native window looked settled but focus_window was not called"
+                );
+            }
+        }
+        FirstShow::Later => {
+            tracing::info!(
+                caller,
+                tx,
+                monitor = ?source,
+                "handoff: native window not ready; one presentation continuation armed"
+            );
+            if !defer_first_show(g, caller.clone(), tx.clone(), source, target) {
+                // Startup refresh runs before the event loop can queue
+                // the continuation. Leave the head unopened so the first
+                // timer tick presents it once, instead of arming a
+                // continuation that will never run.
+                tracing::info!(
+                    caller,
+                    tx,
+                    "handoff: presentation deferred until the event loop can schedule it"
+                );
+                retract_unpresented(g, &caller, &tx);
+            }
+        }
+        FirstShow::NotNow => {}
+    }
     start_probe(g, &url, &entry.caller, &entry.tx);
+}
+
+fn handoff_native_settled(window: &crate::HandoffWindow) -> bool {
+    use slint::winit_030::WinitWindowAccessor;
+    window
+        .window()
+        .with_winit_window(|winit_window| {
+            let inner = winit_window.inner_size();
+            let outer = winit_window.outer_size();
+            native_size_settled(inner.width, inner.height, outer.width, outer.height)
+        })
+        .unwrap_or(false)
+}
+
+/// Place, then `focus_window`, then the existing internal grab-focus.
+/// Returns false when the native window is still missing or zero-sized.
+fn raise_handoff_window(
+    window: &crate::HandoffWindow,
+    source: MonitorSource,
+    target: &MonitorSnap,
+) -> bool {
+    use slint::winit_030::WinitWindowAccessor;
+    let raised = window.window().with_winit_window(|winit_window| {
+        let inner = winit_window.inner_size();
+        let outer = winit_window.outer_size();
+        if !native_size_settled(inner.width, inner.height, outer.width, outer.height) {
+            return false;
+        }
+        let placed = placement_for(
+            target,
+            NativeSize {
+                inner_width: inner.width,
+                inner_height: inner.height,
+                outer_width: outer.width,
+                outer_height: outer.height,
+            },
+        );
+        apply_placement(winit_window, placed);
+        winit_window.focus_window();
+        tracing::info!(
+            monitor = ?source,
+            x = placed.x,
+            y = placed.y,
+            inner_w = placed.inner_width,
+            inner_h = placed.inner_height,
+            scale = target.scale,
+            "handoff: first presentation focused the dialog"
+        );
+        true
+    });
+    if raised == Some(true) {
+        window.invoke_grab_focus();
+        true
+    } else {
+        false
+    }
+}
+
+pub(crate) fn apply_placement(
+    winit_window: &slint::winit_030::winit::window::Window,
+    placed: AppliedPlacement,
+) {
+    use slint::winit_030::winit::dpi::{PhysicalPosition, PhysicalSize};
+    let inner = winit_window.inner_size();
+    let want_w = placed.inner_width.max(1) as u32;
+    let want_h = placed.inner_height.max(1) as u32;
+    if inner.width != want_w || inner.height != want_h {
+        // Physical pixels, already converted once from the logical default
+        // by the target monitor's scale. Windows applies this with
+        // SWP_ASYNCWINDOWPOS; the position below uses the same outer size.
+        let _ = winit_window.request_inner_size(PhysicalSize::new(want_w, want_h));
+    }
+    winit_window.set_outer_position(PhysicalPosition::new(placed.x, placed.y));
+}
+
+/// The one deferred presentation. It is not the 150 ms poll: it waits
+/// until this window's winit handle exists, then focuses at most once,
+/// and only if that queue head is still the open row.
+fn retract_unpresented(g: &Gui, caller: &str, tx: &str) {
+    let window = {
+        let mut ui = g.handoff_ui.borrow_mut();
+        let current = ui
+            .open
+            .as_ref()
+            .is_some_and(|open| open.caller == caller && open.tx == tx);
+        if !current {
+            return;
+        }
+        ui.open = None;
+        disarm_continuation(&mut ui.first_show, caller, tx);
+        ui.window.as_ref().map(Rc::clone)
+    };
+    if let Some(window) = window {
+        let _ = window.hide();
+    }
+}
+
+/// Returns false when the continuation could not be queued. The caller
+/// puts the head back; a later tick presents it.
+fn defer_first_show(
+    g: &Rc<Gui>,
+    caller: String,
+    tx: String,
+    source: MonitorSource,
+    target: MonitorSnap,
+) -> bool {
+    let Some(window) = window(g) else {
+        return false;
+    };
+    let weak = window.as_weak();
+    let gui = Rc::downgrade(g);
+    let caller_log = caller.clone();
+    let tx_log = tx.clone();
+    let scheduled = slint::spawn_local(async move {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        let ready = {
+            use slint::winit_030::WinitWindowAccessor;
+            window.window().winit_window().await.is_ok()
+        };
+        if !ready {
+            tracing::error!(
+                caller,
+                tx,
+                "handoff: presentation continuation lost the native window"
+            );
+            return;
+        }
+        let Some(g) = gui.upgrade() else {
+            return;
+        };
+        let decision = {
+            let mut ui = g.handoff_ui.borrow_mut();
+            let current = ui
+                .open
+                .as_ref()
+                .is_some_and(|open| open.caller == caller && open.tx == tx);
+            if !current {
+                disarm_continuation(&mut ui.first_show, &caller, &tx);
+                FirstShow::NotNow
+            } else {
+                decide_continuation(&mut ui.first_show, &caller, &tx)
+            }
+        };
+        if decision != FirstShow::Now {
+            return;
+        }
+        if !raise_handoff_window(&window, source, &target) {
+            // The handle exists but the size is still zero. Focus once
+            // anyway, using the logical default and an empty frame, and
+            // do not arm another wait.
+            raise_handoff_window_unsettled(&window, source, &target);
+        }
+    });
+    match scheduled {
+        Ok(_) => true,
+        Err(error) => {
+            tracing::error!(
+                %error,
+                caller = caller_log,
+                tx = tx_log,
+                "handoff: the one presentation continuation was not scheduled"
+            );
+            false
+        }
+    }
+}
+
+fn raise_handoff_window_unsettled(
+    window: &crate::HandoffWindow,
+    source: MonitorSource,
+    target: &MonitorSnap,
+) {
+    use slint::winit_030::WinitWindowAccessor;
+    let raised = window.window().with_winit_window(|winit_window| {
+        let placed = placement_for(
+            target,
+            NativeSize {
+                inner_width: 0,
+                inner_height: 0,
+                outer_width: 0,
+                outer_height: 0,
+            },
+        );
+        apply_placement(winit_window, placed);
+        winit_window.focus_window();
+        tracing::info!(
+            monitor = ?source,
+            x = placed.x,
+            y = placed.y,
+            "handoff: first presentation focused before the native size settled"
+        );
+        true
+    });
+    if raised == Some(true) {
+        window.invoke_grab_focus();
+    }
+}
+
+/// Monitor for a first presentation. Order is the foreground window's
+/// monitor, then the cursor, then the primary work area. The main window
+/// is not an input: a tray-hidden main window must not decide the screen.
+pub(crate) fn presentation_target() -> (MonitorSource, MonitorSnap) {
+    current_presentation_target()
+}
+
+fn current_presentation_target() -> (MonitorSource, MonitorSnap) {
+    #[cfg(windows)]
+    {
+        let foreground = foreground_monitor();
+        let cursor = cursor_monitor();
+        let primary = primary_monitor().unwrap_or_else(fallback_primary);
+        return choose_monitor(foreground, cursor, primary);
+    }
+    #[cfg(not(windows))]
+    {
+        choose_monitor(None, None, fallback_primary())
+    }
+}
+
+fn fallback_primary() -> MonitorSnap {
+    MonitorSnap {
+        work: PxRect {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1040,
+        },
+        scale: 1.0,
+    }
+}
+
+#[cfg(windows)]
+fn foreground_monitor() -> Option<MonitorSnap> {
+    use windows_sys::Win32::Graphics::Gdi::{MonitorFromWindow, MONITOR_DEFAULTTONULL};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, IsWindowVisible};
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd == 0 || IsWindowVisible(hwnd) == 0 {
+            return None;
+        }
+        monitor_snap(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONULL))
+    }
+}
+
+#[cfg(windows)]
+fn cursor_monitor() -> Option<MonitorSnap> {
+    use windows_sys::Win32::Foundation::POINT;
+    use windows_sys::Win32::Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTONULL};
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+    unsafe {
+        let mut pt = POINT { x: 0, y: 0 };
+        if GetCursorPos(&mut pt) == 0 {
+            return None;
+        }
+        monitor_snap(MonitorFromPoint(pt, MONITOR_DEFAULTTONULL))
+    }
+}
+
+#[cfg(windows)]
+fn primary_monitor() -> Option<MonitorSnap> {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::Graphics::Gdi::{MonitorFromWindow, MONITOR_DEFAULTTOPRIMARY};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SystemParametersInfoW, SPI_GETWORKAREA};
+    // A null hwnd with DEFAULTTOPRIMARY is the primary monitor, not
+    // whichever monitor happens to contain the origin.
+    let snap = unsafe { monitor_snap(MonitorFromWindow(0, MONITOR_DEFAULTTOPRIMARY)) };
+    if snap.is_some() {
+        return snap;
+    }
+    unsafe {
+        let mut area = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        if SystemParametersInfoW(
+            SPI_GETWORKAREA,
+            0,
+            &mut area as *mut RECT as *mut core::ffi::c_void,
+            0,
+        ) == 0
+        {
+            return None;
+        }
+        let work = PxRect {
+            left: area.left,
+            top: area.top,
+            right: area.right,
+            bottom: area.bottom,
+        };
+        if work.right <= work.left || work.bottom <= work.top {
+            return None;
+        }
+        Some(MonitorSnap { work, scale: 1.0 })
+    }
+}
+
+#[cfg(windows)]
+fn monitor_snap(monitor: isize) -> Option<MonitorSnap> {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITORINFO};
+    use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+    if monitor == 0 {
+        return None;
+    }
+    unsafe {
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            rcMonitor: RECT {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            },
+            rcWork: RECT {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            },
+            dwFlags: 0,
+        };
+        if GetMonitorInfoW(monitor, &mut info) == 0 {
+            return None;
+        }
+        let work = PxRect {
+            left: info.rcWork.left,
+            top: info.rcWork.top,
+            right: info.rcWork.right,
+            bottom: info.rcWork.bottom,
+        };
+        if work.right <= work.left || work.bottom <= work.top {
+            return None;
+        }
+        let mut dpi_x = 0u32;
+        let mut dpi_y = 0u32;
+        let scale = if GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) == 0
+            && dpi_y > 0
+        {
+            dpi_y as f64 / 96.0
+        } else {
+            1.0
+        };
+        Some(MonitorSnap { work, scale })
+    }
 }
 
 fn refresh_lock(g: &Gui) {
@@ -873,10 +1550,9 @@ fn paint(g: &Gui) {
             preview.dest_dir.clone()
         };
         let labels: Vec<String> = {
-            let vietnamese = g
-                .ui
-                .upgrade()
-                .is_some_and(|main| main.get_language_index() == 1);
+            let vietnamese =
+                g.ui.upgrade()
+                    .is_some_and(|main| main.get_language_index() == 1);
             ui.rules
                 .iter()
                 .map(|rule| crate::state::category_item_label(&rule.id, vietnamese))
@@ -900,10 +1576,7 @@ fn paint(g: &Gui) {
         let category_index = category_index(&ui.rules, ui.draft.category_id.as_deref())
             .map(|index| index as i32)
             .unwrap_or(-1);
-        let size = size_line(
-            g,
-            size_view(browser_size, ui.probed),
-        );
+        let size = size_line(g, size_view(browser_size, ui.probed));
         let sanitized = if preview.filename_differs {
             format!("{} {}", tr(g, "Will save as"), preview.filename)
         } else {
@@ -930,9 +1603,21 @@ fn paint(g: &Gui) {
             recent_model,
             filename: ui.draft.filename_raw.clone(),
             quick_open: ui.quick_open,
-            lang: g.ui.upgrade().map(|main| main.get_language_index()).unwrap_or(0),
-            theme: g.ui.upgrade().map(|main| main.get_theme_index()).unwrap_or(0),
-            accent: g.ui.upgrade().map(|main| main.get_accent_index()).unwrap_or(0),
+            lang: g
+                .ui
+                .upgrade()
+                .map(|main| main.get_language_index())
+                .unwrap_or(0),
+            theme: g
+                .ui
+                .upgrade()
+                .map(|main| main.get_theme_index())
+                .unwrap_or(0),
+            accent: g
+                .ui
+                .upgrade()
+                .map(|main| main.get_accent_index())
+                .unwrap_or(0),
         }
     };
     let differs = window.get_language_index() != snap.lang
@@ -1013,8 +1698,7 @@ fn string_model(items: &[String]) -> ModelRc<SharedString> {
 }
 
 fn tr(g: &Gui, key: &str) -> String {
-    g.ui
-        .upgrade()
+    g.ui.upgrade()
         .map(|ui| ui.invoke_translate(key.into()).to_string())
         .unwrap_or_else(|| key.to_string())
 }
@@ -1157,12 +1841,74 @@ fn submit(g: &Rc<Gui>, start_paused: bool) {
             return;
         }
     };
-    if commit_accepted(
-        reply.status,
-        reply.state == Some(HandoffState::Committed),
-    ) {
+    if commit_accepted(reply.status, reply.state == Some(HandoffState::Committed)) {
+        // Only Download opens a detail window. Add (start paused) commits
+        // and returns to the list, the same as a manual Add Download.
+        let open_detail = crate::detail_assoc::opens_detail_window(if start_paused {
+            crate::detail_assoc::DetailSource::HandoffAddPaused
+        } else {
+            crate::detail_assoc::DetailSource::HandoffDownload
+        });
+        let (filename, url, monitor, successor, materialize_error) = if open_detail {
+            let ui = g.handoff_ui.borrow();
+            let url = ui
+                .open
+                .as_ref()
+                .map(|open| open.url.clone())
+                .unwrap_or_default();
+            let mut skip = ui.skip.clone();
+            skip.insert((caller.clone(), tx.clone()));
+            let successor = next_live(&ui.queue, &skip).is_some();
+            let materialize_error = if reply.status == HandoffStatus::RecoveryRequired {
+                reply.detail.clone().unwrap_or_default()
+            } else {
+                String::new()
+            };
+            (
+                decision.filename.clone(),
+                url,
+                ui.presented_monitor,
+                successor,
+                materialize_error,
+            )
+        } else {
+            (String::new(), String::new(), None, false, String::new())
+        };
         remember_dir(g, &decision.dest_dir);
+        // The next handoff, when there is one, is shown and focused here,
+        // before the detail window. The detail window then stays off the
+        // center focus so that dialog keeps the foreground.
         abandon(g);
+        if open_detail {
+            let assoc = crate::detail_assoc::AssocKey {
+                caller: caller.clone(),
+                tx: tx.clone(),
+            };
+            crate::detail_window::open_from_handoff_download(
+                g,
+                assoc.clone(),
+                filename,
+                url,
+                materialize_error,
+                monitor,
+                !successor,
+            );
+            // Read-only query for this pair. Not a second commit, and not
+            // a search of the task list.
+            if let Some(coordinator) = g.handoff.borrow().clone() {
+                match coordinator.query(&caller, &tx) {
+                    Ok(fresh) => crate::detail_window::apply_authoritative(g, &assoc, &fresh),
+                    Err(error) => {
+                        tracing::debug!(
+                            %error,
+                            caller,
+                            tx,
+                            "detail window: association query failed; staying in waiting"
+                        );
+                    }
+                }
+            }
+        }
         return;
     }
     if reply.status == HandoffStatus::Expired || reply.state == Some(HandoffState::Expired) {
@@ -1221,7 +1967,10 @@ fn request_close(g: &Rc<Gui>) -> bool {
         }
     }
     match coordinator.discard(&caller, &tx) {
-        Ok(reply) if reply.status == HandoffStatus::Discarded || reply.status == HandoffStatus::Expired => {
+        Ok(reply)
+            if reply.status == HandoffStatus::Discarded
+                || reply.status == HandoffStatus::Expired =>
+        {
             abandon(g);
             true
         }
@@ -1378,7 +2127,9 @@ fn probe_blocking(
 fn drain_probe(g: &Gui) {
     let pending = {
         let ui = g.handoff_ui.borrow();
-        let Some(rx) = ui.probe_rx.as_ref() else { return };
+        let Some(rx) = ui.probe_rx.as_ref() else {
+            return;
+        };
         let mut pending = Vec::new();
         while let Ok(item) = rx.try_recv() {
             pending.push(item);
@@ -1388,8 +2139,13 @@ fn drain_probe(g: &Gui) {
     let mut dirty = false;
     for item in pending {
         let mut ui = g.handoff_ui.borrow_mut();
-        let current = ui.open.as_ref().map(|open| (open.caller.clone(), open.tx.clone()));
-        if item.generation != ui.probe_generation || current.as_ref().map(|(c, t)| (c.as_str(), t.as_str())) != Some((item.caller.as_str(), item.tx.as_str()))
+        let current = ui
+            .open
+            .as_ref()
+            .map(|open| (open.caller.clone(), open.tx.clone()));
+        if item.generation != ui.probe_generation
+            || current.as_ref().map(|(c, t)| (c.as_str(), t.as_str()))
+                != Some((item.caller.as_str(), item.tx.as_str()))
         {
             continue;
         }
@@ -1470,7 +2226,10 @@ mod tests {
 
     #[test]
     fn closing_the_window_without_a_decision_presents_the_next_record() {
-        let queue = vec![entry("chrome", "a", 1, false), entry("chrome", "b", 2, false)];
+        let queue = vec![
+            entry("chrome", "a", 1, false),
+            entry("chrome", "b", 2, false),
+        ];
         let mut shown = Presentation {
             open: None,
             skip: BTreeSet::new(),
@@ -1535,7 +2294,14 @@ mod tests {
         ]);
         let keys: Vec<_> = rows
             .iter()
-            .map(|row| (row.caller.as_str(), row.tx.as_str(), row.created_at_ms, row.expired))
+            .map(|row| {
+                (
+                    row.caller.as_str(),
+                    row.tx.as_str(),
+                    row.created_at_ms,
+                    row.expired,
+                )
+            })
             .collect();
         assert_eq!(
             keys,
@@ -1548,17 +2314,20 @@ mod tests {
         let skip = BTreeSet::from([("chrome".into(), "a".into())]);
         let next = next_live(&rows, &skip).unwrap();
         assert_eq!((next.caller.as_str(), next.tx.as_str()), ("chrome", "b"));
-        let expired = vec![entry("chrome", "old", 1, true), entry("chrome", "new", 2, false)];
+        let expired = vec![
+            entry("chrome", "old", 1, true),
+            entry("chrome", "new", 2, false),
+        ];
         let queued = queue_from_discovery(&expired);
-        assert!(next_live(&queued, &BTreeSet::new())
-            .unwrap()
-            .tx
-            .eq("new"));
+        assert!(next_live(&queued, &BTreeSet::new()).unwrap().tx.eq("new"));
     }
 
     #[test]
     fn reconcile_locks_expired_and_closes_when_the_row_is_gone() {
-        let queue = vec![entry("chrome", "live", 1, false), entry("chrome", "old", 2, true)];
+        let queue = vec![
+            entry("chrome", "live", 1, false),
+            entry("chrome", "old", 2, true),
+        ];
         assert_eq!(
             reconcile_front("chrome", "live", &queue),
             FrontUpdate::StillLive
@@ -1710,8 +2479,14 @@ mod tests {
         assert_eq!(rules.len(), default_categories().len());
         let ebooks = added.iter().find(|rule| rule.id == "ebooks").unwrap();
         assert_eq!(ebooks.folder, "Ebooks");
-        assert_eq!(ebooks.suffixes, vec![".cbz".to_string(), ".azw3".to_string()]);
-        assert_eq!(added.iter().position(|rule| rule.id == "ebooks"), Some(added.len() - 2));
+        assert_eq!(
+            ebooks.suffixes,
+            vec![".cbz".to_string(), ".azw3".to_string()]
+        );
+        assert_eq!(
+            added.iter().position(|rule| rule.id == "ebooks"),
+            Some(added.len() - 2)
+        );
         assert_eq!(added.last().unwrap().id, "other");
     }
 
@@ -1890,5 +2665,496 @@ mod tests {
             size_view(Some(10), Some(None)).provenance,
             SizeProvenance::FromBrowser
         );
+    }
+
+    fn snap(left: i32, top: i32, right: i32, bottom: i32, scale: f64) -> MonitorSnap {
+        MonitorSnap {
+            work: PxRect {
+                left,
+                top,
+                right,
+                bottom,
+            },
+            scale,
+        }
+    }
+
+    #[test]
+    fn handoff_window_declares_the_resizable_u1_geometry() {
+        let source = include_str!("../ui/handoff.slint");
+        for line in [
+            "preferred-width: 560px;",
+            "preferred-height: 460px;",
+            "min-width: 460px;",
+            "min-height: 360px;",
+            "max-width: 100000px;",
+            "max-height: 100000px;",
+        ] {
+            assert!(source.contains(line), "missing {line}");
+        }
+        // min < max is the resizable flag winit's window_is_resizable reads.
+        assert!(
+            source.contains("Resizable:"),
+            "window definition must record why max above min is the resizable flag"
+        );
+        let scroll = source.find("ScrollView").expect("scrolling body");
+        let download = source.find("root.download()").expect("download button");
+        assert!(
+            scroll < download,
+            "the action row must sit outside the scrolling body"
+        );
+        assert!(
+            !source.contains("HorizontalLayout { vertical-stretch: 1; }"),
+            "the empty stretch that pinned the buttons to the bottom is back"
+        );
+        assert_eq!(HANDOFF_DEFAULT_LOGICAL_W, 560.0);
+        assert_eq!(HANDOFF_DEFAULT_LOGICAL_H, 460.0);
+        assert_eq!(HANDOFF_MIN_LOGICAL_W, 460.0);
+        assert_eq!(HANDOFF_MIN_LOGICAL_H, 360.0);
+    }
+
+    #[test]
+    fn presentation_monitor_skips_a_hidden_main_window() {
+        let foreground = snap(0, 0, 1920, 1040, 1.0);
+        let cursor = snap(-1920, 0, 0, 1080, 1.25);
+        let primary = snap(0, 0, 1280, 720, 1.0);
+        assert_eq!(
+            choose_monitor(Some(foreground), Some(cursor), primary).0,
+            MonitorSource::Foreground
+        );
+        let (source, chosen) = choose_monitor(None, Some(cursor), primary);
+        assert_eq!(source, MonitorSource::Cursor);
+        assert_eq!(chosen.work.left, -1920);
+        let (source, chosen) = choose_monitor(None, None, primary);
+        assert_eq!(source, MonitorSource::Primary);
+        assert_eq!(chosen.work.right, 1280);
+    }
+
+    #[test]
+    fn place_outer_centers_and_clamps_to_the_work_area() {
+        let work = PxRect {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1040,
+        };
+        let placed = place_outer(
+            work,
+            PxSize {
+                width: 560,
+                height: 460,
+            },
+            PxSize {
+                width: 460,
+                height: 360,
+            },
+        );
+        assert_eq!((placed.x, placed.y), (680, 290));
+        assert_eq!((placed.outer_width, placed.outer_height), (560, 460));
+
+        let left = place_outer(
+            PxRect {
+                left: -1920,
+                top: 0,
+                right: 0,
+                bottom: 1080,
+            },
+            PxSize {
+                width: 800,
+                height: 600,
+            },
+            PxSize {
+                width: 400,
+                height: 300,
+            },
+        );
+        assert_eq!((left.x, left.y), (-1360, 240));
+
+        let fitted = place_outer(
+            PxRect {
+                left: 10,
+                top: 20,
+                right: 710,
+                bottom: 520,
+            },
+            PxSize {
+                width: 800,
+                height: 600,
+            },
+            PxSize {
+                width: 400,
+                height: 300,
+            },
+        );
+        assert_eq!((fitted.x, fitted.y), (10, 20));
+        assert_eq!((fitted.outer_width, fitted.outer_height), (700, 500));
+
+        let too_small = place_outer(
+            PxRect {
+                left: 5,
+                top: 6,
+                right: 200,
+                bottom: 180,
+            },
+            PxSize {
+                width: 800,
+                height: 600,
+            },
+            PxSize {
+                width: 500,
+                height: 400,
+            },
+        );
+        assert_eq!((too_small.x, too_small.y), (5, 6));
+        assert_eq!((too_small.outer_width, too_small.outer_height), (500, 400));
+    }
+
+    #[test]
+    fn logical_size_converts_once_per_target_scale() {
+        assert_eq!(logical_to_physical(560.0, 1.0), 560);
+        assert_eq!(logical_to_physical(560.0, 1.5), 840);
+        assert_eq!(logical_to_physical(460.0, 1.25), 575);
+        assert_eq!(logical_to_physical(560.0, 0.0), 560);
+        assert_eq!(logical_to_physical(560.0, f64::NAN), 560);
+        assert!(!native_size_settled(0, 460, 16, 499));
+        assert!(native_size_settled(560, 460, 576, 499));
+
+        let target = snap(0, 0, 1920, 1080, 1.0);
+        let placed = placement_for(
+            &target,
+            NativeSize {
+                inner_width: 560,
+                inner_height: 460,
+                outer_width: 576,
+                outer_height: 499,
+            },
+        );
+        assert_eq!(placed.inner_width, 560);
+        assert_eq!(placed.inner_height, 460);
+        assert_eq!(placed.x, (1920 - 576) / 2);
+        assert_eq!(placed.y, (1080 - 499) / 2);
+
+        let hidpi = snap(0, 0, 2560, 1440, 2.0);
+        let placed = placement_for(
+            &hidpi,
+            NativeSize {
+                inner_width: 800,
+                inner_height: 600,
+                outer_width: 816,
+                outer_height: 639,
+            },
+        );
+        assert_eq!(placed.inner_width, 1120);
+        assert_eq!(placed.inner_height, 920);
+        let outer_w = 1120 + 16;
+        let outer_h = 920 + 39;
+        assert_eq!(placed.x, (2560 - outer_w) / 2);
+        assert_eq!(placed.y, (1440 - outer_h) / 2);
+    }
+
+    #[test]
+    fn first_presentation_focuses_once_and_refresh_does_not() {
+        let mut gate = FirstShowGate::default();
+        let mut focused = 0;
+        assert_eq!(tick_action(false), TickAction::OpenNext);
+        if decide_first_show(&mut gate, "chrome", "tx-1", true) == FirstShow::Now {
+            focused += 1;
+        }
+        assert_eq!(focused, 1);
+        for _ in 0..4 {
+            assert_eq!(tick_action(true), TickAction::Refresh);
+            assert_eq!(decide_refresh(&gate), FirstShow::NotNow);
+            assert_eq!(
+                decide_first_show(&mut gate, "chrome", "tx-1", true),
+                FirstShow::NotNow
+            );
+        }
+        assert_eq!(focused, 1);
+
+        assert_eq!(
+            decide_first_show(&mut gate, "firefox", "tx-2", false),
+            FirstShow::Later
+        );
+        assert_eq!(
+            decide_first_show(&mut gate, "firefox", "tx-2", false),
+            FirstShow::NotNow,
+            "a second poll must not arm another focus"
+        );
+        if decide_continuation(&mut gate, "firefox", "tx-2") == FirstShow::Now {
+            focused += 1;
+        }
+        assert_eq!(
+            decide_continuation(&mut gate, "firefox", "tx-2"),
+            FirstShow::NotNow
+        );
+        assert_eq!(decide_refresh(&gate), FirstShow::NotNow);
+        assert_eq!(focused, 2);
+
+        assert_eq!(
+            decide_first_show(&mut gate, "chrome", "tx-3", true),
+            FirstShow::Now,
+            "a successor head gets its own presentation"
+        );
+    }
+
+    #[test]
+    fn a_superseded_continuation_does_not_focus() {
+        let mut gate = FirstShowGate::default();
+        assert_eq!(
+            decide_first_show(&mut gate, "chrome", "old", false),
+            FirstShow::Later
+        );
+        assert_eq!(
+            decide_first_show(&mut gate, "chrome", "new", true),
+            FirstShow::Now
+        );
+        assert_eq!(
+            decide_continuation(&mut gate, "chrome", "old"),
+            FirstShow::NotNow
+        );
+        disarm_continuation(&mut gate, "chrome", "old");
+        assert_eq!(
+            decide_continuation(&mut gate, "chrome", "new"),
+            FirstShow::NotNow
+        );
+    }
+
+    const CALLER: &str = "chrome:test-ext";
+
+    fn handoff_engine(name: &str) -> (std::path::PathBuf, std::sync::Arc<usagi::Engine>) {
+        let root = std::env::temp_dir().join(format!(
+            "udm-s6-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("downloads")).unwrap();
+        std::fs::create_dir_all(root.join("handoff")).unwrap();
+        std::fs::create_dir_all(root.join("tmp")).unwrap();
+        std::fs::write(
+            root.join("handoff").join("callers.json"),
+            format!(r#"{{"callers":["{CALLER}"]}}"#),
+        )
+        .unwrap();
+        let paths = usagi::Paths {
+            root: root.clone(),
+            db_file: root.join("test.redb"),
+            log_file: root.join("logs").join("test.log"),
+            temp_dir: root.join("tmp"),
+            default_download_dir: root.join("downloads"),
+            portable: true,
+            exe_dir: Some(root.clone()),
+        };
+        let engine = usagi::EngineBuilder::new()
+            .paths(paths)
+            .idle(true)
+            .build()
+            .unwrap();
+        let mut settings = engine.settings();
+        settings.connect_timeout_secs = 3;
+        engine.update_settings(settings).unwrap();
+        (root, std::sync::Arc::new(engine))
+    }
+
+    fn stored_record(
+        tx: &str,
+        state: HandoffState,
+        at: i64,
+        expires: i64,
+        url: &str,
+        size: u64,
+    ) -> usagi::handoff::HandoffRecord {
+        let mut intent = intent(url, None, Some(size));
+        intent.validate_and_normalize().unwrap();
+        usagi::handoff::HandoffRecord {
+            tx: tx.to_string(),
+            caller: CALLER.to_string(),
+            fingerprint: Some(intent.fingerprint()),
+            intent: Some(intent),
+            state,
+            created_at_ms: at,
+            expires_at_ms: Some(expires),
+            transition_at_ms: at,
+            disposition: usagi::handoff::BrowserDisposition::CancelledForHandoff,
+            engine_task_id: None,
+            association_pending: false,
+            outcome: if state == HandoffState::Expired {
+                Some("lease expired before commit".to_string())
+            } else {
+                None
+            },
+            decision: None,
+            materialize_error: None,
+        }
+    }
+
+    fn open_journal(
+        engine: &std::sync::Arc<usagi::Engine>,
+        records: Vec<usagi::handoff::HandoffRecord>,
+    ) -> std::sync::Arc<usagi::handoff::Coordinator> {
+        std::sync::Arc::new(
+            usagi::handoff::Coordinator::open(
+                Box::new(usagi::handoff::MemoryStore::with_records(records)),
+                std::sync::Arc::new(usagi::handoff::EngineAdapter::new(engine.clone())),
+                std::sync::Arc::new(usagi::handoff::SystemClock),
+                usagi::handoff::CoordinatorConfig {
+                    lease: std::time::Duration::from_secs(600),
+                    allowed_callers: vec![CALLER.to_string()],
+                    require_decision: true,
+                },
+            )
+            .unwrap(),
+        )
+    }
+
+    fn discover_and_tick(g: &Rc<Gui>) {
+        reload_discovery(g);
+        tick(g);
+    }
+
+    fn open_tx(g: &Gui) -> Option<String> {
+        g.handoff_ui
+            .borrow()
+            .open
+            .as_ref()
+            .map(|row| row.tx.clone())
+    }
+
+    /// The dialog callbacks own an `Rc<Gui>`, and `Gui` owns the window.
+    /// Drop the window before the test `Rc` so the cycle does not keep a
+    /// component alive into the next test.
+    struct ReleaseDialog<'a>(&'a Gui);
+
+    impl Drop for ReleaseDialog<'_> {
+        fn drop(&mut self) {
+            self.0.handoff_ui.borrow_mut().window = None;
+            crate::state::test_platform::set_event_loop_proxy(true);
+        }
+    }
+
+    /// Prepared rows already in the journal, including two song.mp3 rows
+    /// that share a fingerprint and one prepared row that is already past
+    /// its deadline. Opening the coordinator expires the deadline. The
+    /// first presentable head is the still-live song, not the old row.
+    #[test]
+    fn boot_with_prepared_rows_presents_the_queue_head() {
+        crate::state::test_platform::install();
+        let (root, engine) = handoff_engine("boot");
+        let now = usagi::util::now_millis();
+        let records = vec![
+            stored_record(
+                "song-old",
+                HandoffState::Expired,
+                now - 100_000,
+                now - 90_000,
+                "http://127.0.0.1:1/song.mp3",
+                3_000_011,
+            ),
+            stored_record(
+                "song-due",
+                HandoffState::Prepared,
+                now - 50_000,
+                now - 1_000,
+                "http://127.0.0.1:1/song-due.mp3",
+                3_000_011,
+            ),
+            stored_record(
+                "song-live",
+                HandoffState::Prepared,
+                now - 20_000,
+                now + 600_000,
+                "http://127.0.0.1:1/song.mp3",
+                3_000_011,
+            ),
+            stored_record(
+                "movie-live",
+                HandoffState::Prepared,
+                now - 10_000,
+                now + 600_000,
+                "http://127.0.0.1:1/movie.mp4",
+                4_000_011,
+            ),
+        ];
+        assert_eq!(
+            records[0].fingerprint, records[2].fingerprint,
+            "the expired and prepared song rows share a fingerprint"
+        );
+        assert_ne!(records[2].fingerprint, records[3].fingerprint);
+        let coordinator = open_journal(&engine, records);
+        assert_eq!(
+            coordinator.query(CALLER, "song-due").unwrap().status,
+            HandoffStatus::Expired,
+            "a prepared row past its deadline expires when the coordinator opens"
+        );
+        let discovered = coordinator.discovery(CALLER).unwrap();
+        assert!(
+            discovered.iter().all(|entry| entry.tx != "song-old"),
+            "a row that was already expired in the journal is not rediscovered"
+        );
+        let g = crate::state::gui_for_test(engine, Some(coordinator.clone()));
+        let _release = ReleaseDialog(&g);
+        crate::state::test_platform::set_event_loop_proxy(false);
+        discover_and_tick(&g);
+        assert!(
+            open_tx(&g).is_none(),
+            "when the presentation cannot be scheduled the head stays unopened"
+        );
+        crate::state::test_platform::set_event_loop_proxy(true);
+        discover_and_tick(&g);
+        assert_eq!(open_tx(&g).as_deref(), Some("song-live"));
+        assert!(g.handoff_ui.borrow().window.is_some());
+        let gate = {
+            let ui = g.handoff_ui.borrow();
+            (ui.first_show.done.clone(), ui.first_show.armed.clone())
+        };
+        tick(&g);
+        let gate_after = {
+            let ui = g.handoff_ui.borrow();
+            (ui.first_show.done.clone(), ui.first_show.armed.clone())
+        };
+        assert_eq!(gate, gate_after, "a refresh does not present the head again");
+        assert_eq!(open_tx(&g).as_deref(), Some("song-live"));
+        submit(&g, true);
+        assert_eq!(
+            coordinator.query(CALLER, "song-live").unwrap().status,
+            HandoffStatus::Committed
+        );
+        assert_eq!(open_tx(&g).as_deref(), Some("movie-live"));
+        assert!(request_close(&g));
+        assert_eq!(
+            coordinator.query(CALLER, "movie-live").unwrap().status,
+            HandoffStatus::Discarded
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The app is already up and the queue is empty. A prepare that
+    /// lands in the store is presented on the next discovery pass.
+    #[test]
+    fn live_prepare_presents_the_dialog() {
+        crate::state::test_platform::install();
+        crate::state::test_platform::set_event_loop_proxy(true);
+        let (root, engine) = handoff_engine("live");
+        let coordinator = open_journal(&engine, Vec::new());
+        let g = crate::state::gui_for_test(engine, Some(coordinator.clone()));
+        let _release = ReleaseDialog(&g);
+        discover_and_tick(&g);
+        assert!(open_tx(&g).is_none());
+        assert!(g.handoff_ui.borrow().window.is_none());
+        let mut intent = intent("http://127.0.0.1:1/report.pdf", None, Some(2_000_013));
+        intent.validate_and_normalize().unwrap();
+        let reply = coordinator
+            .prepare(CALLER, "tx-live", intent, true)
+            .unwrap();
+        assert_eq!(reply.status, HandoffStatus::Prepared);
+        discover_and_tick(&g);
+        assert_eq!(open_tx(&g).as_deref(), Some("tx-live"));
+        assert!(g.handoff_ui.borrow().window.is_some());
+        tick(&g);
+        assert_eq!(open_tx(&g).as_deref(), Some("tx-live"));
+        let _ = std::fs::remove_dir_all(root);
     }
 }

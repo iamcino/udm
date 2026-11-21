@@ -5,4 +5,10 @@ import { Theme } from "ui/theme.slint";
 import { Lang } from "ui/lang.slint";
 import { AppearanceGroup, AccentPicker } from "ui/appearance.slint";
 import { TextField, PillButton, Switch, ToggleRow, GroupBox, Row } from "ui/widgets.slint";
-export { Theme, Lang, AppearanceGroup, AccentPicker, TextField, PillButton, Switch, ToggleRow, GroupBox, Row }
+import { Icon, Icons, IconData, IconPart, IconPalette } from "ui/icons.slint";
+import { Gallery } from "ui/gallery.slint";
+// Local UDM extension: Icon, Icons, IconData, IconPart, IconPalette, and the
+// evidence Gallery. ui/index.slint already exports the original icon API with
+// 1.18 syntax; this entry stays the build-mapped 1.6 surface.
+// upstream-files.sha256 is unchanged.
+export { Theme, Lang, AppearanceGroup, AccentPicker, TextField, PillButton, Switch, ToggleRow, GroupBox, Row, Icon, Icons, IconData, IconPart, IconPalette, Gallery }

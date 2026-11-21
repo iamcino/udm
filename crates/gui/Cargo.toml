@@ -17,6 +17,9 @@ slint = { version = "=1.18.1", default-features = false, features = [
     "compat-1-18",
     "backend-winit",
     "renderer-software",
+    # U1: WinitWindowAccessor::with_winit_window and winit focus_window.
+    # The pin stays 1.18.1. This does not add a second focus hack.
+    "unstable-winit-030",
 ] }
 rfd = { version = "0.16.1", default-features = false, features = [
     "xdg-portal",
@@ -36,7 +39,7 @@ url = { workspace = true }
 # Free-space readout for the sidebar storage widget (already in the lock file
 # as transitive dependencies; used only for one FFI call each).
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.52", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_System_Registry", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi"] }
+windows-sys = { version = "0.52", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_System_Registry", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging", "Win32_UI_HiDpi", "Win32_Graphics_Gdi"] }
 # System tray (Phase 2, src/tray.rs). tray-icon pulls muda for the menu.
 # image is used only to decode the embedded tray PNG into RGBA.
 tray-icon = "0.21"

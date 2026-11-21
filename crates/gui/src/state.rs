@@ -23,6 +23,7 @@ use usagi::store::records::TaskState;
 use usagi::updater::{CheckKind, InstallLayout};
 use usagi::util;
 
+use crate::task_actions::{caps_for_state, StripCaps};
 use crate::{AppWindow, CategoryNav, EndpointRow, StatusInfo, TaskDetail, TaskRow};
 
 const REFRESH_MS: u64 = 150;
@@ -146,6 +147,9 @@ pub struct Gui {
     pub handoff: RefCell<Option<Arc<Coordinator>>>,
     /// Dialog queue and the independent confirmation window.
     pub handoff_ui: RefCell<crate::handoff_dialog::DialogSession>,
+    /// Per-download detail windows. Session only: closing one does not
+    /// cancel the task, and a restart does not reopen them.
+    pub detail: RefCell<crate::detail_window::DetailSession>,
     /// Browser integration (items 1-3): the data root the browser
     /// rows read (registry keys, journal, manifests); the browsers
     /// the startup repair could not repoint (their rows show the
@@ -306,6 +310,7 @@ pub fn setup(
         popup_area: RefCell::new(None),
         handoff: RefCell::new(handoff),
         handoff_ui: RefCell::new(crate::handoff_dialog::DialogSession::default()),
+        detail: RefCell::new(crate::detail_window::DetailSession::default()),
         paths: engine.paths().clone(),
         browser_broken: RefCell::new(Vec::new()),
         browser_refresh_at: RefCell::new(Instant::now()),
@@ -467,13 +472,13 @@ pub fn setup(
 
     // ------------------------------------------------------------- callbacks
     let g = gui.clone();
-    ui.on_pause(move |id| act(&g, || g.engine.pause(id as u64)));
+    ui.on_pause(move |id| act_verb(&g, id as u64, TaskVerb::Pause));
     let g = gui.clone();
-    ui.on_resume(move |id| act(&g, || g.engine.resume(id as u64)));
+    ui.on_resume(move |id| act_verb(&g, id as u64, TaskVerb::Resume));
     let g = gui.clone();
-    ui.on_cancel(move |id| act(&g, || g.engine.cancel(id as u64)));
+    ui.on_cancel(move |id| act_verb(&g, id as u64, TaskVerb::Cancel));
     let g = gui.clone();
-    ui.on_retry(move |id| act(&g, || g.engine.retry(id as u64)));
+    ui.on_retry(move |id| act_verb(&g, id as u64, TaskVerb::Retry));
     let g = gui.clone();
     ui.on_remove(move |id| act(&g, || g.engine.remove(id as u64, false)));
     let g = gui.clone();
@@ -483,7 +488,9 @@ pub fn setup(
     let g = gui.clone();
     ui.on_open_file(move |id| open_task_file(&g, id as u64, false));
     let g = gui.clone();
-    ui.on_open_folder(move |id| open_task_file(&g, id as u64, true));
+    ui.on_open_folder(move |id| {
+        let _ = open_task_folder(&g, id as u64);
+    });
 
     // ------------------------------------------------------------- selection / bulk (Commit 1)
     // Selection lives in Rust session state, keyed by the u64 task id.
@@ -604,6 +611,58 @@ pub fn setup(
         toast(&g, format!("removed {handled}, skipped {skipped}"), false);
         refresh(&g);
     });
+    let g = gui.clone();
+    ui.on_strip_pause(move || {
+        if let Some(id) = sole_selected(&g) {
+            act_verb(&g, id, TaskVerb::Pause);
+        }
+    });
+    let g = gui.clone();
+    ui.on_strip_resume(move || {
+        let Some(id) = sole_selected(&g) else { return };
+        // The Resume slot is Retry only when the shared predicate says so.
+        let verb = if g
+            .engine
+            .snapshot()
+            .iter()
+            .any(|task| task.id == id && caps_for_state(task.state).can_retry)
+        {
+            TaskVerb::Retry
+        } else {
+            TaskVerb::Resume
+        };
+        act_verb(&g, id, verb);
+    });
+    let g = gui.clone();
+    ui.on_strip_cancel(move || {
+        if let Some(id) = sole_selected(&g) {
+            act_verb(&g, id, TaskVerb::Cancel);
+        }
+    });
+    let g = gui.clone();
+    ui.on_strip_remove(move || {
+        if let Some(id) = sole_selected(&g) {
+            act(&g, || g.engine.remove(id, false));
+        }
+    });
+    let g = gui.clone();
+    ui.on_strip_open_file(move || {
+        if let Some(id) = sole_selected(&g) {
+            open_task_file(&g, id, false);
+        }
+    });
+    let g = gui.clone();
+    ui.on_strip_open_folder(move || {
+        if let Some(id) = sole_selected(&g) {
+            let _ = open_task_folder(&g, id);
+        }
+    });
+    let g = gui.clone();
+    ui.on_strip_copy_url(move || {
+        if let Some(id) = sole_selected(&g) {
+            copy_task_url(&g, id);
+        }
+    });
 
     let g = gui.clone();
     ui.on_add_dir_edited(move || {
@@ -626,12 +685,23 @@ pub fn setup(
     ui.on_settings_saved(move || save_settings(&g));
     let g = gui.clone();
     ui.on_settings_reset(move || {
-        let defaults = Settings::default();
+        // Defaults must not wipe the sidebar flags from a snapshot that
+        // never contained them. The live engine settings are the source.
+        let defaults = settings_for_reset(&g.engine.settings());
         if let Some(ui) = g.ui.upgrade() {
             push_settings_to_ui(&ui, &defaults, g.update_layout.as_ref());
         }
         act(&g, || g.engine.update_settings(defaults.clone()));
         toast(&g, "defaults restored".into(), false);
+    });
+    let g = gui.clone();
+    ui.on_sidebar_section_toggled(move |section| {
+        let which = if section == 0 {
+            SidebarSection::Library
+        } else {
+            SidebarSection::Categories
+        };
+        apply_sidebar_toggle(&g, which);
     });
 
     // Wiring W2 (design section 2.2): the updater surface. The checkbox
@@ -713,6 +783,15 @@ fn parse_key(key: &str) -> Option<u64> {
         return None;
     }
     key.parse::<u64>().ok()
+}
+
+fn sole_selected(g: &Gui) -> Option<u64> {
+    let selected = g.selected.borrow();
+    if selected.len() == 1 {
+        selected.iter().next().copied()
+    } else {
+        None
+    }
 }
 
 fn ui_set_bulk_remove_armed(g: &Rc<Gui>, armed: bool) {
@@ -872,14 +951,7 @@ fn tray_poll(g: &Rc<Gui>) {
         match action {
             TrayAction::Show => {
                 close_popup(g);
-                if let Some(ui) = g.ui.upgrade() {
-                    let _ = ui.window().show();
-                    ui.window().set_minimized(false);
-                }
-                arm_repaint(g);
-                if let Some(tray) = g.tray.borrow_mut().as_mut() {
-                    tray.set_visible(true);
-                }
+                show_main_window(g);
             }
             TrayAction::ShowPopup => toggle_popup(g),
             TrayAction::ToggleShowHide => {
@@ -895,6 +967,7 @@ fn tray_poll(g: &Rc<Gui>) {
                     } else {
                         let _ = ui.window().show();
                         ui.window().set_minimized(false);
+                        focus_native_window(ui.window());
                     }
                 }
                 arm_repaint(g);
@@ -911,14 +984,7 @@ fn tray_poll(g: &Rc<Gui>) {
                 // Restore the window first (the Show sequence), then
                 // run the check where its outcome can be seen.
                 close_popup(g);
-                if let Some(ui) = g.ui.upgrade() {
-                    let _ = ui.window().show();
-                    ui.window().set_minimized(false);
-                }
-                arm_repaint(g);
-                if let Some(tray) = g.tray.borrow_mut().as_mut() {
-                    tray.set_visible(true);
-                }
+                show_main_window(g);
                 start_update_check(g);
             }
             TrayAction::Exit => {
@@ -952,11 +1018,35 @@ fn active_task_rows(g: &Rc<Gui>) -> Vec<TaskRow> {
 
 fn show_main_window(g: &Rc<Gui>) {
     if let Some(ui) = g.ui.upgrade() {
-        let _ = ui.window().show();
+        let next = crate::tray::after_show(crate::tray::ShownWindow {
+            visible: ui.window().is_visible(),
+            minimized: ui.window().is_minimized(),
+        });
+        // after_show never hides and never asks for a second window.
+        if next.visible {
+            let _ = ui.window().show();
+            ui.window().set_minimized(next.minimized);
+            focus_native_window(ui.window());
+        }
     }
     arm_repaint(g);
     if let Some(tray) = g.tray.borrow_mut().as_mut() {
         tray.set_visible(true);
+    }
+}
+
+/// Native raise for a window this process already owns. winit's
+/// `focus_window` is the same call the handoff dialog uses (Alt +
+/// SetForegroundWindow inside winit). No second activation hack.
+fn focus_native_window(window: &slint::Window) {
+    use slint::winit_030::WinitWindowAccessor;
+    if window
+        .with_winit_window(|winit_window| {
+            winit_window.focus_window();
+        })
+        .is_none()
+    {
+        tracing::debug!("native window was not realized; focus_window was not called");
     }
 }
 
@@ -989,13 +1079,13 @@ fn open_popup(g: &Rc<Gui>) {
         let gw = Rc::downgrade(g);
         pop.on_pause_row(move |id| {
             if let Some(g) = gw.upgrade() {
-                act(&g, || g.engine.pause(id as u64));
+                act_verb(&g, id as u64, TaskVerb::Pause);
             }
         });
         let gw = Rc::downgrade(g);
         pop.on_resume_row(move |id| {
             if let Some(g) = gw.upgrade() {
-                act(&g, || g.engine.resume(id as u64));
+                act_verb(&g, id as u64, TaskVerb::Resume);
             }
         });
         *g.popup.borrow_mut() = Some(pop);
@@ -1158,11 +1248,52 @@ fn elide_middle(name: &str, max_chars: usize) -> String {
     format!("{start}\u{2026}{end}")
 }
 
+pub(crate) fn refresh_ui(g: &Rc<Gui>) {
+    refresh(g);
+}
+
+pub(crate) fn show_toast(g: &Rc<Gui>, message: String, is_error: bool) {
+    toast(g, message, is_error);
+}
+
 fn act(g: &Rc<Gui>, f: impl FnOnce() -> usagi::error::Result<()>) {
     match f() {
         Ok(()) => {}
         Err(e) => toast(g, e.to_string(), true),
     }
+    refresh(g);
+}
+
+/// Pause, resume, cancel, or retry for one task. The row, the toolbar,
+/// the tray popup, and the detail window all call this. Bulk pause and
+/// resume keep their own skip counts and do not come through here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TaskVerb {
+    Pause,
+    Resume,
+    Cancel,
+    Retry,
+}
+
+pub(crate) fn run_task_verb(g: &Rc<Gui>, id: u64, verb: TaskVerb) -> Result<(), String> {
+    let result = match verb {
+        TaskVerb::Pause => g.engine.pause(id),
+        TaskVerb::Resume => g.engine.resume(id),
+        TaskVerb::Cancel => g.engine.cancel(id),
+        TaskVerb::Retry => g.engine.retry(id),
+    };
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let message = error.to_string();
+            toast(g, message.clone(), true);
+            Err(message)
+        }
+    }
+}
+
+fn act_verb(g: &Rc<Gui>, id: u64, verb: TaskVerb) {
+    let _ = run_task_verb(g, id, verb);
     refresh(g);
 }
 
@@ -1303,6 +1434,14 @@ fn builtin_category_label(id: &str) -> Option<&'static str> {
         "other" => Some("Other"),
         _ => None,
     }
+}
+
+pub(crate) fn category_label_for(
+    filename: &str,
+    rules: &[CategoryRule],
+    vietnamese: bool,
+) -> String {
+    category_item_label(&category_bucket(filename, rules), vietnamese)
 }
 
 pub(crate) fn category_item_label(id: &str, vietnamese: bool) -> String {
@@ -1536,6 +1675,7 @@ fn refresh(g: &Rc<Gui>) {
         .retain(|id| visible_ids.contains(id));
     let selected = g.selected.borrow().clone();
     ui.set_selected_count(selected.len() as i32);
+    publish_strip(&ui, &snapshots, &selected);
     let mut rows: Vec<TaskRow> = visible
         .iter()
         .map(|s| row_from(s, ui.get_language_index() == 1, selected.contains(&s.id)))
@@ -1684,6 +1824,10 @@ fn refresh(g: &Rc<Gui>) {
             g.endpoints.set_vec(rows);
         }
     }
+
+    // Detail windows share this snapshot. A list filter does not hide them,
+    // and this call does not move or focus them.
+    crate::detail_window::sync(g, &snapshots);
 }
 
 /// Row title: the resolved filename once known, else the best guess from the
@@ -1956,7 +2100,79 @@ fn detail_from(s: &TaskSnapshot, vietnamese: bool) -> TaskDetail {
         checksum_verified,
         can_open_file: s.state == TaskState::Completed,
         can_open_folder: matches!(s.state, TaskState::Completed | TaskState::Paused),
+        accept_ranges: s.accept_ranges,
+        ranges_observed: s.ranges_observed,
     }
+}
+
+/// Toolbar strip after the selection rules. Empty selection disables every
+/// task action. One real task uses that task's predicates, and the Resume
+/// slot becomes Retry for a single Failed task. Several real tasks enable
+/// Pause, Resume, or Remove only when every selected task accepts that
+/// action; Cancel, Open, Folder, and Copy stay off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct StripEnablement {
+    resume: bool,
+    retry: bool,
+    pause: bool,
+    cancel: bool,
+    remove: bool,
+    open_file: bool,
+    open_folder: bool,
+    copy_url: bool,
+}
+
+fn strip_enablement(tasks: &[StripCaps]) -> StripEnablement {
+    let off = StripEnablement {
+        resume: false,
+        retry: false,
+        pause: false,
+        cancel: false,
+        remove: false,
+        open_file: false,
+        open_folder: false,
+        copy_url: false,
+    };
+    match tasks {
+        [] => off,
+        [task] => StripEnablement {
+            resume: task.can_resume || task.can_retry,
+            retry: task.can_retry,
+            pause: task.can_pause,
+            cancel: task.can_cancel,
+            remove: task.can_remove,
+            open_file: task.can_open_file,
+            open_folder: task.can_open_folder,
+            copy_url: task.can_copy,
+        },
+        many => StripEnablement {
+            resume: many.iter().all(|task| task.can_resume),
+            retry: false,
+            pause: many.iter().all(|task| task.can_pause),
+            cancel: false,
+            remove: many.iter().all(|task| task.can_remove),
+            open_file: false,
+            open_folder: false,
+            copy_url: false,
+        },
+    }
+}
+
+fn publish_strip(ui: &AppWindow, snapshots: &[TaskSnapshot], selected: &BTreeSet<u64>) {
+    let caps: Vec<StripCaps> = snapshots
+        .iter()
+        .filter(|task| selected.contains(&task.id))
+        .map(|task| caps_for_state(task.state))
+        .collect();
+    let enable = strip_enablement(&caps);
+    ui.set_can_strip_resume(enable.resume);
+    ui.set_can_strip_pause(enable.pause);
+    ui.set_can_strip_cancel(enable.cancel);
+    ui.set_can_strip_remove(enable.remove);
+    ui.set_can_strip_open(enable.open_file);
+    ui.set_can_strip_folder(enable.open_folder);
+    ui.set_can_strip_copy(enable.copy_url);
+    ui.set_can_strip_retry(enable.retry);
 }
 
 fn row_from(s: &TaskSnapshot, vietnamese: bool, selected: bool) -> TaskRow {
@@ -2003,6 +2219,7 @@ fn row_from(s: &TaskSnapshot, vietnamese: bool, selected: bool) -> TaskRow {
     };
 
     let name = display_name(s);
+    let caps = caps_for_state(s.state);
     TaskRow {
         id: s.id as f32,
         key: SharedString::from(s.id.to_string()),
@@ -2033,19 +2250,13 @@ fn row_from(s: &TaskSnapshot, vietnamese: bool, selected: bool) -> TaskRow {
         error_text: SharedString::from(s.error.clone().unwrap_or_default()),
         path_text: SharedString::from(s.final_path.clone()),
         created_text: SharedString::from(util::format_timestamp(s.created_at)),
-        can_pause: matches!(
-            s.state,
-            TaskState::Queued | TaskState::Probing | TaskState::Downloading | TaskState::Verifying
-        ),
-        can_resume: matches!(s.state, TaskState::Paused | TaskState::Canceled),
-        can_cancel: matches!(
-            s.state,
-            TaskState::Queued | TaskState::Probing | TaskState::Downloading | TaskState::Verifying
-        ),
-        can_retry: s.state == TaskState::Failed,
-        can_open_file: s.state == TaskState::Completed,
-        can_open_folder: matches!(s.state, TaskState::Completed | TaskState::Paused),
-        can_remove: true,
+        can_pause: caps.can_pause,
+        can_resume: caps.can_resume,
+        can_cancel: caps.can_cancel,
+        can_retry: caps.can_retry,
+        can_open_file: caps.can_open_file,
+        can_open_folder: caps.can_open_folder,
+        can_remove: caps.can_remove,
         can_dismiss: false,
         hash_text: SharedString::from(hash),
         glyph: SharedString::from(glyph_for(&name)),
@@ -2225,6 +2436,8 @@ fn disk_stats(_path: &std::path::Path) -> (u64, u64) {
 // ------------------------------------------------------------------ actions
 
 fn submit_add(g: &Rc<Gui>) {
+    // Manual Add Download does not open a detail window. The only opener
+    // is the handoff dialog's Download action (`DetailSource::HandoffDownload`).
     let Some(ui) = g.ui.upgrade() else { return };
     let urls = ui.get_add_urls().to_string();
     if !urls
@@ -2339,6 +2552,86 @@ fn update_add_preview(g: &Rc<Gui>) {
     ui.set_add_preview(SharedString::from(preview));
 }
 
+/// Which sidebar heading the user toggled. General is not collapsible.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SidebarSection {
+    Library,
+    Categories,
+}
+
+/// The two flags the sidebar renders. Kept as a pair so a failed save
+/// restores both, not only the one the click changed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SidebarFlags {
+    library: bool,
+    categories: bool,
+}
+
+fn sidebar_flags(settings: &Settings) -> SidebarFlags {
+    SidebarFlags {
+        library: settings.sidebar_library_collapsed,
+        categories: settings.sidebar_categories_collapsed,
+    }
+}
+
+fn copy_sidebar_flags(from: &Settings, to: &mut Settings) {
+    to.sidebar_library_collapsed = from.sidebar_library_collapsed;
+    to.sidebar_categories_collapsed = from.sidebar_categories_collapsed;
+}
+
+/// Restore-defaults payload. Every other field returns to `Settings::default`;
+/// the collapse flags stay at whatever the engine currently has stored.
+fn settings_for_reset(live: &Settings) -> Settings {
+    let mut defaults = Settings::default();
+    copy_sidebar_flags(live, &mut defaults);
+    defaults
+}
+
+/// One heading click, applied to a copy of the live settings. Other fields,
+/// including the other section's flag, are unchanged.
+fn toggled_sidebar(current: &Settings, section: SidebarSection) -> Settings {
+    let mut next = current.clone();
+    match section {
+        SidebarSection::Library => {
+            next.sidebar_library_collapsed = !current.sidebar_library_collapsed;
+        }
+        SidebarSection::Categories => {
+            next.sidebar_categories_collapsed = !current.sidebar_categories_collapsed;
+        }
+    }
+    next
+}
+
+/// Flags the sidebar must show after an acknowledged save. `Err` means the
+/// disk write failed, so the pre-click snapshot wins.
+fn sidebar_after_save(before: SidebarFlags, saved: Result<SidebarFlags, ()>) -> SidebarFlags {
+    match saved {
+        Ok(flags) => flags,
+        Err(()) => before,
+    }
+}
+
+/// Persist one heading toggle through `Engine::save_settings` and paint the
+/// sidebar from the result. A failed write toasts the error and puts the
+/// previous flags back; the in-memory settings are left untouched by the
+/// engine on that path.
+fn apply_sidebar_toggle(g: &Rc<Gui>, section: SidebarSection) {
+    let Some(ui) = g.ui.upgrade() else { return };
+    let before_settings = g.engine.settings();
+    let before = sidebar_flags(&before_settings);
+    let next = toggled_sidebar(&before_settings, section);
+    let shown = match g.engine.save_settings(next) {
+        Ok(()) => sidebar_after_save(before, Ok(sidebar_flags(&g.engine.settings()))),
+        Err(error) => {
+            let shown = sidebar_after_save(before, Err(()));
+            toast(g, error.to_string(), true);
+            shown
+        }
+    };
+    ui.set_sidebar_library_collapsed(shown.library);
+    ui.set_sidebar_categories_collapsed(shown.categories);
+}
+
 fn save_settings(g: &Rc<Gui>) {
     let Some(ui) = g.ui.upgrade() else { return };
     let mut s = g.engine.settings();
@@ -2372,6 +2665,9 @@ fn save_settings(g: &Rc<Gui>) {
         5 => "trace".into(),
         _ => "info".into(),
     };
+    // The form has no collapse controls. Re-read the live flags so a Save
+    // cannot write an older snapshot over a toggle that already landed.
+    copy_sidebar_flags(&g.engine.settings(), &mut s);
     s.sanitize();
     match g.engine.update_settings(s.clone()) {
         Ok(()) => {
@@ -2958,6 +3254,8 @@ pub fn push_settings_to_ui(ui: &AppWindow, s: &Settings, update_layout: Option<&
         "trace" => 5,
         _ => 3,
     });
+    ui.set_sidebar_library_collapsed(s.sidebar_library_collapsed);
+    ui.set_sidebar_categories_collapsed(s.sidebar_categories_collapsed);
 }
 
 fn transport_from_index(i: i32) -> TransportPref {
@@ -3042,32 +3340,42 @@ pub fn copy_to_clipboard(text: &str) {
 }
 
 fn open_task_file(g: &Rc<Gui>, id: u64, folder: bool) {
-    let Some(s) = g.engine.task(id) else { return };
+    let _ = open_task_path(g, id, folder);
+}
+
+/// Open the task's folder. `Some` is the message already shown as a toast,
+/// so the detail window can repeat it in its own action row.
+pub(crate) fn open_task_folder(g: &Rc<Gui>, id: u64) -> Option<String> {
+    open_task_path(g, id, true)
+}
+
+fn open_task_path(g: &Rc<Gui>, id: u64, folder: bool) -> Option<String> {
+    let Some(s) = g.engine.task(id) else {
+        return None;
+    };
     if s.final_path.is_empty() {
-        return;
+        return None;
     }
     let path = std::path::PathBuf::from(&s.final_path);
     if folder {
         let dir = path.parent().unwrap_or(&path).to_path_buf();
         if dir.exists() {
             shell_open(&dir, false);
+            None
         } else {
-            toast(
-                g,
-                format!("folder no longer exists: {}", dir.display()),
-                true,
-            );
+            let message = format!("folder no longer exists: {}", dir.display());
+            toast(g, message.clone(), true);
+            Some(message)
         }
     } else if path.exists() {
         shell_open(&path, false);
+        None
     } else {
         // A deleted completed file must be reported, not silently
         // papered over by opening its parent folder.
-        toast(
-            g,
-            format!("file no longer exists: {}", path.display()),
-            true,
-        );
+        let message = format!("file no longer exists: {}", path.display());
+        toast(g, message.clone(), true);
+        Some(message)
     }
 }
 
@@ -3102,29 +3410,156 @@ pub fn shell_open(path: &std::path::Path, select: bool) {
     }
 }
 
-#[cfg(all(test, windows))]
-mod s2_render_tests {
-    use super::*;
-    use slint::platform::{
-        software_renderer::{MinimalSoftwareWindow, RepaintBufferType},
-        Platform, WindowAdapter,
-    };
-    use usagi::store::records::{TransportKind, TransportSummary};
+/// Headless Slint platform for GUI tests. Each test thread installs its
+/// own context: the context slot is thread-local. `set_platform` also
+/// stores the proxy from that call in a process-wide cell, and a proxy
+/// there makes every other thread fail component creation ("initialized
+/// in another thread"). `spawn_local` asks for a proxy again later, so
+/// the install call returns none and the thread-local flag still gates
+/// the later ask. Each component gets its own software window.
+#[cfg(test)]
+pub(crate) mod test_platform {
+    use std::cell::Cell;
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
-    struct Headless(Rc<MinimalSoftwareWindow>);
+    use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
+    use slint::platform::{EventLoopProxy, Platform, WindowAdapter};
+
+    thread_local! {
+        static LATEST: RefCell<Option<Rc<MinimalSoftwareWindow>>> = const { RefCell::new(None) };
+        static PROXY: Cell<bool> = const { Cell::new(true) };
+        static INSTALLING: Cell<bool> = const { Cell::new(false) };
+    }
+
+    struct Headless;
+
     impl Platform for Headless {
         fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
-            Ok(self.0.clone())
+            let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+            LATEST.with(|slot| *slot.borrow_mut() = Some(window.clone()));
+            Ok(window)
+        }
+
+        fn new_event_loop_proxy(&self) -> Option<Box<dyn EventLoopProxy>> {
+            if INSTALLING.with(|flag| flag.get()) {
+                return None;
+            }
+            if PROXY.with(|flag| flag.get()) {
+                Some(Box::new(DropWake))
+            } else {
+                None
+            }
         }
     }
+
+    /// Accepts the wake `spawn_local` sends and does not run it here.
+    /// Running it inline re-enters the future on this stack. The real
+    /// winit backend queues the same wake onto the event loop.
+    struct DropWake;
+
+    impl EventLoopProxy for DropWake {
+        fn quit_event_loop(&self) -> Result<(), slint::EventLoopError> {
+            Ok(())
+        }
+
+        fn invoke_from_event_loop(
+            &self,
+            _event: Box<dyn FnOnce() + Send>,
+        ) -> Result<(), slint::EventLoopError> {
+            Ok(())
+        }
+    }
+
+    pub fn install() {
+        INSTALLING.with(|flag| flag.set(true));
+        let result = slint::platform::set_platform(Box::new(Headless));
+        INSTALLING.with(|flag| flag.set(false));
+        // Already set on this thread. Another thread's context does not
+        // occupy this slot, so a second thread still installs its own.
+        let _ = result;
+    }
+
+    pub fn latest_window() -> Rc<MinimalSoftwareWindow> {
+        LATEST.with(|slot| {
+            slot.borrow()
+                .clone()
+                .expect("a component created a window on this thread")
+        })
+    }
+
+    /// `false` makes `slint::spawn_local` fail, which is what happens
+    /// when no event-loop proxy exists yet.
+    pub fn set_event_loop_proxy(enabled: bool) {
+        PROXY.with(|flag| flag.set(enabled));
+    }
+}
+
+/// A `Gui` with no main window, for handoff tests. The dialog builds
+/// its own component. No tray and no registry calls.
+#[cfg(test)]
+pub(crate) fn gui_for_test(engine: Arc<Engine>, handoff: Option<Arc<Coordinator>>) -> Rc<Gui> {
+    let tasks = Rc::new(VecModel::<TaskRow>::default());
+    let endpoints = Rc::new(VecModel::<EndpointRow>::default());
+    let category_nav = Rc::new(VecModel::<CategoryNav>::default());
+    Rc::new(Gui {
+        engine: engine.clone(),
+        tasks,
+        selected: RefCell::new(BTreeSet::new()),
+        anchor: RefCell::new(None),
+        focused: RefCell::new(None),
+        tray: RefCell::new(None),
+        endpoints,
+        ui: Weak::default(),
+        slow: RefCell::new(Instant::now() - Duration::from_millis(SLOW_REFRESH_MS)),
+        toast_until: RefCell::new(Instant::now()),
+        add_dir_explicit: RefCell::new(false),
+        tray_summary_at: RefCell::new(Instant::now() - Duration::from_secs(2)),
+        tray_summary_key: RefCell::new(String::new()),
+        minimized_seen: RefCell::new(false),
+        was_minimized: RefCell::new(false),
+        repaint_pulses: RefCell::new(0),
+        popup: RefCell::new(None),
+        popup_open: RefCell::new(false),
+        popup_area: RefCell::new(None),
+        handoff: RefCell::new(handoff),
+        handoff_ui: RefCell::new(crate::handoff_dialog::DialogSession::default()),
+        detail: RefCell::new(crate::detail_window::DetailSession::default()),
+        paths: engine.paths().clone(),
+        browser_broken: RefCell::new(Vec::new()),
+        browser_refresh_at: RefCell::new(Instant::now()),
+        update_layout: None,
+        update_check_running: Arc::new(AtomicBool::new(false)),
+        relaunch_after_apply: Arc::new(AtomicBool::new(false)),
+        update_schedule: RefCell::new(UpdateSchedule::new(Instant::now())),
+        was_check_running: RefCell::new(false),
+        update_offered: Arc::new(std::sync::Mutex::new(None)),
+        update_apply_running: Arc::new(AtomicBool::new(false)),
+        category_nav,
+        category_cache: RefCell::new(CategoryCache::new()),
+        notice_dismissed: RefCell::new(BTreeSet::new()),
+        notice_cache: RefCell::new(Vec::new()),
+        notice_polled_at: RefCell::new(
+            Instant::now()
+                .checked_sub(NOTICE_POLL)
+                .unwrap_or_else(Instant::now),
+        ),
+    })
+}
+
+#[cfg(all(test, windows))]
+mod s2_render_tests {
+    use super::test_platform;
+    use super::*;
+    use usagi::store::records::{TransportKind, TransportSummary};
 
     // Exercise the real row/detail bindings and software renderer at the minimum
     // width: family history must not silently elide the second family.
     #[test]
     fn s2_mixed_family_detail_headless_render() {
-        let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
-        slint::platform::set_platform(Box::new(Headless(window.clone()))).unwrap();
+        test_platform::install();
         let ui = AppWindow::new().unwrap();
+        let window = test_platform::latest_window();
         ui.global::<crate::I18n>().on_translate(|key, language| {
             if language == 1 {
                 crate::i18n::vi(key.as_str()).into()
@@ -3182,6 +3617,8 @@ mod s2_render_tests {
             attempts: 0,
             segment_retry: None,
             verify_bps: 0.0,
+            accept_ranges: true,
+            ranges_observed: true,
         };
         ui.show().unwrap();
         ui.set_category_nav(ModelRc::new(VecModel::from(vec![
@@ -3720,5 +4157,344 @@ mod category_view_tests {
         assert!(row.error_text.contains("was not downloaded"));
         let vietnamese = notice_row(&notice, true);
         assert!(vietnamese.error_text.contains("chưa được tải"));
+    }
+}
+
+#[cfg(test)]
+mod resume_support_detail {
+    use super::{detail_from, TaskSnapshot};
+    use usagi::store::records::{TaskState, TransportSummary};
+
+    fn snap(accept_ranges: bool, ranges_observed: bool) -> TaskSnapshot {
+        TaskSnapshot {
+            id: 7,
+            url: "https://example.com/a.bin".into(),
+            filename: "a.bin".into(),
+            dest_dir: "C:/dl".into(),
+            state: TaskState::Paused,
+            state_label: "Paused".into(),
+            total_size: None,
+            received: 0,
+            fraction: None,
+            speed_bps: 0.0,
+            eta_secs: f64::INFINITY,
+            segments_done: 0,
+            segments_total: 1,
+            active_requests: 0,
+            error: None,
+            transport: None,
+            transport_summary: TransportSummary::Unknown,
+            paths: Vec::new(),
+            created_at: 0,
+            started_at: None,
+            finished_at: None,
+            final_path: "C:/dl/a.bin".into(),
+            expected_hash: None,
+            computed_hash: None,
+            attempts: 0,
+            segment_retry: None,
+            verify_bps: 0.0,
+            accept_ranges,
+            ranges_observed,
+        }
+    }
+
+    #[test]
+    fn detail_carries_the_three_range_states() {
+        let unknown = detail_from(&snap(false, false), false);
+        assert!(!unknown.ranges_observed);
+        assert!(!unknown.accept_ranges);
+
+        let unsupported = detail_from(&snap(false, true), false);
+        assert!(unsupported.ranges_observed);
+        assert!(!unsupported.accept_ranges);
+
+        let supported = detail_from(&snap(true, true), true);
+        assert!(supported.ranges_observed);
+        assert!(supported.accept_ranges);
+    }
+}
+
+/// Sidebar collapse: the heading click goes through `Engine::save_settings`,
+/// a reload matches, and a failed write puts the previous flags back.
+#[cfg(test)]
+mod sidebar_collapse_tests {
+    use super::{
+        settings_for_reset, sidebar_after_save, sidebar_flags, toggled_sidebar, SidebarFlags,
+        SidebarSection,
+    };
+    use usagi::config::Settings;
+
+    struct EngineDir {
+        root: std::path::PathBuf,
+    }
+
+    impl Drop for EngineDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn idle_engine(root: &std::path::Path) -> usagi::Engine {
+        std::fs::create_dir_all(root.join("downloads")).unwrap();
+        usagi::EngineBuilder::new()
+            .paths(usagi::Paths {
+                root: root.to_path_buf(),
+                db_file: root.join("test.redb"),
+                log_file: root.join("logs").join("test.log"),
+                temp_dir: root.join("tmp"),
+                default_download_dir: root.join("downloads"),
+                portable: true,
+                exe_dir: Some(root.to_path_buf()),
+            })
+            .idle(true)
+            .worker_threads(2)
+            .build()
+            .expect("idle engine")
+    }
+
+    fn fresh_dir() -> EngineDir {
+        let root = std::env::temp_dir().join(format!(
+            "udm-sidebar-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or(0)
+        ));
+        EngineDir { root }
+    }
+
+    /// What the UI handler does, without a window: save, then choose the
+    /// flags the sidebar is allowed to show.
+    fn apply_toggle(
+        engine: &usagi::Engine,
+        section: SidebarSection,
+    ) -> (SidebarFlags, Result<(), String>) {
+        let before = sidebar_flags(&engine.settings());
+        let next = toggled_sidebar(&engine.settings(), section);
+        match engine.save_settings(next) {
+            Ok(()) => (
+                sidebar_after_save(before, Ok(sidebar_flags(&engine.settings()))),
+                Ok(()),
+            ),
+            Err(error) => (sidebar_after_save(before, Err(())), Err(error.to_string())),
+        }
+    }
+
+    #[test]
+    fn toggle_round_trip_matches_the_reloaded_settings() {
+        let dir = fresh_dir();
+        let expected = {
+            let engine = idle_engine(&dir.root);
+            let (shown, saved) = apply_toggle(&engine, SidebarSection::Library);
+            assert!(saved.is_ok());
+            assert!(shown.library);
+            assert!(!shown.categories);
+            assert_eq!(shown, sidebar_flags(&engine.settings()));
+            // The other section and an unrelated field stay put.
+            let again = toggled_sidebar(&engine.settings(), SidebarSection::Categories);
+            assert!(again.sidebar_library_collapsed);
+            assert!(again.sidebar_categories_collapsed);
+            assert_eq!(again.segments_per_task, engine.settings().segments_per_task);
+            engine.save_settings(again).unwrap();
+            let live = sidebar_flags(&engine.settings());
+            assert!(live.library && live.categories);
+            engine.shutdown();
+            live
+        };
+        let engine = idle_engine(&dir.root);
+        assert_eq!(sidebar_flags(&engine.settings()), expected);
+        engine.shutdown();
+    }
+
+    #[test]
+    fn failed_save_reverts_the_sidebar_and_leaves_disk_unchanged() {
+        let dir = fresh_dir();
+        let engine = idle_engine(&dir.root);
+        let (shown, saved) = apply_toggle(&engine, SidebarSection::Library);
+        assert!(saved.is_ok() && shown.library);
+        engine.store().fail_next_settings_saves(1);
+        let (reverted, failed) = apply_toggle(&engine, SidebarSection::Categories);
+        let message = failed.expect_err("injected failure");
+        assert!(
+            message.contains("injected settings save failure"),
+            "{message}"
+        );
+        assert!(reverted.library);
+        assert!(!reverted.categories);
+        assert_eq!(reverted, sidebar_flags(&engine.settings()));
+        engine.shutdown();
+    }
+
+    #[test]
+    fn reset_keeps_sidebar_flags_and_restores_other_fields() {
+        let mut live = Settings::default();
+        live.sidebar_library_collapsed = true;
+        live.sidebar_categories_collapsed = false;
+        live.segments_per_task = 20;
+        let reset = settings_for_reset(&live);
+        assert!(reset.sidebar_library_collapsed);
+        assert!(!reset.sidebar_categories_collapsed);
+        assert_eq!(
+            reset.segments_per_task,
+            Settings::default().segments_per_task
+        );
+        assert_ne!(reset.segments_per_task, 20);
+    }
+}
+
+/// Settings field widths from U5. The same clamps are written in
+/// `views/settings.slint` (`ua-w`, `id-w`); these lock the numbers.
+#[cfg(test)]
+mod settings_field_width_tests {
+    fn user_agent_width(text_px: f32, form_px: f32) -> f32 {
+        let sized = (text_px + 24.0).clamp(180.0, 420.0);
+        sized.min(form_px)
+    }
+
+    fn extension_id_width(cell_px: f32, form_px: f32) -> f32 {
+        (cell_px + 24.0).min(360.0).min(form_px)
+    }
+
+    #[test]
+    fn user_agent_clamps_to_text_padding_then_the_form() {
+        assert_eq!(user_agent_width(100.0, 580.0), 180.0);
+        assert_eq!(user_agent_width(200.0, 580.0), 224.0);
+        assert_eq!(user_agent_width(500.0, 580.0), 420.0);
+        assert_eq!(user_agent_width(200.0, 150.0), 150.0);
+    }
+
+    #[test]
+    fn extension_id_is_thirty_two_cells_plus_padding_capped_at_360() {
+        assert_eq!(extension_id_width(200.0, 580.0), 224.0);
+        assert_eq!(extension_id_width(400.0, 580.0), 360.0);
+        assert_eq!(extension_id_width(200.0, 100.0), 100.0);
+    }
+
+    #[test]
+    fn chrome_save_as_note_has_a_vietnamese_rendering() {
+        let english = "If Chrome shows a Save As dialog before UDM receives the download, you can turn off 'Ask where to save each file before downloading' in Chrome's Downloads settings. UDM does not read or change this setting.";
+        let vietnamese = crate::i18n::vi(english);
+        assert_ne!(vietnamese, english);
+        assert!(vietnamese.contains("Save As") || vietnamese.contains("UDM"));
+        assert!(vietnamese.contains("không"));
+    }
+}
+
+/// Toolbar widths and the selection matrix. Widths match the expressions
+/// in `app.slint` (`url-w`, `filter-w`): content is the window minus the
+/// 220px sidebar and 32px of padding.
+#[cfg(test)]
+mod toolbar_tests {
+    use super::strip_enablement;
+    use crate::task_actions::{caps_for_state, StripCaps};
+    use usagi::store::records::TaskState;
+
+    fn content(window_px: f32) -> f32 {
+        window_px - 220.0 - 32.0
+    }
+
+    fn quick_url_width(content_px: f32, submit_px: f32) -> f32 {
+        let ideal = (content_px * 0.75).min(600.0);
+        let room = (content_px - submit_px - 8.0).max(0.0);
+        ideal.min(room).max(240.0)
+    }
+
+    fn filter_width(content_px: f32) -> f32 {
+        (content_px * 0.5).min(320.0).max(120.0)
+    }
+
+    #[test]
+    fn field_widths_match_the_1040_and_800_references() {
+        let wide = content(1040.0);
+        let narrow = content(800.0);
+        assert_eq!(wide, 788.0);
+        assert_eq!(narrow, 548.0);
+        assert_eq!(quick_url_width(wide, 40.0), 591.0);
+        assert_eq!(filter_width(wide), 320.0);
+        // 411 is the 75% figure; a normal submit button still fits.
+        assert_eq!(quick_url_width(narrow, 60.0), 411.0);
+        assert_eq!(filter_width(narrow), 274.0);
+        // A huge submit button clamps the URL field to the 240px floor.
+        assert_eq!(quick_url_width(narrow, 400.0), 240.0);
+        assert_eq!(filter_width(100.0), 120.0);
+        assert_eq!(quick_url_width(2000.0, 40.0), 600.0);
+    }
+
+    fn states(list: &[TaskState]) -> Vec<StripCaps> {
+        list.iter().copied().map(caps_for_state).collect()
+    }
+
+    #[test]
+    fn strip_follows_selection_for_each_state_and_for_a_mix() {
+        let off = strip_enablement(&[]);
+        assert!(!off.resume && !off.pause && !off.cancel && !off.remove);
+        assert!(!off.open_file && !off.open_folder && !off.copy_url && !off.retry);
+
+        // A notice is not a real task: every capability stays off.
+        let notice = strip_enablement(&[StripCaps {
+            can_pause: false,
+            can_resume: false,
+            can_cancel: false,
+            can_retry: false,
+            can_open_file: false,
+            can_open_folder: false,
+            can_remove: false,
+            can_copy: false,
+        }]);
+        assert_eq!(notice, off);
+
+        for state in [
+            TaskState::Queued,
+            TaskState::Probing,
+            TaskState::Downloading,
+            TaskState::Verifying,
+        ] {
+            let one = strip_enablement(&states(&[state]));
+            assert!(
+                one.pause && one.cancel && one.remove && one.copy_url,
+                "{state:?}"
+            );
+            assert!(!one.resume && !one.retry && !one.open_file && !one.open_folder);
+        }
+
+        let paused = strip_enablement(&states(&[TaskState::Paused]));
+        assert!(paused.resume && paused.open_folder && paused.copy_url && paused.remove);
+        assert!(!paused.pause && !paused.cancel && !paused.open_file && !paused.retry);
+
+        let canceled = strip_enablement(&states(&[TaskState::Canceled]));
+        assert!(canceled.resume && canceled.copy_url && canceled.remove);
+        assert!(!canceled.open_folder && !canceled.pause && !canceled.cancel);
+
+        let failed = strip_enablement(&states(&[TaskState::Failed]));
+        assert!(failed.resume && failed.retry && failed.remove && failed.copy_url);
+        assert!(!failed.pause && !failed.cancel && !failed.open_file);
+
+        let done = strip_enablement(&states(&[TaskState::Completed]));
+        assert!(done.open_file && done.open_folder && done.copy_url && done.remove);
+        assert!(!done.resume && !done.pause && !done.cancel && !done.retry);
+
+        let both_live = strip_enablement(&states(&[TaskState::Downloading, TaskState::Queued]));
+        assert!(both_live.pause && both_live.remove);
+        assert!(!both_live.resume && !both_live.cancel && !both_live.copy_url);
+        assert!(!both_live.open_file && !both_live.open_folder && !both_live.retry);
+
+        let both_paused = strip_enablement(&states(&[TaskState::Paused, TaskState::Canceled]));
+        assert!(both_paused.resume && both_paused.remove);
+        assert!(!both_paused.pause && !both_paused.open_folder && !both_paused.copy_url);
+
+        let mixed = strip_enablement(&states(&[TaskState::Downloading, TaskState::Paused]));
+        assert!(mixed.remove);
+        assert!(!mixed.pause && !mixed.resume && !mixed.cancel);
+        assert!(!mixed.open_file && !mixed.open_folder && !mixed.copy_url && !mixed.retry);
+
+        let both_failed = strip_enablement(&states(&[TaskState::Failed, TaskState::Failed]));
+        assert!(both_failed.remove);
+        assert!(!both_failed.resume && !both_failed.retry && !both_failed.copy_url);
+
+        let both_done = strip_enablement(&states(&[TaskState::Completed, TaskState::Completed]));
+        assert!(both_done.remove);
+        assert!(!both_done.open_file && !both_done.open_folder && !both_done.copy_url);
     }
 }

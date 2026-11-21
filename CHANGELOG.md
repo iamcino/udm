@@ -2,6 +2,16 @@
 
 All notable changes to UDM are listed here. Vietnamese: [CHANGELOG.vi.md](CHANGELOG.vi.md).
 
+## 0.3.1
+
+- **Handoff dialog, finished properly**: the browser-download confirmation dialog now sizes to its content, can be resized, and comes to the front when a download arrives.
+- **A window for each download**: choosing Download opens a compact detail window for that download — progress, speed, and Pause / Resume / Cancel / Retry / Open Folder without going back to the main window.
+- **Main window refresh**: a top toolbar puts Add Download and the task actions up front; the sidebar's Library and Categories sections collapse; icons are now vivid colour.
+- **Tray**: left-clicking the tray icon opens the main window (the menu stays on right-click).
+- **Settings, tidied**: browsers are grouped with their icon and status, fields are sized to their content, and the Chrome group explains the "Ask where to save each file" setting that can make Chrome show a Save As dialog before UDM receives a download.
+- **Extension**: renamed to "Universal Download Manager"; its popup now lists only downloads that need attention.
+- **Fixed**: UDM could exit silently on launch, and never show the confirmation dialog, when a browser handoff was still pending.
+
 ## 0.3.0
 
 - **Categories in the main window**: the sidebar now shows the download categories with a count for each. Selecting a category filters the task list, combined with the status filter and search; Finished and Unfinished views are included.

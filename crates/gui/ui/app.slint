@@ -1,11 +1,13 @@
 import { I18n } from "i18n.slint";
-import { Theme as CinoTheme, Lang } from "@cino-ui";
+import { Theme as CinoTheme, Lang, Icon, Icons, IconData } from "@cino-ui";
 export { I18n }
 // Sidebar navigation item (Apple HIG "source list" style): quiet until
 // hovered, accent-tinted fill when selected, no left bar, no divider.
+// The glyph is a colored udm icon. `color` is required by Icon and does
+// not tint parts-based glyphs.
 component NavItem inherits Rectangle {
     in property <string> label;
-    in property <string> glyph;
+    in property <IconData> icon;
     in property <string> badge;
     in property <bool> active: false;
     callback clicked;
@@ -17,11 +19,16 @@ component NavItem inherits Rectangle {
         padding-left: 8px;
         padding-right: 8px;
         spacing: 8px;
-        Text {
-            text: root.glyph;
-            font-size: 13px;
-            vertical-alignment: center;
-            visible: root.glyph != "";
+        alignment: center;
+        VerticalLayout {
+            width: 18px;
+            alignment: center;
+            Icon {
+                icon: root.icon;
+                color: Theme.text-dim;
+                width: 18px;
+                height: 18px;
+            }
         }
         Text {
             horizontal-stretch: 1;
@@ -43,6 +50,78 @@ component NavItem inherits Rectangle {
     touch := TouchArea {
         mouse-cursor: pointer;
         clicked => { root.clicked(); }
+    }
+}
+
+// LIBRARY / CATEGORIES heading. The whole row is the button: keyboard
+// focusable, chevron shows expanded (colored chevron-down) or collapsed
+// (udm-chevron-right). The click only asks Rust to persist; the property
+// flips after the acknowledged save.
+component SidebarSectionToggle inherits FocusScope {
+    in property <string> label;
+    in property <IconData> mark;
+    in property <bool> collapsed: false;
+    callback toggled();
+    width: 100%;
+    height: 30px;
+    accessible-role: button;
+    accessible-label: root.collapsed ? root.label + ", " + I18n.tr("collapsed") : root.label + ", " + I18n.tr("expanded");
+    accessible-action-default => { root.toggled(); }
+    key-pressed(event) => {
+        if (event.text == " " || event.text == "\n") {
+            root.toggled();
+            accept
+        } else {
+            reject
+        }
+    }
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: Theme.radius-sm;
+        background: touch.has-hover ? Theme.row-hover : transparent;
+        border-width: root.has-focus ? 1px : 0px;
+        border-color: Theme.accent;
+        HorizontalLayout {
+            padding-left: 4px;
+            padding-right: 4px;
+            spacing: 4px;
+            alignment: center;
+            VerticalLayout {
+                width: 16px;
+                alignment: center;
+                Icon {
+                    icon: root.collapsed ? Icons.udm-chevron-right : Icons.chevron-down;
+                    color: Theme.text-dim;
+                    width: 16px;
+                    height: 16px;
+                }
+            }
+            VerticalLayout {
+                width: 16px;
+                alignment: center;
+                Icon {
+                    icon: root.mark;
+                    color: Theme.text-dim;
+                    width: 16px;
+                    height: 16px;
+                }
+            }
+            Text {
+                horizontal-stretch: 1;
+                text: root.label;
+                color: Theme.text-faint;
+                font-size: 10px;
+                font-weight: 600;
+                letter-spacing: 1px;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+        touch := TouchArea {
+            mouse-cursor: pointer;
+            clicked => { root.toggled(); }
+        }
     }
 }
 
@@ -95,6 +174,152 @@ component ToolbarField inherits Rectangle {
     }
 }
 
+// Icon-only toolbar action. Disabled glyphs use Icon.enabled (opacity),
+// not a second path. The row is a button: tab focus, Enter/Space, and a
+// translated accessible label plus a hover tip.
+component StripButton inherits FocusScope {
+    in property <IconData> icon;
+    in property <string> tip;
+    in property <bool> is-enabled: false;
+    callback clicked();
+    width: 32px;
+    height: 28px;
+    accessible-role: button;
+    accessible-label: root.tip;
+    accessible-enabled: root.is-enabled;
+    accessible-action-default => { if (root.is-enabled) { root.clicked(); } }
+    key-pressed(event) => {
+        if (root.is-enabled && (event.text == " " || event.text == "\n")) {
+            root.clicked();
+            accept
+        } else {
+            reject
+        }
+    }
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: Theme.radius-sm;
+        border-width: root.has-focus ? 1px : 0px;
+        border-color: Theme.accent;
+        background: touch.has-hover && root.is-enabled ? Theme.panel-hi : transparent;
+        Icon {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 18px;
+            height: 18px;
+            icon: root.icon;
+            color: Theme.text;
+            enabled: root.is-enabled;
+        }
+        touch := TouchArea {
+            enabled: root.is-enabled;
+            mouse-cursor: pointer;
+            clicked => { root.clicked(); }
+        }
+        if touch.has-hover || root.has-focus: Rectangle {
+            y: parent.height + 2px;
+            height: 18px;
+            width: tip-text.preferred-width + 8px;
+            background: Theme.panel;
+            border-radius: 4px;
+            border-width: 1px;
+            border-color: Theme.border-soft;
+            tip-text := Text {
+                x: 4px;
+                height: 100%;
+                text: root.tip;
+                font-size: 11px;
+                color: Theme.text;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
+
+// Primary or quiet button with a colored icon and a translated label.
+component LabeledIconButton inherits FocusScope {
+    in property <string> label;
+    in property <IconData> icon;
+    in property <bool> primary: false;
+    callback clicked();
+    height: 28px;
+    width: label-text.preferred-width + 40px;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-action-default => { root.clicked(); }
+    key-pressed(event) => {
+        if (event.text == " " || event.text == "\n") {
+            root.clicked();
+            accept
+        } else {
+            reject
+        }
+    }
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: Theme.radius-sm;
+        background: root.primary ? Theme.accent : touch.has-hover ? Theme.panel-hi : transparent;
+        border-width: root.has-focus && !root.primary ? 1px : 0px;
+        border-color: Theme.accent;
+        HorizontalLayout {
+            padding-left: 8px;
+            padding-right: 10px;
+            spacing: 6px;
+            alignment: center;
+            Icon {
+                width: 16px;
+                height: 16px;
+                icon: root.icon;
+                color: Theme.text;
+            }
+            label-text := Text {
+                text: root.label;
+                color: root.primary ? #ffffff : Theme.text;
+                font-size: 12px;
+                font-weight: root.primary ? 600 : 400;
+                vertical-alignment: center;
+            }
+        }
+        touch := TouchArea {
+            mouse-cursor: pointer;
+            clicked => { root.clicked(); }
+        }
+    }
+}
+
+// Filter-band utilities: the selection count, the armed bulk-remove
+// confirmation, and Clear finished. Measured width, never stretched.
+component UtilityCluster inherits Rectangle {
+    in property <bool> armed;
+    in property <int> count;
+    in property <bool> show-count;
+    callback confirmed();
+    callback clear();
+    height: 28px;
+    horizontal-stretch: 0;
+    width: inner.preferred-width;
+    inner := HorizontalLayout {
+        spacing: 8px;
+        if root.show-count: Text {
+            vertical-alignment: center;
+            text: root.count + " " + I18n.tr("selected");
+            color: Theme.accent-hi;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        if root.armed: ActionButton {
+            label: I18n.tr("Confirm remove") + " " + root.count + "?";
+            clicked => { root.confirmed(); }
+        }
+        LabeledIconButton {
+            icon: Icons.clear;
+            label: I18n.tr("Clear finished");
+            clicked => { root.clear(); }
+        }
+    }
+}
 
 // udm main window.
 //
@@ -113,6 +338,11 @@ import { PopupWindow } from "popup.slint";
 export { PopupWindow }
 import { HandoffWindow } from "handoff.slint";
 export { HandoffWindow }
+import { DetailWindow } from "detail.slint";
+export { DetailWindow }
+import { IconExportProof } from "icon_export_proof.slint";
+import { IconGalleryCapture } from "icon_gallery_capture.slint";
+export { IconGalleryCapture }
 import { ScrollView, Palette } from "std-widgets.slint";
 
 export component AppWindow inherits Window {
@@ -171,6 +401,28 @@ export component AppWindow inherits Window {
     }
     callback appearance-changed;
     public pure function translate(key: string) -> string { return I18n.tr(key); }
+    // Sidebar section collapse. Rendered from the Settings snapshot; the
+    // click callback persists through Engine::save_settings and Rust writes
+    // these back only after that write's result.
+    in-out property <bool> sidebar-library-collapsed: false;
+    in-out property <bool> sidebar-categories-collapsed: false;
+    callback sidebar-section-toggled(int);
+    // kind 1 = Finished, kind 2 = Unfinished, kind 0 = a category id.
+    // Empty id is All categories. Anything else is a custom rule.
+    public pure function category-icon(id: string, kind: int) -> IconData {
+        if (kind == 1) { return Icons.udm-check; }
+        if (kind == 2) { return Icons.unfinished; }
+        if (id == "") { return Icons.all-categories; }
+        if (id == "documents") { return Icons.documents; }
+        if (id == "music") { return Icons.music; }
+        if (id == "videos") { return Icons.videos; }
+        if (id == "images") { return Icons.images; }
+        if (id == "archives") { return Icons.archives; }
+        if (id == "programs") { return Icons.programs; }
+        if (id == "disk-images") { return Icons.disk-images; }
+        if (id == "other") { return Icons.other; }
+        return Icons.custom-category;
+    }
     // downloads-list filter: 0 = all, 1 = active, 2 = completed, 3 = failed, 4 = unfinished
     in-out property <int> library: 0;
     // category axis: empty = every category. ANDs with library and the search box.
@@ -179,18 +431,37 @@ export component AppWindow inherits Window {
     // substring filter on the file name, applied in Rust
     in-out property <string> filter;
 
-    // G1 responsive toolbar budget (row 2 of the toolbar): the row shares
-    // its width between the filter field and the action buttons. When a
-    // bulk selection is active the buttons are guaranteed their measured
-    // share first and the field takes what remains (floor 120px). Below
-    // 920px window width the row runs "tight": the selected-count label
-    // yields its space (Remove still names the count) and button labels
-    // are capped so EN and VI both fit at the 800px minimum window.
-    property <length> row2-avail: root.width - 220px - 32px;
-    property <bool> row2-tight: root.width < 920px;
-    property <length> row2-actions-w: root.selected-count > 0
-        ? min(pause-m.preferred-width + resume-m.preferred-width + remove-m.preferred-width + clear-measure.preferred-width + 88px, row2-avail - 152px)
-        : min(clear-measure.preferred-width + 22px, row2-avail - 152px);
+    // Toolbar bands. Content width is the window minus the 220px sidebar
+    // and 16px of padding on each side. Quick URL is min(600, 75%) with a
+    // 240px floor after the submit button. Filter is min(320, 50%) with a
+    // 120px floor. Neither field stretches.
+    property <length> content-w: root.width - 220px - 32px;
+    property <length> url-ideal: min(600px, content-w * 0.75);
+    property <length> url-submit-w: add-m.preferred-width + 22px;
+    property <length> url-w: max(240px, min(url-ideal, content-w - url-submit-w - 8px));
+    property <length> filter-w: max(120px, min(320px, content-w * 0.5));
+    property <bool> count-tight: root.width < 920px;
+    property <length> utility-w: (root.selected-count > 0 && !root.count-tight ? count-m.preferred-width + 8px : 0px)
+        + (root.bulk-remove-armed ? remove-m.preferred-width + 30px : 0px)
+        + clear-measure.preferred-width + 48px;
+    property <bool> utility-wrap: root.filter-w + root.utility-w > root.content-w;
+    // Action-strip enablement, published from the selection. Retry replaces
+    // the Resume slot only for exactly one Failed task.
+    in-out property <bool> can-strip-resume: false;
+    in-out property <bool> can-strip-pause: false;
+    in-out property <bool> can-strip-cancel: false;
+    in-out property <bool> can-strip-remove: false;
+    in-out property <bool> can-strip-open: false;
+    in-out property <bool> can-strip-folder: false;
+    in-out property <bool> can-strip-copy: false;
+    in-out property <bool> can-strip-retry: false;
+    callback strip-resume();
+    callback strip-pause();
+    callback strip-cancel();
+    callback strip-remove();
+    callback strip-open-file();
+    callback strip-open-folder();
+    callback strip-copy-url();
 
     in property <[TaskRow]> tasks;
     in property <TaskDetail> detail;
@@ -220,9 +491,9 @@ export component AppWindow inherits Window {
     // G1 font-metric probes for the toolbar action labels (12px), so row 2
     // can budget each button exactly what its current-language label needs.
     // Invisible and layout-free, same pattern as column-measure above.
-    pause-m := Text { visible: false; font-size: 12px; text: I18n.tr("Pause"); }
-    resume-m := Text { visible: false; font-size: 12px; text: I18n.tr("Resume"); }
-    remove-m := Text { visible: false; font-size: 12px; text: root.bulk-remove-armed ? I18n.tr("Confirm remove") + " " + root.selected-count + "?" : I18n.tr("Remove") + " " + root.selected-count; }
+    add-m := Text { visible: false; font-size: 12px; font-weight: 600; text: I18n.tr("Add"); }
+    remove-m := Text { visible: false; font-size: 12px; text: I18n.tr("Confirm remove") + " " + root.selected-count + "?"; }
+    count-m := Text { visible: false; font-size: 12px; font-weight: 600; text: root.selected-count + " " + I18n.tr("selected"); }
     clear-measure := Text { visible: false; font-size: 12px; text: I18n.tr("Clear finished"); }
     in property <StatusInfo> status;
     in property <[EndpointRow]> endpoints;
@@ -307,6 +578,10 @@ export component AppWindow inherits Window {
     callback add-from-clipboard;
     callback dismiss-notice(string);
 
+    // Resolves the @cino-ui icon re-exports in this compilation unit.
+    // `if false` keeps the proof out of layout and off the shipping surface.
+    if false: IconExportProof {}
+
     // Absolute shell bounds keep view-specific layout hints from resizing the
     // native window during a redraw. Only the content inside this shell flexes.
     Rectangle {
@@ -376,85 +651,99 @@ export component AppWindow inherits Window {
                             spacing: 2px;
                             width: parent.width;
 
-                            SidebarCaption { label: I18n.tr("LIBRARY"); }
-                            NavItem {
-                                glyph: "≡";
-                                label: I18n.tr("All Downloads");
-                                badge: root.status.active-count + root.status.queued-count
-                                    + root.status.paused-count + root.status.completed-count
-                                    + root.status.failed-count > 0
-                                    ? (root.status.active-count + root.status.queued-count
+                            SidebarSectionToggle {
+                                label: I18n.tr("LIBRARY");
+                                mark: Icons.library;
+                                collapsed: root.sidebar-library-collapsed;
+                                toggled => { root.sidebar-section-toggled(0); }
+                            }
+                            // `if` drops the rows from the layout. visible:false
+                            // would keep the slot.
+                            if !root.sidebar-library-collapsed: VerticalLayout {
+                                spacing: 2px;
+                                width: parent.width;
+                                NavItem {
+                                    icon: Icons.all-downloads;
+                                    label: I18n.tr("All Downloads");
+                                    badge: root.status.active-count + root.status.queued-count
                                         + root.status.paused-count + root.status.completed-count
-                                        + root.status.failed-count) + ""
-                                    : "";
-                                active: root.view == 0 && root.library == 0;
-                                clicked => { root.view = 0; root.library = 0; }
-                            }
-                            NavItem {
-                                glyph: "▶";
-                                label: I18n.tr("Active");
-                                badge: root.status.active-count + root.status.queued-count > 0
-                                    ? (root.status.active-count + root.status.queued-count) + "" : "";
-                                active: root.view == 0 && root.library == 1;
-                                clicked => { root.view = 0; root.library = 1; }
-                            }
-                            NavItem {
-                                glyph: "✓";
-                                label: I18n.tr("Completed");
-                                badge: root.status.completed-count > 0 ? root.status.completed-count + "" : "";
-                                active: root.view == 0 && root.library == 2;
-                                clicked => { root.view = 0; root.library = 2; }
-                            }
-                            NavItem {
-                                glyph: "!";
-                                label: I18n.tr("Failed");
-                                badge: root.status.failed-count > 0 ? root.status.failed-count + "" : "";
-                                active: root.view == 0 && root.library == 3;
-                                clicked => { root.view = 0; root.library = 3; }
-                            }
-                            NavItem {
-                                glyph: "\u{25bc}";
-                                label: I18n.tr("Active downloads…");
-                                badge: "";
-                                active: false;
-                                clicked => { root.show-popup(); }
+                                        + root.status.failed-count > 0
+                                        ? (root.status.active-count + root.status.queued-count
+                                            + root.status.paused-count + root.status.completed-count
+                                            + root.status.failed-count) + ""
+                                        : "";
+                                    active: root.view == 0 && root.library == 0;
+                                    clicked => { root.view = 0; root.library = 0; }
+                                }
+                                NavItem {
+                                    icon: Icons.active-downloads;
+                                    label: I18n.tr("Active");
+                                    badge: root.status.active-count + root.status.queued-count > 0
+                                        ? (root.status.active-count + root.status.queued-count) + "" : "";
+                                    active: root.view == 0 && root.library == 1;
+                                    clicked => { root.view = 0; root.library = 1; }
+                                }
+                                NavItem {
+                                    icon: Icons.udm-check;
+                                    label: I18n.tr("Completed");
+                                    badge: root.status.completed-count > 0 ? root.status.completed-count + "" : "";
+                                    active: root.view == 0 && root.library == 2;
+                                    clicked => { root.view = 0; root.library = 2; }
+                                }
+                                NavItem {
+                                    icon: Icons.failed;
+                                    label: I18n.tr("Failed");
+                                    badge: root.status.failed-count > 0 ? root.status.failed-count + "" : "";
+                                    active: root.view == 0 && root.library == 3;
+                                    clicked => { root.view = 0; root.library = 3; }
+                                }
+                                NavItem {
+                                    icon: Icons.active-downloads;
+                                    label: I18n.tr("Active downloads…");
+                                    badge: "";
+                                    active: false;
+                                    clicked => { root.show-popup(); }
+                                }
                             }
 
-                            SidebarCaption { label: I18n.tr("CATEGORIES"); }
-                            for item in root.category-nav: NavItem {
-                                glyph: item.glyph;
-                                label: item.label;
-                                badge: item.badge;
-                                active: root.view == 0 && (item.kind == 0 ? root.category == item.id
-                                    : item.kind == 1 ? root.library == 2
-                                    : root.library == 4);
-                                clicked => {
-                                    root.view = 0;
-                                    if (item.kind == 0) {
-                                        root.category = item.id;
-                                    } else if (item.kind == 1) {
-                                        root.library = 2;
-                                    } else {
-                                        root.library = 4;
+                            SidebarSectionToggle {
+                                label: I18n.tr("CATEGORIES");
+                                mark: Icons.grid;
+                                collapsed: root.sidebar-categories-collapsed;
+                                toggled => { root.sidebar-section-toggled(1); }
+                            }
+                            if !root.sidebar-categories-collapsed: VerticalLayout {
+                                spacing: 2px;
+                                width: parent.width;
+                                for item in root.category-nav: NavItem {
+                                    icon: root.category-icon(item.id, item.kind);
+                                    label: item.label;
+                                    badge: item.badge;
+                                    active: root.view == 0 && (item.kind == 0 ? root.category == item.id
+                                        : item.kind == 1 ? root.library == 2
+                                        : root.library == 4);
+                                    clicked => {
+                                        root.view = 0;
+                                        if (item.kind == 0) {
+                                            root.category = item.id;
+                                        } else if (item.kind == 1) {
+                                            root.library = 2;
+                                        } else {
+                                            root.library = 4;
+                                        }
                                     }
                                 }
                             }
 
                             SidebarCaption { label: I18n.tr("GENERAL"); }
                             NavItem {
-                                glyph: "+";
-                                label: I18n.tr("Add Download");
-                                active: root.view == 1;
-                                clicked => { root.view = 1; }
-                            }
-                            NavItem {
-                                glyph: "⚙";
+                                icon: Icons.udm-sliders;
                                 label: I18n.tr("Settings");
                                 active: root.view == 2;
                                 clicked => { root.view = 2; }
                             }
                             NavItem {
-                                glyph: "ℹ";
+                                icon: Icons.udm-info;
                                 label: I18n.tr("About & Privacy");
                                 active: root.view == 3;
                                 clicked => { root.view = 3; }
@@ -521,71 +810,151 @@ export component AppWindow inherits Window {
                     width: 100%;
                     height: 100%;
                     vertical-stretch: 1;
-                    // Keep the toolbar instance alive across view changes. The
-                    // collapsed slot avoids rebuilding the window's layout tree.
+                    // Toolbar stays in the tree on every view so Add Download
+                    // remains reachable from Add, Settings, and About. The
+                    // action, URL, and filter bands are the task list only.
                     Rectangle {
-                        height: root.view == 0 ? 84px : 0px;
-                        visible: root.view == 0;
+                        height: toolbar-col.preferred-height;
                         clip: true;
-                        VerticalLayout {
+                        toolbar-col := VerticalLayout {
                             padding-left: Theme.pad;
                             padding-right: Theme.pad;
                             padding-top: 10px;
                             padding-bottom: 10px;
                             spacing: 8px;
                             HorizontalLayout {
+                                spacing: 6px;
+                                alignment: start;
+                                LabeledIconButton {
+                                    primary: true;
+                                    icon: Icons.download;
+                                    label: I18n.tr("Add Download");
+                                    clicked => { root.view = 1; }
+                                }
+                                if root.view == 0: HorizontalLayout {
+                                    spacing: 2px;
+                                    StripButton {
+                                        icon: root.can-strip-retry ? Icons.udm-refresh : Icons.play;
+                                        tip: root.can-strip-retry ? I18n.tr("Retry") : I18n.tr("Resume");
+                                        is-enabled: root.can-strip-resume;
+                                        clicked => {
+                                            root.bulk-remove-armed = false;
+                                            if (root.selected-count > 1) { root.bulk-resume(); }
+                                            else { root.strip-resume(); }
+                                        }
+                                    }
+                                    StripButton {
+                                        icon: Icons.pause;
+                                        tip: I18n.tr("Pause");
+                                        is-enabled: root.can-strip-pause;
+                                        clicked => {
+                                            root.bulk-remove-armed = false;
+                                            if (root.selected-count > 1) { root.bulk-pause(); }
+                                            else { root.strip-pause(); }
+                                        }
+                                    }
+                                    StripButton {
+                                        icon: Icons.stop;
+                                        tip: I18n.tr("Cancel");
+                                        is-enabled: root.can-strip-cancel;
+                                        clicked => { root.strip-cancel(); }
+                                    }
+                                    StripButton {
+                                        icon: Icons.trash;
+                                        tip: root.bulk-remove-armed
+                                            ? I18n.tr("Confirm remove") + " " + root.selected-count + "?"
+                                            : I18n.tr("Remove from List");
+                                        is-enabled: root.can-strip-remove;
+                                        clicked => {
+                                            if (root.selected-count > 1) {
+                                                if (root.bulk-remove-armed) {
+                                                    root.bulk-remove-armed = false;
+                                                    root.bulk-remove();
+                                                } else {
+                                                    root.bulk-remove-armed = true;
+                                                }
+                                            } else {
+                                                root.bulk-remove-armed = false;
+                                                root.strip-remove();
+                                            }
+                                        }
+                                    }
+                                    StripButton {
+                                        icon: Icons.file;
+                                        tip: I18n.tr("Open File");
+                                        is-enabled: root.can-strip-open;
+                                        clicked => { root.strip-open-file(); }
+                                    }
+                                    StripButton {
+                                        icon: Icons.folder;
+                                        tip: I18n.tr("Open Folder");
+                                        is-enabled: root.can-strip-folder;
+                                        clicked => { root.strip-open-folder(); }
+                                    }
+                                    StripButton {
+                                        icon: Icons.link;
+                                        tip: I18n.tr("Copy URL");
+                                        is-enabled: root.can-strip-copy;
+                                        clicked => { root.strip-copy-url(); }
+                                    }
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                            }
+                            if root.view == 0: HorizontalLayout {
                                 spacing: 8px;
+                                alignment: start;
                                 ToolbarField {
-                                    field-width: max(root.width - 220px - 32px - 60px, 120px);
+                                    field-width: root.url-w;
                                     text <=> root.add-urls;
                                     placeholder: I18n.tr("Paste a URL and press Enter to download");
                                     submit => { root.add-submitted(); }
+                                }
+                                ActionButton {
+                                    label: I18n.tr("Add");
+                                    primary: true;
+                                    clicked => { root.add-submitted(); }
+                                }
+                                Rectangle { horizontal-stretch: 1; }
                             }
-                            ActionButton {
-                                label: I18n.tr("Add");
-                                primary: true;
-                                clicked => { root.add-submitted(); }
-                            }
-                            }
-                            HorizontalLayout {
+                            if root.view == 0 && !root.utility-wrap: HorizontalLayout {
                                 spacing: 8px;
+                                alignment: start;
                                 ToolbarField {
-                                    field-width: max(root.width - 220px - 32px - root.row2-actions-w - 24px, 120px);
+                                    field-width: root.filter-w;
                                     text <=> root.filter;
                                     placeholder: I18n.tr("Filter downloads");
-                            }
-                            if root.selected-count > 0 && !row2-tight: Text {
-                                vertical-alignment: center;
-                                text: root.selected-count + " " + I18n.tr("selected");
-                                color: Theme.accent-hi;
-                                font-size: 12px;
-                                font-weight: 600;
-                            }
-                            if root.selected-count > 0: ActionButton {
-                                label: I18n.tr("Pause");
-                                clicked => { root.bulk-remove-armed = false; root.bulk-pause(); }
-                            }
-                            if root.selected-count > 0: ActionButton {
-                                label: I18n.tr("Resume");
-                                clicked => { root.bulk-remove-armed = false; root.bulk-resume(); }
-                            }
-                            if root.selected-count > 0: ActionButton {
-                                label: root.bulk-remove-armed ? I18n.tr("Confirm remove") + " " + root.selected-count + "?"
-                                    : I18n.tr("Remove") + " " + root.selected-count;
-                                clicked => {
-                                    if (root.bulk-remove-armed) {
-                                        root.bulk-remove-armed = false;
-                                        root.bulk-remove();
-                                    } else {
-                                        root.bulk-remove-armed = true;
-                                    }
                                 }
+                                UtilityCluster {
+                                    armed: root.bulk-remove-armed;
+                                    count: root.selected-count;
+                                    show-count: root.selected-count > 0 && !root.count-tight;
+                                    confirmed => { root.bulk-remove-armed = false; root.bulk-remove(); }
+                                    clear => { root.clear-finished(); }
+                                }
+                                Rectangle { horizontal-stretch: 1; }
                             }
-                            ActionButton {
-                                label: I18n.tr("Clear finished");
-                                max-width: root.row2-tight ? 118px : 220px;
-                                clicked => { root.clear-finished(); }
-                            }
+                            if root.view == 0 && root.utility-wrap: VerticalLayout {
+                                spacing: 8px;
+                                HorizontalLayout {
+                                    alignment: start;
+                                    ToolbarField {
+                                        field-width: root.filter-w;
+                                        text <=> root.filter;
+                                        placeholder: I18n.tr("Filter downloads");
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                                HorizontalLayout {
+                                    alignment: start;
+                                    UtilityCluster {
+                                        armed: root.bulk-remove-armed;
+                                        count: root.selected-count;
+                                        show-count: root.selected-count > 0 && !root.count-tight;
+                                        confirmed => { root.bulk-remove-armed = false; root.bulk-remove(); }
+                                        clear => { root.clear-finished(); }
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
                             }
                         }
                         // hairline under the toolbar (single divider per region)

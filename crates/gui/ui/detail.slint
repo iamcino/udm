@@ -1,0 +1,204 @@
+// Per-download detail window. A separate top-level window, not the tray
+// popup and not the bottom panel. Rust places it once. Refresh only
+// replaces the text. The task id stays in Rust; this file has no id property.
+//
+// Default 600x360, min 480x320, max 100000. Min is below max on both axes,
+// which is what winit reads as resizable. The body scrolls. The action row
+// stays outside the scroll view.
+
+import { Theme as CinoTheme, Lang } from "@cino-ui";
+import { I18n } from "i18n.slint";
+import { Theme } from "theme.slint";
+import { ActionButton, KeyValue, ProgressBar } from "widgets.slint";
+import { ScrollView } from "std-widgets.slint";
+
+export component DetailWindow inherits Window {
+    title: root.filename-text == "" ? I18n.tr("Waiting for recovery") : root.filename-text;
+    icon: @image-url("../assets/icon.png");
+    background: Theme.bg;
+    default-font-family: Theme.family;
+    default-font-size: 13px;
+    preferred-width: 600px;
+    preferred-height: 360px;
+    min-width: 480px;
+    min-height: 320px;
+    max-width: 100000px;
+    max-height: 100000px;
+
+    in-out property <int> language-index: 0;
+    in-out property <int> theme-index: 0;
+    in-out property <int> accent-index: 0;
+
+    in property <string> filename-text;
+    in property <string> url-text;
+    in property <string> status-text;
+    in property <string> size-text;
+    in property <string> downloaded-text;
+    in property <string> percent-text;
+    in property <float> percent-value: -1;
+    in property <string> speed-text;
+    in property <string> eta-text;
+    in property <string> resume-text;
+    in property <string> resume-help;
+    in property <string> destination-text;
+    in property <string> category-text;
+    in property <string> notice-text;
+    in property <string> error-text;
+    in property <bool> waiting: false;
+    in property <bool> failed: false;
+    in property <bool> done: false;
+    in property <bool> can-pause: false;
+    in property <bool> can-resume: false;
+    in property <bool> can-cancel: false;
+    in property <bool> can-retry: false;
+    in property <bool> can-open-folder: false;
+
+    callback pause;
+    callback resume-or-retry;
+    callback cancel;
+    callback open-folder;
+    callback close-window;
+
+    public function apply-appearance() {
+        CinoTheme.dark = root.theme-index == 0;
+        CinoTheme.accent = Theme.accents[min(max(root.accent-index, 0), 4)];
+        Lang.english = root.language-index == 0;
+    }
+
+    public function grab-focus() {
+        fs.focus();
+    }
+
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        background: Theme.bg;
+
+        fs := FocusScope {
+            width: 100%;
+            height: 100%;
+            key-pressed(event) => {
+                if (event.text == Key.Escape) {
+                    root.close-window();
+                    return accept;
+                }
+                return reject;
+            }
+
+            VerticalLayout {
+                padding: 16px;
+                spacing: 8px;
+                width: 100%;
+                height: 100%;
+
+                Text {
+                    text: root.filename-text == "" ? I18n.tr("Waiting for recovery") : root.filename-text;
+                    color: Theme.text;
+                    font-size: 15px;
+                    font-weight: 600;
+                    overflow: elide;
+                }
+
+                if root.waiting: Text {
+                    text: root.status-text;
+                    color: Theme.warn;
+                    font-size: 12px;
+                    font-weight: 600;
+                    wrap: word-wrap;
+                }
+
+                body := ScrollView {
+                    vertical-stretch: 1;
+                    horizontal-stretch: 1;
+
+                    VerticalLayout {
+                        width: root.width - 32px;
+                        spacing: 6px;
+                        padding-right: 8px;
+
+                        HorizontalLayout {
+                            spacing: 16px;
+                            VerticalLayout {
+                                horizontal-stretch: 1;
+                                spacing: 2px;
+                                KeyValue { key: I18n.tr("Status"); value: root.status-text; }
+                                KeyValue { key: I18n.tr("Downloaded"); value: root.downloaded-text; }
+                                KeyValue { key: I18n.tr("Speed"); value: root.speed-text; }
+                                KeyValue { key: I18n.tr("Resume Support"); value: root.resume-text; }
+                            }
+                            VerticalLayout {
+                                horizontal-stretch: 1;
+                                spacing: 2px;
+                                KeyValue { key: I18n.tr("Total size"); value: root.size-text; }
+                                KeyValue { key: I18n.tr("Percent"); value: root.percent-text; }
+                                KeyValue { key: I18n.tr("Time left"); value: root.eta-text; }
+                                KeyValue { key: I18n.tr("Category"); value: root.category-text; }
+                            }
+                        }
+                        KeyValue { key: I18n.tr("URL"); value: root.url-text; }
+                        KeyValue { key: I18n.tr("Destination"); value: root.destination-text; }
+                        Text {
+                            text: root.resume-help;
+                            color: Theme.text-faint;
+                            font-size: 11px;
+                            wrap: word-wrap;
+                        }
+                        if root.notice-text != "": Text {
+                            text: root.notice-text;
+                            color: Theme.err;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                        if root.error-text != "": Text {
+                            text: root.error-text;
+                            color: Theme.err;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                        if root.percent-value >= 0: ProgressBar {
+                            fraction: root.percent-value;
+                            failed: root.failed;
+                            done: root.done;
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: end;
+                    // Enablement is the shared capability predicate. A disabled
+                    // button stays in the row so Cancel can be visible and off,
+                    // and so a pending association shows every task control off.
+                    // Escape and Close never call these callbacks.
+                    ActionButton {
+                        label: root.can-retry ? I18n.tr("Retry") : I18n.tr("Resume");
+                        is-enabled: root.can-resume || root.can-retry;
+                        primary: root.can-resume || root.can-retry;
+                        clicked => { root.resume-or-retry(); }
+                    }
+                    ActionButton {
+                        label: I18n.tr("Pause");
+                        is-enabled: root.can-pause;
+                        primary: root.can-pause;
+                        clicked => { root.pause(); }
+                    }
+                    ActionButton {
+                        label: I18n.tr("Cancel");
+                        is-enabled: root.can-cancel;
+                        clicked => { root.cancel(); }
+                    }
+                    ActionButton {
+                        label: I18n.tr("Open Folder");
+                        is-enabled: root.can-open-folder;
+                        primary: root.done;
+                        clicked => { root.open-folder(); }
+                    }
+                    ActionButton {
+                        label: I18n.tr("Close");
+                        clicked => { root.close-window(); }
+                    }
+                }
+            }
+        }
+    }
+}

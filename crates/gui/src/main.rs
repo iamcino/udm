@@ -35,11 +35,14 @@
 #![allow(deprecated)]
 
 mod browser;
+mod detail_assoc;
+mod detail_window;
 mod handoff_boot;
 mod handoff_dialog;
 mod i18n;
 mod startup;
 mod state;
+mod task_actions;
 mod tray;
 
 use std::sync::Arc;

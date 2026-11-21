@@ -30,9 +30,9 @@
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayAction {
-    /// Double click on the tray icon: bring the window up. A single click
-    /// is deliberately neutral (G3 part C1, owner ruling): it neither
-    /// shows the window nor opens the popup.
+    /// Left-button release, or a left double-click: show the main window.
+    /// Idempotent. An already-visible window is raised and focused, never
+    /// hidden and never opened a second time. Right click keeps the menu.
     Show,
     /// "Active downloads..." menu item: toggle the downloads popup. The
     /// popup opens only from explicit menu choices (here and in the app's
@@ -46,6 +46,49 @@ pub enum TrayAction {
     /// Settings button (0.2.2; the tray menu had no way to ask).
     CheckForUpdates,
     Exit,
+}
+
+/// Left click does not open the menu. Right click still does, which is
+/// tray-icon's behavior when this flag is false (Windows: menu on
+/// `WM_RBUTTONDOWN` only).
+#[cfg(windows)]
+pub const MENU_ON_LEFT_CLICK: bool = false;
+
+/// Visibility after a Show action. The previous state is ignored on
+/// purpose: hidden, visible, and minimized all become a single visible
+/// un-minimized window. A second call stays there. Nothing in this
+/// result asks the caller to hide the window or create another one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ShownWindow {
+    pub visible: bool,
+    pub minimized: bool,
+}
+
+pub fn after_show(_before: ShownWindow) -> ShownWindow {
+    ShownWindow {
+        visible: true,
+        minimized: false,
+    }
+}
+
+/// Map one tray-icon event to a window action. Only a left-button
+/// release and a left double-click show the window. Right click, other
+/// buttons, and press-down are left to the native menu or ignored.
+#[cfg(windows)]
+pub fn action_for_icon_event(event: &tray_icon::TrayIconEvent) -> Option<TrayAction> {
+    use tray_icon::{MouseButton, MouseButtonState, TrayIconEvent};
+    match event {
+        TrayIconEvent::Click {
+            button: MouseButton::Left,
+            button_state: MouseButtonState::Up,
+            ..
+        } => Some(TrayAction::Show),
+        TrayIconEvent::DoubleClick {
+            button: MouseButton::Left,
+            ..
+        } => Some(TrayAction::Show),
+        _ => None,
+    }
 }
 
 #[cfg(windows)]
@@ -157,6 +200,7 @@ mod imp {
             .ok()?;
             let icon_handle = TrayIconBuilder::new()
                 .with_menu(Box::new(menu))
+                .with_menu_on_left_click(super::MENU_ON_LEFT_CLICK)
                 .with_tooltip("UDM — Universal Download Manager")
                 .with_icon(icon)
                 .build()
@@ -202,11 +246,8 @@ mod imp {
                 actions.push(action);
             }
             while let Ok(event) = TrayIconEvent::receiver().try_recv() {
-                match event {
-                    // Single click stays neutral by owner ruling (G3 C1);
-                    // only a double click raises the main window.
-                    TrayIconEvent::DoubleClick { .. } => actions.push(TrayAction::Show),
-                    _ => {}
+                if let Some(action) = super::action_for_icon_event(&event) {
+                    actions.push(action);
                 }
             }
             actions
@@ -420,3 +461,95 @@ mod imp {
 }
 
 pub use imp::{cursor_work_area, set_menu_theme, Tray};
+
+#[cfg(test)]
+mod tests {
+    use super::{after_show, ShownWindow};
+
+    #[test]
+    fn show_is_idempotent_and_never_hides() {
+        let hidden = ShownWindow {
+            visible: false,
+            minimized: true,
+        };
+        let once = after_show(hidden);
+        assert_eq!(
+            once,
+            ShownWindow {
+                visible: true,
+                minimized: false,
+            }
+        );
+        let twice = after_show(once);
+        assert_eq!(twice, once);
+        let already = after_show(ShownWindow {
+            visible: true,
+            minimized: false,
+        });
+        assert!(already.visible);
+        assert!(!already.minimized);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn left_up_and_left_double_click_show_and_other_buttons_do_not() {
+        use tray_icon::{dpi, MouseButton, MouseButtonState, Rect, TrayIconEvent, TrayIconId};
+
+        use super::{action_for_icon_event, TrayAction, MENU_ON_LEFT_CLICK};
+
+        assert!(
+            !MENU_ON_LEFT_CLICK,
+            "left click must not open the tray menu"
+        );
+
+        fn click(button: MouseButton, state: MouseButtonState) -> TrayIconEvent {
+            TrayIconEvent::Click {
+                id: TrayIconId::new("udm"),
+                position: dpi::PhysicalPosition::default(),
+                rect: Rect::default(),
+                button,
+                button_state: state,
+            }
+        }
+
+        fn double(button: MouseButton) -> TrayIconEvent {
+            TrayIconEvent::DoubleClick {
+                id: TrayIconId::new("udm"),
+                position: dpi::PhysicalPosition::default(),
+                rect: Rect::default(),
+                button,
+            }
+        }
+
+        assert_eq!(
+            action_for_icon_event(&click(MouseButton::Left, MouseButtonState::Up)),
+            Some(TrayAction::Show)
+        );
+        assert_eq!(
+            action_for_icon_event(&double(MouseButton::Left)),
+            Some(TrayAction::Show)
+        );
+        assert_eq!(
+            action_for_icon_event(&click(MouseButton::Left, MouseButtonState::Down)),
+            None
+        );
+        assert_eq!(
+            action_for_icon_event(&click(MouseButton::Right, MouseButtonState::Up)),
+            None
+        );
+        assert_eq!(
+            action_for_icon_event(&click(MouseButton::Right, MouseButtonState::Down)),
+            None
+        );
+        assert_eq!(action_for_icon_event(&double(MouseButton::Right)), None);
+        assert_eq!(action_for_icon_event(&double(MouseButton::Middle)), None);
+        assert_eq!(
+            action_for_icon_event(&TrayIconEvent::Enter {
+                id: TrayIconId::new("udm"),
+                position: dpi::PhysicalPosition::default(),
+                rect: Rect::default(),
+            }),
+            None
+        );
+    }
+}

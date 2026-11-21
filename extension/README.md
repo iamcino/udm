@@ -1,4 +1,4 @@
-# UDM Handoff: browser extension
+# Universal Download Manager: browser extension
 
 **Send eligible browser downloads to the running UDM app.** The Chrome and
 Firefox extension uses a local Native Messaging host, `udm-host`, and a
@@ -195,7 +195,7 @@ it does not read page content or forward cookies/authentication headers.
 Its own code makes no external HTTP requests. UDM's engine makes the actual
 file requests after commitment.
 
-Capture settings/exclusions and up to 20 recent outcomes stay in
+Capture settings/exclusions and pending or attention-worthy outcomes stay in
 `storage.local`. A recent entry may contain a filename or URL fallback.
 The coordinator journal also stores intent URLs and recovery evidence under
 the data root. These records can be sensitive. See [Privacy](../docs/PRIVACY.md).

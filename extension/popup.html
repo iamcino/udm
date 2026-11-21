@@ -7,19 +7,20 @@
 <body>
   <header>
     <img src="icons/icon48.png" alt="" width="24" height="24">
-    <h1 id="title">UDM Handoff</h1>
+    <h1 id="title">Universal Download Manager</h1>
   </header>
   <label class="row">
     <input type="checkbox" id="enabled">
     <span id="enabledLabel">Auto-capture downloads</span>
   </label>
-  <h2 id="recentLabel">Recent handoffs</h2>
+  <h2 id="recentLabel">Needs attention</h2>
   <ul id="log"></ul>
-  <p id="none" hidden>No handoffs yet.</p>
+  <p id="none" hidden>Nothing needs attention.</p>
   <footer>
     <a href="#" id="optionsLink">Options</a>
   </footer>
   <script src="strings.js"></script>
+  <script src="handoff.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

@@ -1,0 +1,42 @@
+// Compile-level proof that @cino-ui re-exports Icon, Icons, IconData,
+// IconPart, IconPalette, and Gallery. The same Icon component draws a
+// baseline legacy glyph, a parts-based colored glyph, and a udm- variant.
+// Accent is passed on the colored icons so a selected tint cannot flatten
+// their parts. The shipping window only references this under `if false`.
+
+import { Gallery, Icon, IconData, IconPalette, IconPart, Icons, Theme as CinoTheme } from "@cino-ui";
+
+export component IconExportProof inherits Rectangle {
+    property <IconData> legacy-sample: Icons.sliders;
+    property <IconData> parts-sample: Icons.download;
+    property <IconPart> part-probe: { stroke: "", fill: "", ink: IconPalette.green };
+    property <color> palette-probe: IconPalette.blue;
+    width: 54px;
+    height: 18px;
+    background: CinoTheme.window-bg;
+    HorizontalLayout {
+        Icon {
+            icon: root.legacy-sample;
+            color: CinoTheme.label;
+            width: 18px;
+            height: 18px;
+        }
+        Icon {
+            icon: root.parts-sample;
+            color: CinoTheme.accent;
+            width: 18px;
+            height: 18px;
+        }
+        Icon {
+            icon: Icons.udm-check;
+            color: CinoTheme.accent;
+            width: 18px;
+            height: 18px;
+        }
+    }
+    if false: Gallery {}
+    if root.part-probe.ink == root.palette-probe: Rectangle {
+        width: 0px;
+        height: 0px;
+    }
+}

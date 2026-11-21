@@ -1,0 +1,42 @@
+// Development-only capture wrapper for the icon gallery. Not a shipping
+// surface: nothing in the app shows this window. Set `dark` before the
+// window is shown. The title and the caption both name the chosen theme.
+//
+// Intended QA captures, shipping software renderer, after this stage:
+//   IconGalleryCapture with dark = true,  scale 1
+//   IconGalleryCapture with dark = false, scale 1
+//   IconGalleryCapture with dark = true,  scale 1.5
+//   IconGalleryCapture with dark = false, scale 1.5
+// Record the candidate commit beside those four frames. Paginated sheets
+// are not used; one frame at 820×1040 covers the expanded gallery.
+
+import { Gallery, Theme } from "@cino-ui";
+
+export component IconGalleryCapture inherits Window {
+    in property <bool> dark: true;
+    title: root.dark ? "UDM icon gallery — dark" : "UDM icon gallery — light";
+    preferred-width: 820px;
+    preferred-height: 1040px;
+    background: Theme.window-bg;
+    init => {
+        Theme.dark = root.dark;
+    }
+    changed dark => {
+        Theme.dark = root.dark;
+    }
+    VerticalLayout {
+        padding: 8px;
+        spacing: 6px;
+        Text {
+            text: root.dark ? "theme: dark" : "theme: light";
+            color: Theme.label;
+            font-family: Theme.font;
+            font-size: Theme.fs-body;
+            font-weight: 600;
+        }
+        Gallery {
+            horizontal-stretch: 1;
+            vertical-stretch: 1;
+        }
+    }
+}

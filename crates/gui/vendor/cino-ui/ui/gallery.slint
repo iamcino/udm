@@ -1,0 +1,242 @@
+// Local UDM evidence sheet for the cino-ui icon programme.
+// Not an upstream snapshot file and not a shipping UDM surface.
+// Baseline cells stay on the legacy Icon.color path (Theme.label).
+// Colored cells carry their own parts; Icon.color does not recolor them.
+// The sheet follows Theme.dark. Disabled cells use Icon.enabled only.
+
+import { Theme } from "theme.slint";
+import { Icon, IconData, Icons } from "icons.slint";
+
+component GalleryCell inherits Rectangle {
+    in property <string> name;
+    in property <IconData> glyph;
+    in property <bool> enabled: true;
+    width: 124px;
+    height: 56px;
+    VerticalLayout {
+        alignment: center;
+        spacing: 4px;
+        Rectangle {
+            height: 18px;
+            horizontal-stretch: 1;
+            Icon {
+                x: (parent.width - self.width) / 2;
+                y: 0px;
+                width: 18px;
+                height: 18px;
+                icon: root.glyph;
+                color: Theme.label;
+                enabled: root.enabled;
+            }
+        }
+        Text {
+            text: root.name;
+            color: Theme.label2;
+            font-family: Theme.font;
+            font-size: 10px;
+            horizontal-alignment: center;
+            overflow: elide;
+            width: 100%;
+        }
+    }
+}
+
+component SwatchIcons inherits HorizontalLayout {
+    alignment: center;
+    spacing: 6px;
+    Icon { icon: Icons.download; width: 18px; height: 18px; color: Theme.label; }
+    Icon { icon: Icons.pause; width: 18px; height: 18px; color: Theme.label; }
+    Icon { icon: Icons.failed; width: 18px; height: 18px; color: Theme.label; }
+    Icon { icon: Icons.udm-check; width: 18px; height: 18px; color: Theme.label; }
+    Icon { icon: Icons.chrome; width: 18px; height: 18px; color: Theme.label; }
+}
+
+// Actual adjacent surfaces: content window, sidebar composited on the window,
+// hover wash on that sidebar, and the accent selection wash used by task rows.
+component SurfaceSwatch inherits Rectangle {
+    in property <string> name;
+    in property <color> wash: transparent;
+    in property <bool> on-sidebar: false;
+    width: 188px;
+    height: 78px;
+    border-radius: Theme.r-control;
+    background: Theme.window-bg;
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: Theme.r-control;
+        background: root.on-sidebar ? Theme.sidebar-bg : transparent;
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            border-radius: Theme.r-control;
+            background: root.wash;
+            VerticalLayout {
+                padding: 6px;
+                spacing: 4px;
+                SwatchIcons { }
+                Text {
+                    text: root.name;
+                    color: Theme.label;
+                    font-family: Theme.font;
+                    font-size: 10px;
+                    horizontal-alignment: center;
+                    overflow: elide;
+                    width: 100%;
+                }
+            }
+        }
+    }
+}
+
+export component Gallery inherits Rectangle {
+    // 6×124 cells + gaps + padding. Height fits baseline, the 28 local
+    // glyphs, the udm- variants, a disabled row, and the surface swatches.
+    preferred-width: 820px;
+    preferred-height: 940px;
+    background: Theme.window-bg;
+    VerticalLayout {
+        width: 100%;
+        height: 100%;
+        padding: 16px;
+        spacing: 8px;
+        Text {
+            text: "cino-ui icons";
+            color: Theme.label;
+            font-family: Theme.font;
+            font-size: Theme.fs-title;
+            font-weight: 600;
+        }
+        Text {
+            text: "Baseline (legacy)";
+            color: Theme.label;
+            font-family: Theme.font;
+            font-size: Theme.fs-body;
+            font-weight: 600;
+        }
+        GridLayout {
+            spacing: 4px;
+            Row {
+                GalleryCell { name: "sliders"; glyph: Icons.sliders; }
+                GalleryCell { name: "shield"; glyph: Icons.shield; }
+                GalleryCell { name: "bolt"; glyph: Icons.bolt; }
+                GalleryCell { name: "globe"; glyph: Icons.globe; }
+                GalleryCell { name: "appearance"; glyph: Icons.appearance; }
+                GalleryCell { name: "power"; glyph: Icons.power; }
+            }
+            Row {
+                GalleryCell { name: "home"; glyph: Icons.home; }
+                GalleryCell { name: "refresh"; glyph: Icons.refresh; }
+                GalleryCell { name: "info"; glyph: Icons.info; }
+                GalleryCell { name: "check"; glyph: Icons.check; }
+                GalleryCell { name: "close"; glyph: Icons.close; }
+                GalleryCell { name: "chevron-right"; glyph: Icons.chevron-right; }
+            }
+            Row {
+                GalleryCell { name: "plus"; glyph: Icons.plus; }
+                GalleryCell { name: "minus"; glyph: Icons.minus; }
+            }
+        }
+        Text {
+            text: "UDM";
+            color: Theme.label;
+            font-family: Theme.font;
+            font-size: Theme.fs-body;
+            font-weight: 600;
+        }
+        GridLayout {
+            spacing: 4px;
+            Row {
+                GalleryCell { name: "chevron-down"; glyph: Icons.chevron-down; }
+                GalleryCell { name: "download"; glyph: Icons.download; }
+                GalleryCell { name: "play"; glyph: Icons.play; }
+                GalleryCell { name: "pause"; glyph: Icons.pause; }
+                GalleryCell { name: "stop"; glyph: Icons.stop; }
+                GalleryCell { name: "trash"; glyph: Icons.trash; }
+            }
+            Row {
+                GalleryCell { name: "file"; glyph: Icons.file; }
+                GalleryCell { name: "folder"; glyph: Icons.folder; }
+                GalleryCell { name: "link"; glyph: Icons.link; }
+                GalleryCell { name: "clear"; glyph: Icons.clear; }
+                GalleryCell { name: "library"; glyph: Icons.library; }
+                GalleryCell { name: "grid"; glyph: Icons.grid; }
+            }
+            Row {
+                GalleryCell { name: "all-downloads"; glyph: Icons.all-downloads; }
+                GalleryCell { name: "unfinished"; glyph: Icons.unfinished; }
+                GalleryCell { name: "active-downloads"; glyph: Icons.active-downloads; }
+                GalleryCell { name: "failed"; glyph: Icons.failed; }
+                GalleryCell { name: "documents"; glyph: Icons.documents; }
+                GalleryCell { name: "music"; glyph: Icons.music; }
+            }
+            Row {
+                GalleryCell { name: "videos"; glyph: Icons.videos; }
+                GalleryCell { name: "images"; glyph: Icons.images; }
+                GalleryCell { name: "archives"; glyph: Icons.archives; }
+                GalleryCell { name: "programs"; glyph: Icons.programs; }
+                GalleryCell { name: "disk-images"; glyph: Icons.disk-images; }
+                GalleryCell { name: "other"; glyph: Icons.other; }
+            }
+            Row {
+                GalleryCell { name: "all-categories"; glyph: Icons.all-categories; }
+                GalleryCell { name: "custom-category"; glyph: Icons.custom-category; }
+                GalleryCell { name: "chrome"; glyph: Icons.chrome; }
+                GalleryCell { name: "firefox"; glyph: Icons.firefox; }
+            }
+        }
+        Text {
+            text: "UDM variants";
+            color: Theme.label;
+            font-family: Theme.font;
+            font-size: Theme.fs-body;
+            font-weight: 600;
+        }
+        GridLayout {
+            spacing: 4px;
+            Row {
+                GalleryCell { name: "udm-sliders"; glyph: Icons.udm-sliders; }
+                GalleryCell { name: "udm-info"; glyph: Icons.udm-info; }
+                GalleryCell { name: "udm-check"; glyph: Icons.udm-check; }
+                GalleryCell { name: "udm-refresh"; glyph: Icons.udm-refresh; }
+                GalleryCell { name: "udm-chevron-right"; glyph: Icons.udm-chevron-right; }
+                GalleryCell { name: "udm-plus"; glyph: Icons.udm-plus; }
+            }
+        }
+        Text {
+            text: "Disabled";
+            color: Theme.label;
+            font-family: Theme.font;
+            font-size: Theme.fs-body;
+            font-weight: 600;
+        }
+        GridLayout {
+            spacing: 4px;
+            Row {
+                GalleryCell { name: "download"; glyph: Icons.download; enabled: false; }
+                GalleryCell { name: "pause"; glyph: Icons.pause; enabled: false; }
+                GalleryCell { name: "udm-check"; glyph: Icons.udm-check; enabled: false; }
+                GalleryCell { name: "chrome"; glyph: Icons.chrome; enabled: false; }
+                GalleryCell { name: "sliders"; glyph: Icons.sliders; enabled: false; }
+                GalleryCell { name: "failed"; glyph: Icons.failed; enabled: false; }
+            }
+        }
+        Text {
+            text: "Surfaces";
+            color: Theme.label;
+            font-family: Theme.font;
+            font-size: Theme.fs-body;
+            font-weight: 600;
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            SurfaceSwatch { name: "window"; }
+            SurfaceSwatch { name: "sidebar"; on-sidebar: true; }
+            SurfaceSwatch { name: "hover"; on-sidebar: true; wash: Theme.sidebar-sel; }
+            SurfaceSwatch {
+                name: "selected";
+                wash: Theme.accent.with-alpha(Theme.dark ? 0.25 : 0.12);
+            }
+        }
+    }
+}

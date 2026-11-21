@@ -239,6 +239,138 @@ const tick = () => new Promise((r) => setTimeout(r, 100));
     assert.deepStrictEqual(downloads, []);
   });
 
+  await test("startup migration drops handed-off rows and leaves the live pending transaction", async () => {
+    const hosts = [];
+    const sent = [];
+    const sets = [];
+    const error = { tx: "e", name: "bad.pdf", status: "recovery-required", at: 2 };
+    const discarded = { tx: "d", name: "no.pdf", status: "discarded", at: 3 };
+    const store = {
+      udmSettings: { enabled: true, exclusions: ["*.example.com"] },
+      udmHandoffLog: [
+        { tx: "s", name: "ok.pdf", status: "handed-off", task_ref: "1", at: 1 },
+        error,
+        discarded,
+      ],
+      udmHandoffPending: {
+        "tx-live": {
+          tx: "tx-live",
+          stage: "prepared",
+          task_ref: null,
+          reissued: false,
+          intent: {
+            url: "https://example.com/live.bin",
+            method: "GET",
+            filename_hint: "live.bin",
+            size_hint: 10,
+            browser_download_id: "7",
+            dest_dir: null,
+          },
+        },
+      },
+    };
+    const pendingBefore = JSON.parse(JSON.stringify(store.udmHandoffPending));
+    const settingsBefore = JSON.parse(JSON.stringify(store.udmSettings));
+    const fake = makeFakeApi(hosts, false);
+    fake.api.storage.local.get = async (key) => {
+      const keys = Array.isArray(key) ? key : [key];
+      const out = {};
+      for (const k of keys) {
+        if (Object.prototype.hasOwnProperty.call(store, k)) out[k] = store[k];
+      }
+      return out;
+    };
+    fake.api.storage.local.set = async (obj) => {
+      sets.push(JSON.parse(JSON.stringify(obj)));
+      for (const [k, v] of Object.entries(obj)) store[k] = JSON.parse(JSON.stringify(v));
+    };
+    fake.api.runtime.connectNative = (name) => {
+      hosts.push(name);
+      return {
+        postMessage(message) {
+          sent.push(message);
+        },
+        disconnect() {},
+        onMessage: { addListener() {} },
+        onDisconnect: { addListener() {} },
+      };
+    };
+    const ctx = vm.createContext({ setTimeout, clearTimeout, console, URL });
+    ctx.chrome = fake.api;
+    ctx.browser = fake.api;
+    ctx.importScripts = (file) => vm.runInContext(read(file), ctx, { filename: file });
+    vm.runInContext(read("background.js"), ctx, { filename: "background.js" });
+    for (let i = 0; i < 20 && sent.length === 0; i++) await tick();
+    assert.strictEqual(sent.length, 1);
+    assert.strictEqual(sent[0].op, "query");
+    assert.strictEqual(sent[0].tx, "tx-live");
+    const logWrites = sets.filter((s) => Object.prototype.hasOwnProperty.call(s, "udmHandoffLog"));
+    assert.strictEqual(logWrites.length, 1);
+    assert.deepStrictEqual(
+      logWrites[0].udmHandoffLog.map((e) => e.tx),
+      ["e", "d"],
+    );
+    assert.deepStrictEqual(logWrites[0].udmHandoffLog[0], error);
+    assert.deepStrictEqual(logWrites[0].udmHandoffLog[1], discarded);
+    assert.ok(sets.every((s) => !Object.prototype.hasOwnProperty.call(s, "udmSettings")));
+    assert.ok(sets.every((s) => !Object.prototype.hasOwnProperty.call(s, "udmHandoffPending")));
+    assert.deepStrictEqual(store.udmHandoffPending, pendingBefore);
+    assert.deepStrictEqual(store.udmSettings, settingsBefore);
+    assert.ok(Array.isArray(store.udmHandoffLog));
+
+    await vm.runInContext(
+      "fx.record({tx:'s2', name:'again.pdf', status:'handed-off', task_ref:'9', at:9})",
+      ctx,
+    );
+    assert.deepStrictEqual(
+      store.udmHandoffLog.map((e) => e.status),
+      ["recovery-required", "discarded"],
+    );
+    await vm.runInContext(
+      "fx.record({tx:'k', name:'kept.pdf', status:'kept-by-browser', at:10})",
+      ctx,
+    );
+    assert.deepStrictEqual(
+      store.udmHandoffLog.map((e) => [e.tx, e.status]),
+      [
+        ["k", "kept-by-browser"],
+        ["e", "recovery-required"],
+        ["d", "discarded"],
+      ],
+    );
+    assert.deepStrictEqual(store.udmHandoffPending, pendingBefore);
+    assert.deepStrictEqual(store.udmSettings, settingsBefore);
+  });
+
+  await test("recording a success does not create udmHandoffLog", async () => {
+    const sets = [];
+    const store = {};
+    const fake = makeFakeApi([], false);
+    fake.api.storage.local.get = async (key) => {
+      const keys = Array.isArray(key) ? key : [key];
+      const out = {};
+      for (const k of keys) {
+        if (Object.prototype.hasOwnProperty.call(store, k)) out[k] = store[k];
+      }
+      return out;
+    };
+    fake.api.storage.local.set = async (obj) => {
+      sets.push(JSON.parse(JSON.stringify(obj)));
+      for (const [k, v] of Object.entries(obj)) store[k] = JSON.parse(JSON.stringify(v));
+    };
+    const ctx = vm.createContext({ setTimeout, clearTimeout, console, URL });
+    ctx.chrome = fake.api;
+    ctx.browser = fake.api;
+    ctx.importScripts = (file) => vm.runInContext(read(file), ctx, { filename: file });
+    vm.runInContext(read("background.js"), ctx, { filename: "background.js" });
+    await tick();
+    await vm.runInContext("fx.record({tx:'s', name:'a.pdf', status:'handed-off', task_ref:'1', at:1})", ctx);
+    assert.ok(!Object.prototype.hasOwnProperty.call(store, "udmHandoffLog"));
+    assert.ok(sets.every((s) => !Object.prototype.hasOwnProperty.call(s, "udmHandoffLog")));
+    await vm.runInContext("fx.record({tx:'d', name:'no.pdf', status:'discarded', at:2})", ctx);
+    assert.deepStrictEqual(store.udmHandoffLog, [{ tx: "d", name: "no.pdf", status: "discarded", at: 2 }]);
+  });
+
   await test("a re-issued download is skipped once; a fresh one is not", async () => {
     const hosts = [];
     const fake = makeFakeApi(hosts, false);

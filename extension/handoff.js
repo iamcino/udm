@@ -1,6 +1,6 @@
 "use strict";
 /*
- * UDM Handoff - shared logic for the browser extension (G4).
+ * Universal Download Manager - shared logic for the browser extension (G4).
  *
  * Implements the extension side of the browser-handoff contract over
  * the wire settled in the G5 design handoff: JSON objects {v: 1, op,
@@ -278,7 +278,8 @@ function taskRefOf(reply) {
  *   fx.erase(id) -> Promise<void>
  *   fx.download(url) -> Promise<id>  (re-issue a download in the
  *     browser; rejects when the browser refuses)
- *   fx.record(entry) -> Promise<void>  (bounded handoff log for the popup)
+ *   fx.record(entry) -> Promise<void>  (bounded attention log for the popup;
+ *     a handed-off success is not written — the app keeps that history)
  *   fx.persist(record) -> Promise<void>  (durable pending record)
  *   fx.clearPending(tx) -> Promise<void>
  *   fx.sleep(ms) -> Promise<void>  (optional; defaults to setTimeout)
@@ -307,12 +308,22 @@ function createHandoffFlow(client, fx, options) {
     if (typeof fx.notifyPending === "function") fx.notifyPending();
   }
 
+  // Attention rows only. A handed-off success is a no-op here so the popup
+  // does not accumulate history; callers still await it between the durable
+  // terminal write and clearPending.
+  async function recordAttention(entry) {
+    if (!entry || isSuccessLogStatus(entry.status)) return;
+    await fx.record(entry);
+  }
+
   async function settle(tx, intent, stage, taskRef) {
     const popup = stage === "committed" ? "handed-off" : stage;
-    // The outcome hits storage before the pending record is removed, so a
+    // The terminal pending record hits storage before it is removed, so a
     // crash in between resumes the same tx instead of inventing one.
+    // recordAttention is a no-op for a handed-off success and still sits
+    // between that write and clearPending.
     await persist(pendingRecord(tx, intent, stage, { task_ref: taskRef || null }));
-    await fx.record({
+    await recordAttention({
       tx,
       name: intent.filename_hint || intent.url,
       status: popup,
@@ -341,7 +352,7 @@ function createHandoffFlow(client, fx, options) {
         if (current !== "recovery-required") {
           current = "recovery-required";
           await persist(pendingRecord(tx, intent, "recovery-required"));
-          await fx.record({
+          await recordAttention({
             tx,
             name: intent.filename_hint || intent.url,
             status: "recovery-required",
@@ -359,7 +370,7 @@ function createHandoffFlow(client, fx, options) {
 
   async function enterRecovery(tx, intent) {
     await persist(pendingRecord(tx, intent, "recovery-required"));
-    await fx.record({
+    await recordAttention({
       tx,
       name: intent.filename_hint || intent.url,
       status: "recovery-required",
@@ -385,7 +396,7 @@ function createHandoffFlow(client, fx, options) {
       return settle(tx, intent, reply.status, null);
     }
     await persist(pendingRecord(tx, intent, "conflict"));
-    await fx.record({
+    await recordAttention({
       tx,
       name: intent.url,
       status: "recovery-required",
@@ -410,7 +421,7 @@ function createHandoffFlow(client, fx, options) {
     }
     if (ok) {
       await persist(pendingRecord(tx, intent, "kept-by-browser", { reissued: true }));
-      await fx.record({
+      await recordAttention({
         tx,
         name: intent.filename_hint || intent.url,
         status: "kept-by-browser",
@@ -418,7 +429,7 @@ function createHandoffFlow(client, fx, options) {
       });
     } else {
       await persist(pendingRecord(tx, intent, "kept-by-browser", { reissued: true, reissueFailed: true }));
-      await fx.record({
+      await recordAttention({
         tx,
         name: intent.url,
         status: "recovery-required",
@@ -461,7 +472,7 @@ function createHandoffFlow(client, fx, options) {
       if (acted !== null) return acted;
     }
     await persist(pendingRecord(tx, intent, "conflict"));
-    await fx.record({
+    await recordAttention({
       tx,
       name: intent.url,
       status: "recovery-required",
@@ -490,7 +501,19 @@ function createHandoffFlow(client, fx, options) {
           : stage === "kept-by-browser"
             ? "kept-by-browser"
             : stage;
-    await fx.record({
+    // The journal entry is already terminal. Write it again before clear
+    // when the popup row is a no-op, so a crash still cannot bring a
+    // settled success back as a fresh pending handoff.
+    if (isSuccessLogStatus(popup)) {
+      await persist(
+        pendingRecord(tx, intent, stage, {
+          task_ref: prior.task_ref ?? null,
+          reissued: !!prior.reissued,
+          reissueFailed: !!prior.reissueFailed,
+        }),
+      );
+    }
+    await recordAttention({
       tx,
       name: failed ? intent.url : intent.filename_hint || intent.url,
       status: popup,
@@ -531,7 +554,7 @@ function createHandoffFlow(client, fx, options) {
       const cancelled = await fx.cancel(browserId).catch(() => false);
       if (!cancelled) {
         await persist(pendingRecord(tx, intent, "kept-by-browser"));
-        await fx.record({
+        await recordAttention({
           tx,
           name: intent.filename_hint || intent.url,
           status: "kept-by-browser",
@@ -547,7 +570,7 @@ function createHandoffFlow(client, fx, options) {
 
     if (stage === "cancelled") {
       if (prior.reissued) {
-        await fx.record({
+        await recordAttention({
           tx,
           name: prior.reissueFailed ? intent.url : intent.filename_hint || intent.url,
           status: prior.reissueFailed ? "recovery-required" : "kept-by-browser",
@@ -604,6 +627,97 @@ function createHandoffFlow(client, fx, options) {
   return { handoff, resume };
 }
 
+/** Popup success history. Every other stored status is attention. */
+function isSuccessLogStatus(status) {
+  return status === "handed-off";
+}
+
+/**
+ * Remove handed-off entries from a `udmHandoffLog` array. Non-success
+ * entries are the same objects, in the same order. A non-array is not a
+ * log this migration understands: return null so the caller leaves the
+ * stored key alone instead of deleting or replacing it.
+ */
+function migrateHandoffLog(log) {
+  if (!Array.isArray(log)) return null;
+  return log.filter((entry) => !entry || typeof entry !== "object" || !isSuccessLogStatus(entry.status));
+}
+
+function observedReason(entry) {
+  if (!entry || typeof entry.reason !== "string") return null;
+  const trimmed = entry.reason.trim();
+  return trimmed.length > 0 ? entry.reason : null;
+}
+
+function popupRow(tx, name, status, logEntry, taskRef) {
+  return {
+    tx,
+    name: name || "",
+    status,
+    reason: observedReason(logEntry),
+    task_ref: taskRef || null,
+    needsAction: status === "recovery-required",
+  };
+}
+
+function pendingListOf(pendingRecords) {
+  if (Array.isArray(pendingRecords)) return pendingRecords;
+  if (pendingRecords && typeof pendingRecords === "object") return Object.values(pendingRecords);
+  return [];
+}
+
+/** Status the popup shows for one operational pending record. null means
+ *  the record is a settled success still waiting to be cleared: no row. */
+function projectPendingStatus(rec) {
+  const stage = rec && rec.stage;
+  if (stage === "recovery-required" || (rec && rec.reissueFailed) || stage === "conflict") return "recovery-required";
+  if (stage === "kept-by-browser") return "kept-by-browser";
+  if (stage === "aborted" || stage === "discarded" || stage === "expired") return stage;
+  if (stage === "committed") return null;
+  return "pending";
+}
+
+function attentionRank(status) {
+  if (status === "recovery-required") return 0;
+  if (status === "pending") return 2;
+  return 1;
+}
+
+/**
+ * Popup view. Pending rows come from the operational pending records.
+ * Attention rows come from the log. The same tx is one row; the pending
+ * record wins. Success entries are omitted. This does not mutate either
+ * argument and does not clear the journal.
+ */
+function projectPopupItems(pendingRecords, log) {
+  const cleaned = migrateHandoffLog(log) || [];
+  const logByTx = new Map();
+  for (const entry of cleaned) {
+    if (!entry || typeof entry !== "object" || typeof entry.tx !== "string") continue;
+    if (!logByTx.has(entry.tx)) logByTx.set(entry.tx, entry);
+  }
+  const seen = new Set();
+  const rows = [];
+  for (const rec of pendingListOf(pendingRecords)) {
+    if (!rec || typeof rec.tx !== "string" || seen.has(rec.tx)) continue;
+    seen.add(rec.tx);
+    const status = projectPendingStatus(rec);
+    if (!status) continue;
+    const logEntry = logByTx.get(rec.tx) || null;
+    const intent = rec.intent || {};
+    const name = intent.filename_hint || intent.url || (logEntry && logEntry.name) || "";
+    rows.push(popupRow(rec.tx, name, status, logEntry, rec.task_ref));
+  }
+  for (const entry of cleaned) {
+    if (!entry || typeof entry !== "object" || typeof entry.tx !== "string") continue;
+    if (seen.has(entry.tx) || isSuccessLogStatus(entry.status)) continue;
+    seen.add(entry.tx);
+    rows.push(popupRow(entry.tx, entry.name || "", entry.status || "attention", entry, entry.task_ref));
+  }
+  rows.sort((a, b) => attentionRank(a.status) - attentionRank(b.status));
+  return rows;
+}
+
 const handoffApi = {
   WIRE_VERSION,
   HOST_NAMES,
@@ -614,6 +728,9 @@ const handoffApi = {
   buildIntent,
   createHandoffClient,
   createHandoffFlow,
+  isSuccessLogStatus,
+  migrateHandoffLog,
+  projectPopupItems,
 };
 if (typeof module !== "undefined" && module.exports) module.exports = handoffApi;
 if (typeof globalThis !== "undefined") globalThis.UdmHandoff = handoffApi;

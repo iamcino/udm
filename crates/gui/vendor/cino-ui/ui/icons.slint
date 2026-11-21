@@ -1,15 +1,49 @@
 // cino-ui: vector icons on a 24-unit grid.
 //
-// Icons are Slint `Path`s coloured from Theme, never colourised SVG `Image`s:
-// the GPU renderer now and then drew those with pieces missing. An icon has a
-// stroked part and an optional filled part.
+// Icons are Slint `Path`s, never colourised SVG `Image`s: the GPU renderer
+// now and then drew those with pieces missing. A legacy icon (empty `parts`)
+// is one stroked path plus an optional filled path, both tinted by Icon.color.
+// A colored icon leaves those strings empty and paints `parts` back to front,
+// each part in its own ink from IconPalette.
 //
 // Adding an icon: draw it on a 24x24 grid (stroke 1.4, round caps), put the
-// path data in `Icons` below, and add it to the gallery.
+// path data in `Icons` below, and add it to the gallery. Hex literals belong
+// in IconPalette only.
+//
+// Local UDM extension: IconPart, the `parts` field, IconPalette, and every
+// glyph after `minus`. This file is not an untouched upstream snapshot.
+// upstream-files.sha256 stays the baseline inventory and is not rewritten.
+
+import { Theme } from "theme.slint";
+
+export struct IconPart {
+    stroke: string,
+    fill: string,
+    ink: color,
+}
 
 export struct IconData {
     stroke: string,
     fill: string,
+    parts: [IconPart],
+}
+
+// Shared vivid inks. Read-only, derived from Theme.dark, no new Theme inputs
+// and no change to Theme.accent. Pairs are dark / light. Solid and opaque;
+// hues are not forced onto one numeric lightness.
+// green = completion/resume, amber = pause/pending, red = failure/destructive,
+// blue/cyan = download/navigation. `ink` is for internal detail, not a
+// stand-in for a vivid hue.
+export global IconPalette {
+    out property <color> blue: Theme.dark ? #60a5fa : #2563eb;
+    out property <color> cyan: Theme.dark ? #22d3ee : #0e7490;
+    out property <color> green: Theme.dark ? #4ade80 : #15803d;
+    out property <color> amber: Theme.dark ? #fbbf24 : #a16207;
+    out property <color> orange: Theme.dark ? #fb923c : #c2410c;
+    out property <color> red: Theme.dark ? #f87171 : #dc2626;
+    out property <color> violet: Theme.dark ? #a78bfa : #7c3aed;
+    out property <color> pink: Theme.dark ? #f472b6 : #be185d;
+    out property <color> ink: Theme.dark ? #f5f5f7 : #1d1d1f;
 }
 
 export global Icons {
@@ -58,17 +92,293 @@ export global Icons {
     out property <IconData> chevron-right: { stroke: "M 9.5 5.5 L 16 12 L 9.5 18.5" };
     out property <IconData> plus: { stroke: "M 12 5 v 14 M 5 12 h 14" };
     out property <IconData> minus: { stroke: "M 5 12 h 14" };
+
+    // --- Local UDM extension (not part of the upstream snapshot) ---
+    // Colored entries keep legacy stroke/fill empty and carry the stage-2A
+    // geometry in parts. Call sites pick a udm- variant explicitly; this
+    // component does not swap a baseline name for one.
+    // Chevron down (collapse pair for chevron-right). Navigation.
+    out property <IconData> chevron-down: {
+        stroke: "",
+        fill: "",
+        parts: [{ stroke: "M 5.5 9.5 L 12 16 L 18.5 9.5", fill: "", ink: IconPalette.blue }],
+    };
+    // Arrow into a tray (Add Download). Arrow blue, tray cyan.
+    out property <IconData> download: {
+        stroke: "",
+        fill: "",
+        parts: [
+            { stroke: "M 12 3.5 V 12.6 M 7.8 8.6 L 12 13 L 16.2 8.6", fill: "", ink: IconPalette.blue },
+            { stroke: "M 4.8 15.8 V 20.4 H 19.2 V 15.8", fill: "", ink: IconPalette.cyan },
+        ],
+    };
+    // Triangle (Resume).
+    out property <IconData> play: {
+        stroke: "",
+        fill: "",
+        parts: [{ stroke: "M 8 5.5 L 17.8 12 L 8 18.5 Z", fill: "", ink: IconPalette.green }],
+    };
+    // Two bars (Pause).
+    out property <IconData> pause: {
+        stroke: "",
+        fill: "",
+        parts: [{ stroke: "M 6.5 5.2 H 9.6 V 18.8 H 6.5 Z M 14.4 5.2 H 17.5 V 18.8 H 14.4 Z", fill: "", ink: IconPalette.amber }],
+    };
+    // Square (Cancel).
+    out property <IconData> stop: {
+        stroke: "",
+        fill: "",
+        parts: [{ stroke: "M 6.2 6.2 H 17.8 V 17.8 H 6.2 Z", fill: "", ink: IconPalette.red }],
+    };
+    // Bin (Remove from List).
+    out property <IconData> trash: {
+        stroke: "",
+        fill: "",
+        parts: [{ stroke: "M 5 7.5 H 19 M 9.2 7.5 V 4.8 H 14.8 V 7.5 M 7 7.5 L 8.1 19.8 H 15.9 L 17 7.5 M 10.4 11 V 16.2 M 13.6 11 V 16.2", fill: "", ink: IconPalette.red }],
+    };
+    // Blank page (Open File).
+    out property <IconData> file: {
+        stroke: "",
+        fill: "",
+        parts: [{ stroke: "M 7 3.5 H 13.5 L 18 8 V 20.5 H 7 Z M 13.5 3.5 V 8 H 18", fill: "", ink: IconPalette.blue }],
+    };
+    // Tabbed folder (Open Folder).
+    out property <IconData> folder: {
+        stroke: "",
+        fill: "",
+        parts: [{ stroke: "M 3.5 6.5 H 9.2 L 11 8.5 H 20.5 V 19.5 H 3.5 Z", fill: "", ink: IconPalette.orange }],
+    };
+    // Two chain links (Copy URL).
+    out property <IconData> link: {
+        stroke: "",
+        fill: "",
+        parts: [{ stroke: "M 9.5 14.5 a 3.8 3.8 0 0 0 5.4 0.4 l 2.2 -2.2 a 3.8 3.8 0 0 0 -5.4 -5.4 l -1.2 1.2 M 14.5 9.5 a 3.8 3.8 0 0 0 -5.4 -0.4 l -2.2 2.2 a 3.8 3.8 0 0 0 5.4 5.4 l 1.2 -1.2", fill: "", ink: IconPalette.cyan }],
+    };
+    // Broom (Clear finished).
+    out property <IconData> clear: {
+        stroke: "",
+        fill: "",
+        parts: [{ stroke: "M 16.2 4 L 11.2 13 M 6.2 19.8 L 8.6 13 H 13.8 L 17.2 19.8 M 9.2 16.2 V 19.8 M 11.2 15.4 V 19.8 M 13.4 16.2 V 19.8", fill: "", ink: IconPalette.violet }],
+    };
+    // Three books (Library heading).
+    out property <IconData> library: {
+        stroke: "",
+        fill: "",
+        parts: [{ stroke: "M 4 5 H 7.4 V 19.5 H 4 Z M 8.6 4 H 12.6 V 19.5 H 8.6 Z M 13.8 6 H 20 V 19.5 H 13.8 Z M 5.2 8.5 H 6.2 M 10 7.5 H 11.4 M 16 9 H 17.8", fill: "", ink: IconPalette.violet }],
+    };
+    // Four tiles (Categories heading).
+    out property <IconData> grid: {
+        stroke: "",
+        fill: "",
+        parts: [{ stroke: "M 4 4 H 10.2 V 10.2 H 4 Z M 13.8 4 H 20 V 10.2 H 13.8 Z M 4 13.8 H 10.2 V 20 H 4 Z M 13.8 13.8 H 20 V 20 H 13.8 Z", fill: "", ink: IconPalette.cyan }],
+    };
+    // Three rows (All downloads). Marks blue, rules cyan.
+    out property <IconData> all-downloads: {
+        stroke: "",
+        fill: "",
+        parts: [
+            { stroke: "M 4.5 6.2 H 7 V 8.7 H 4.5 Z M 4.5 11 H 7 V 13.5 H 4.5 Z M 4.5 15.8 H 7 V 18.3 H 4.5 Z", fill: "", ink: IconPalette.blue },
+            { stroke: "M 9.2 7.4 H 19.5 M 9.2 12.2 H 19.5 M 9.2 17 H 19.5", fill: "", ink: IconPalette.cyan },
+        ],
+    };
+    // Open circle with a partial sector (Unfinished / pending). Distinct from udm-check.
+    out property <IconData> unfinished: {
+        stroke: "",
+        fill: "",
+        parts: [{ stroke: "M 3.5 12 a 8.5 8.5 0 1 0 17 0 a 8.5 8.5 0 1 0 -17 0 M 12 12 V 5.5 M 12 12 L 17 15.5", fill: "", ink: IconPalette.amber }],
+    };
+    // Down arrow in a circle (Active downloads). Ring cyan, arrow blue.
+    out property <IconData> active-downloads: {
+        stroke: "",
+        fill: "",
+        parts: [
+            { stroke: "M 3.5 12 a 8.5 8.5 0 1 0 17 0 a 8.5 8.5 0 1 0 -17 0", fill: "", ink: IconPalette.cyan },
+            { stroke: "M 12 8 V 15.2 M 8.8 12.2 L 12 15.6 L 15.2 12.2", fill: "", ink: IconPalette.blue },
+        ],
+    };
+    // Warning triangle (Failed). Dot keeps the legacy fill-and-stroke.
+    out property <IconData> failed: {
+        stroke: "",
+        fill: "",
+        parts: [{
+            stroke: "M 12 3.8 L 21 19.6 H 3 Z M 12 9.5 V 14 M 11.1 16.3 a 0.95 0.95 0 1 0 1.9 0 a 0.95 0.95 0 1 0 -1.9 0",
+            fill: "M 11.1 16.3 a 0.95 0.95 0 1 0 1.9 0 a 0.95 0.95 0 1 0 -1.9 0",
+            ink: IconPalette.red,
+        }],
+    };
+    // Page with lines (Documents). Page blue, rules cyan.
+    out property <IconData> documents: {
+        stroke: "",
+        fill: "",
+        parts: [
+            { stroke: "M 6.5 3.5 H 13 L 18 8.5 V 20.5 H 6.5 Z M 13 3.5 V 8.5 H 18", fill: "", ink: IconPalette.blue },
+            { stroke: "M 9 12 H 15.5 M 9 15.2 H 15.5 M 9 18.4 H 12.5", fill: "", ink: IconPalette.cyan },
+        ],
+    };
+    // Beamed notes (Music).
+    out property <IconData> music: {
+        stroke: "",
+        fill: "",
+        parts: [{ stroke: "M 6.1 16.8 a 2.1 1.6 0 1 0 4.2 0 a 2.1 1.6 0 1 0 -4.2 0 M 10.3 16.8 V 6 M 14.2 15.4 a 2.1 1.6 0 1 0 4.2 0 a 2.1 1.6 0 1 0 -4.2 0 M 18.4 15.4 V 4.4 M 10.3 6 L 18.4 4.4 M 10.3 8.5 L 18.4 6.9", fill: "", ink: IconPalette.pink }],
+    };
+    // Film frame (Videos). Frame violet, perforations cyan.
+    out property <IconData> videos: {
+        stroke: "",
+        fill: "",
+        parts: [
+            { stroke: "M 4.5 6.5 H 19.5 V 17.5 H 4.5 Z M 8 6.5 V 17.5 M 16 6.5 V 17.5", fill: "", ink: IconPalette.violet },
+            { stroke: "M 4.5 10 H 8 M 4.5 14 H 8 M 16 10 H 19.5 M 16 14 H 19.5", fill: "", ink: IconPalette.cyan },
+        ],
+    };
+    // Frame, peak, and sun (Images). Frame orange, sun cyan.
+    out property <IconData> images: {
+        stroke: "",
+        fill: "",
+        parts: [
+            { stroke: "M 4 5.5 H 20 V 18.5 H 4 Z M 4 15.2 L 8.8 11.2 L 12.2 13.8 L 16 10.2 L 20 15.2", fill: "", ink: IconPalette.orange },
+            { stroke: "M 15.2 8.4 a 1.2 1.2 0 1 0 2.4 0 a 1.2 1.2 0 1 0 -2.4 0", fill: "", ink: IconPalette.cyan },
+        ],
+    };
+    // Closed box (Archives).
+    out property <IconData> archives: {
+        stroke: "",
+        fill: "",
+        parts: [{ stroke: "M 12 5 L 19.5 8.5 L 19.5 16 L 12 19.5 L 4.5 16 L 4.5 8.5 Z M 4.5 8.5 L 12 12 L 19.5 8.5 M 12 12 V 19.5", fill: "", ink: IconPalette.orange }],
+    };
+    // Application window (Programs). Frame blue, prompt green.
+    out property <IconData> programs: {
+        stroke: "",
+        fill: "",
+        parts: [
+            { stroke: "M 4.5 5.5 H 19.5 V 18.5 H 4.5 Z M 4.5 9 H 19.5", fill: "", ink: IconPalette.blue },
+            { stroke: "M 7.5 12.2 L 10.2 14.2 L 7.5 16.2 M 12 16.2 H 16", fill: "", ink: IconPalette.green },
+        ],
+    };
+    // Disc with a hole (Disk images). Disc cyan, hole blue.
+    out property <IconData> disk-images: {
+        stroke: "",
+        fill: "",
+        parts: [
+            { stroke: "M 4 12 a 8 8 0 1 0 16 0 a 8 8 0 1 0 -16 0", fill: "", ink: IconPalette.cyan },
+            { stroke: "M 10 12 a 2 2 0 1 0 4 0 a 2 2 0 1 0 -4 0", fill: "", ink: IconPalette.blue },
+        ],
+    };
+    // Dotted circle (Other). Ring violet, dots cyan (fill and stroke, as legacy did).
+    out property <IconData> other: {
+        stroke: "",
+        fill: "",
+        parts: [
+            { stroke: "M 3.5 12 a 8.5 8.5 0 1 0 17 0 a 8.5 8.5 0 1 0 -17 0", fill: "", ink: IconPalette.violet },
+            {
+                stroke: "M 7.2 12 a 1 1 0 1 0 2 0 a 1 1 0 1 0 -2 0 M 11 12 a 1 1 0 1 0 2 0 a 1 1 0 1 0 -2 0 M 14.8 12 a 1 1 0 1 0 2 0 a 1 1 0 1 0 -2 0",
+                fill: "M 7.2 12 a 1 1 0 1 0 2 0 a 1 1 0 1 0 -2 0 M 11 12 a 1 1 0 1 0 2 0 a 1 1 0 1 0 -2 0 M 14.8 12 a 1 1 0 1 0 2 0 a 1 1 0 1 0 -2 0",
+                ink: IconPalette.cyan,
+            },
+        ],
+    };
+    // Tiles inside a circle (All categories). Ring cyan, tiles blue.
+    out property <IconData> all-categories: {
+        stroke: "",
+        fill: "",
+        parts: [
+            { stroke: "M 3.2 12 a 8.8 8.8 0 1 0 17.6 0 a 8.8 8.8 0 1 0 -17.6 0", fill: "", ink: IconPalette.cyan },
+            { stroke: "M 8.2 8.2 H 11.2 V 11.2 H 8.2 Z M 12.8 8.2 H 15.8 V 11.2 H 12.8 Z M 8.2 12.8 H 11.2 V 15.8 H 8.2 Z M 12.8 12.8 H 15.8 V 15.8 H 12.8 Z", fill: "", ink: IconPalette.blue },
+        ],
+    };
+    // Tag (custom category fallback). Tag pink, hole in ink so it stays readable.
+    out property <IconData> custom-category: {
+        stroke: "",
+        fill: "",
+        parts: [
+            { stroke: "M 4.8 12 L 12 4.5 H 19.5 V 12 L 12 19.5 Z", fill: "", ink: IconPalette.pink },
+            { stroke: "M 15.5 8.2 a 1.15 1.15 0 1 0 2.3 0 a 1.15 1.15 0 1 0 -2.3 0", fill: "", ink: IconPalette.ink },
+        ],
+    };
+    // Circle, hub, and three spokes (Chrome). Original geometry, not a brand logo.
+    out property <IconData> chrome: {
+        stroke: "",
+        fill: "",
+        parts: [
+            { stroke: "M 3.5 12 a 8.5 8.5 0 1 0 17 0 a 8.5 8.5 0 1 0 -17 0 M 9 12 a 3 3 0 1 0 6 0 a 3 3 0 1 0 -6 0", fill: "", ink: IconPalette.blue },
+            { stroke: "M 12 9 V 3.5", fill: "", ink: IconPalette.red },
+            { stroke: "M 9.4 13.5 L 4.6 16.3", fill: "", ink: IconPalette.green },
+            { stroke: "M 14.6 13.5 L 19.4 16.3", fill: "", ink: IconPalette.amber },
+        ],
+    };
+    // Globe, ear, and tail (Firefox). Original geometry, not a brand logo.
+    out property <IconData> firefox: {
+        stroke: "",
+        fill: "",
+        parts: [
+            { stroke: "M 8.3 13 a 5.2 5.2 0 1 0 10.4 0 a 5.2 5.2 0 1 0 -10.4 0", fill: "", ink: IconPalette.orange },
+            { stroke: "M 11.4 9.6 L 8.2 3.5 L 13.4 8.4", fill: "", ink: IconPalette.amber },
+            { stroke: "M 9.6 11.2 C 4.8 12.4 5 18.2 9.4 19.4 C 13.6 20.6 19.2 18.4 18.4 14.2", fill: "", ink: IconPalette.violet },
+        ],
+    };
+
+    // Colored variants of baseline slots UDM borrows. Baseline entries above
+    // stay as they are. Finished and Completed share udm-check.
+    // close is not on an in-scope 0.3.1 surface (sidebar, toolbar, browser
+    // group, chevron), so there is no udm-close.
+    out property <IconData> udm-sliders: {
+        stroke: "",
+        fill: "",
+        parts: [
+            { stroke: "M 4 7 h 16 M 4 12 h 16 M 4 17 h 16", fill: "", ink: IconPalette.blue },
+            {
+                stroke: "M 12.8 7 a 2.2 2.2 0 1 0 4.4 0 a 2.2 2.2 0 1 0 -4.4 0 M 6.8 12 a 2.2 2.2 0 1 0 4.4 0 a 2.2 2.2 0 1 0 -4.4 0 M 10.8 17 a 2.2 2.2 0 1 0 4.4 0 a 2.2 2.2 0 1 0 -4.4 0",
+                fill: "M 12.8 7 a 2.2 2.2 0 1 0 4.4 0 a 2.2 2.2 0 1 0 -4.4 0 M 6.8 12 a 2.2 2.2 0 1 0 4.4 0 a 2.2 2.2 0 1 0 -4.4 0 M 10.8 17 a 2.2 2.2 0 1 0 4.4 0 a 2.2 2.2 0 1 0 -4.4 0",
+                ink: IconPalette.cyan,
+            },
+        ],
+    };
+    out property <IconData> udm-info: {
+        stroke: "",
+        fill: "",
+        parts: [{
+            stroke: "M 3 12 a 9 9 0 1 0 18 0 a 9 9 0 1 0 -18 0 M 12 11 v 5.5 M 11 7.8 a 1 1 0 1 0 2 0 a 1 1 0 1 0 -2 0",
+            fill: "M 11 7.8 a 1 1 0 1 0 2 0 a 1 1 0 1 0 -2 0",
+            ink: IconPalette.blue,
+        }],
+    };
+    out property <IconData> udm-check: {
+        stroke: "",
+        fill: "",
+        parts: [{ stroke: "M 5 12.5 l 4.5 4.5 L 19 7.5", fill: "", ink: IconPalette.green }],
+    };
+    out property <IconData> udm-refresh: {
+        stroke: "",
+        fill: "",
+        parts: [{ stroke: "M 19.5 12 a 7.5 7.5 0 1 1 -2.2 -5.3 M 19.5 4 v 3.5 h -3.5", fill: "", ink: IconPalette.cyan }],
+    };
+    out property <IconData> udm-chevron-right: {
+        stroke: "",
+        fill: "",
+        parts: [{ stroke: "M 9.5 5.5 L 16 12 L 9.5 18.5", fill: "", ink: IconPalette.blue }],
+    };
+    out property <IconData> udm-plus: {
+        stroke: "",
+        fill: "",
+        parts: [{ stroke: "M 12 5 v 14 M 5 12 h 14", fill: "", ink: IconPalette.blue }],
+    };
 }
 
-// Draws one icon in `color` (pass Theme.accent when selected, Theme.label2
-// otherwise).
+// Legacy icons (parts empty) draw the stroke in `color`, then the optional
+// fill with the same fill-and-stroke behaviour as before. Colored icons
+// suppress both of those paths and paint parts back to front: nonempty fill
+// (transparent stroke), then nonempty stroke (transparent fill), both in
+// part.ink. `color` does not tint parts. `enabled` fades the composed icon
+// once; there is no second disabled glyph.
 export component Icon {
     in property <IconData> icon;
     in property <color> color;
     in property <length> stroke-width: 1.4px;
+    in property <bool> enabled: true;
     width: 18px;
     height: 18px;
-    Path {
+    opacity: root.enabled ? 1.0 : 0.45;
+
+    if root.icon.parts.length == 0: Path {
         width: 100%;
         height: 100%;
         viewbox-width: 24;
@@ -79,7 +389,7 @@ export component Icon {
         stroke-line-join: round;
         commands: root.icon.stroke;
     }
-    if root.icon.fill != "": Path {
+    if root.icon.parts.length == 0 && root.icon.fill != "": Path {
         width: 100%;
         height: 100%;
         viewbox-width: 24;
@@ -89,5 +399,40 @@ export component Icon {
         stroke-width: root.stroke-width;
         stroke-line-join: round;
         commands: root.icon.fill;
+    }
+
+    for part in root.icon.parts: Rectangle {
+        x: 0px;
+        y: 0px;
+        width: 100%;
+        height: 100%;
+        if part.fill != "": Path {
+            x: 0px;
+            y: 0px;
+            width: 100%;
+            height: 100%;
+            viewbox-width: 24;
+            viewbox-height: 24;
+            fill: part.ink;
+            stroke: transparent;
+            stroke-width: root.stroke-width;
+            stroke-line-cap: round;
+            stroke-line-join: round;
+            commands: part.fill;
+        }
+        if part.stroke != "": Path {
+            x: 0px;
+            y: 0px;
+            width: 100%;
+            height: 100%;
+            viewbox-width: 24;
+            viewbox-height: 24;
+            fill: transparent;
+            stroke: part.ink;
+            stroke-width: root.stroke-width;
+            stroke-line-cap: round;
+            stroke-line-join: round;
+            commands: part.stroke;
+        }
     }
 }

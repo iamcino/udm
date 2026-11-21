@@ -14,8 +14,9 @@ ul { list-style: none; margin: 0; padding: 0; }
 li { display: flex; justify-content: space-between; gap: 10px; padding: 4px 0; border-bottom: 1px solid #ffffff14; }
 li .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 li .status { white-space: nowrap; opacity: .85; }
-li .status.handed-off { color: #7fd08a; }
-li .status.recovery-required { color: #e5b567; }
+li .status.recovery-required,
+li.needs-action .status { color: #e5b567; font-weight: 600; }
+li.needs-action { background: #e5b56714; }
 footer { margin-top: 12px; }
 a { color: #7ab8ff; }
 @media (prefers-color-scheme: light) {

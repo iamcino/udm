@@ -199,6 +199,13 @@ pub struct Settings {
     /// Register the per-user HKCU Run entry so UDM starts at logon
     /// (default off; disclosed opt-in, see `gui::startup`).
     pub start_with_windows: bool,
+    /// Library group in the sidebar is collapsed. Absent from 0.3.0
+    /// settings JSON, which loads expanded (false). The sidebar UI
+    /// reads this later; Save must keep the stored value.
+    pub sidebar_library_collapsed: bool,
+    /// Categories group in the sidebar is collapsed. Same default and
+    /// compatibility rule as [`Settings::sidebar_library_collapsed`].
+    pub sidebar_categories_collapsed: bool,
 }
 
 impl Default for Settings {
@@ -239,6 +246,8 @@ impl Default for Settings {
             minimize_to_tray: false,
             start_minimized: false,
             start_with_windows: false,
+            sidebar_library_collapsed: false,
+            sidebar_categories_collapsed: false,
         }
     }
 }
@@ -674,5 +683,54 @@ mod tests {
         assert!(!legacy.start_minimized);
         assert!(!legacy.start_with_windows);
         assert_eq!(legacy.theme, "auto");
+    }
+
+    #[test]
+    fn sidebar_collapse_round_trips_and_old_json_stays_expanded() {
+        let fresh = Settings::default();
+        assert!(!fresh.sidebar_library_collapsed);
+        assert!(!fresh.sidebar_categories_collapsed);
+
+        // A 0.3.0 row has neither key. Stored neighbours must not move,
+        // and a second load/save must not invent further changes.
+        let old = br#"{"theme":"light","segments_per_task":12,"close_to_tray":false,"language":"vi","accent":"green"}"#;
+        let loaded = Settings::from_json(old).unwrap();
+        assert!(!loaded.sidebar_library_collapsed);
+        assert!(!loaded.sidebar_categories_collapsed);
+        assert_eq!(loaded.theme, "light");
+        assert_eq!(loaded.segments_per_task, 12);
+        assert!(!loaded.close_to_tray);
+        assert_eq!(loaded.language, "vi");
+        assert_eq!(loaded.accent, "green");
+        let once = serde_json::to_value(&loaded).unwrap();
+        let again = Settings::from_json(&loaded.to_json().unwrap()).unwrap();
+        assert_eq!(once, serde_json::to_value(&again).unwrap());
+        assert_eq!(once["sidebar_library_collapsed"], false);
+        assert_eq!(once["sidebar_categories_collapsed"], false);
+
+        let mut both = loaded.clone();
+        both.sidebar_library_collapsed = true;
+        both.sidebar_categories_collapsed = true;
+        let back = Settings::from_json(&both.to_json().unwrap()).unwrap();
+        assert!(back.sidebar_library_collapsed);
+        assert!(back.sidebar_categories_collapsed);
+        assert_eq!(back.theme, both.theme);
+        assert_eq!(back.segments_per_task, both.segments_per_task);
+        assert_eq!(back.close_to_tray, both.close_to_tray);
+        assert_eq!(
+            serde_json::to_value(&both).unwrap(),
+            serde_json::to_value(&back).unwrap()
+        );
+
+        let mut mixed = both;
+        mixed.sidebar_library_collapsed = false;
+        mixed.sidebar_categories_collapsed = true;
+        let back = Settings::from_json(&mixed.to_json().unwrap()).unwrap();
+        assert!(!back.sidebar_library_collapsed);
+        assert!(back.sidebar_categories_collapsed);
+        assert_eq!(
+            serde_json::to_value(&mixed).unwrap(),
+            serde_json::to_value(&back).unwrap()
+        );
     }
 }

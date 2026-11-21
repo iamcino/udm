@@ -5049,6 +5049,7 @@ checksum = "15e477d5ff6fec20909100ff8f7062432ebfbda7a62a0f37d0252aa126f38c83"
 dependencies = [
  "const-field-offset",
  "i-slint-backend-selector",
+ "i-slint-backend-winit",
  "i-slint-common",
  "i-slint-core",
  "i-slint-core-macros",
@@ -5934,7 +5935,7 @@ checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
 name = "udm-cli"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "clap",
  "humantime",
@@ -5945,7 +5946,7 @@ dependencies = [
 
 [[package]]
 name = "udm-gui"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "embed-resource",
  "image",
@@ -5964,7 +5965,7 @@ dependencies = [
 
 [[package]]
 name = "udm-host"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "serde_json",
  "tempfile",
@@ -6070,7 +6071,7 @@ checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
 
 [[package]]
 name = "usagi"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "blake3",
  "bytes",

@@ -147,6 +147,13 @@ pub struct TaskSnapshot {
     pub segment_retry: Option<SegmentRetry>,
     /// Bytes per second when verifying a checksum (0 otherwise).
     pub verify_bps: f64,
+    /// HTTP range support from the last probe or transfer that wrote it.
+    /// Meaningful only when [`TaskSnapshot::ranges_observed`] is true:
+    /// false before that is the record default, not "no support".
+    pub accept_ranges: bool,
+    /// A probe or a transfer has written range capability for this task.
+    /// Display: Unknown when false; Yes/No from `accept_ranges` when true.
+    pub ranges_observed: bool,
 }
 
 /// Request to enqueue a download.
@@ -420,6 +427,7 @@ impl TaskCell {
             (TaskState::Downloading, Some(rem)) => speed.eta_seconds(rem),
             _ => f64::INFINITY,
         };
+        let observed = ranges_observed(&record, &segments);
         TaskSnapshot {
             id: record.id,
             url: record.url.clone(),
@@ -452,8 +460,31 @@ impl TaskCell {
             attempts: record.attempts,
             segment_retry: *self.segment_retry.lock(),
             verify_bps,
+            accept_ranges: record.accept_ranges,
+            ranges_observed: observed,
         }
     }
+}
+
+/// Whether `accept_ranges` was written by a probe or a transfer.
+///
+/// The bool on the record defaults to false, and `reset_progress`
+/// writes false again when it discards a representation. Neither is an
+/// observation of "no support". The probe writers (`apply_probe_hints`,
+/// `lock_route`, `commit_identity`) assign `transport` in the same critical
+/// section as `accept_ranges`. `accept_ranges == true` is itself proof: only
+/// those writers set it. A later transfer can clear the scalar transport
+/// when the protocol summary is mixed (`TransportSummary::legacy` is None);
+/// the segment list still exists, and segments are planned only after that
+/// probe. `transport_summary` is not evidence: each run clears it before the
+/// next probe, and a representation reset leaves the old summary in place.
+///
+/// A crash between `reset_progress`'s durable clear and the following
+/// identity commit can still show a stale `transport` with `accept_ranges`
+/// false. The record has no separate observed bit; this is the evidence it
+/// already carries.
+fn ranges_observed(record: &TaskRecord, segments: &[SegmentState]) -> bool {
+    record.accept_ranges || record.transport.is_some() || !segments.is_empty()
 }
 
 /// One injectable fault for the live download worker.
@@ -2503,6 +2534,104 @@ mod tests {
         let engine2 = make_engine(dir.path());
         assert_eq!(engine2.settings().segments_per_task, 12);
         engine2.shutdown();
+    }
+
+    /// Sidebar collapse flags go through the acknowledged settings write,
+    /// and a reload keeps every other field that was already stored.
+    #[test]
+    fn save_settings_persists_sidebar_collapse() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let engine = make_engine(dir.path());
+            let mut settings = engine.settings();
+            let before = settings.clone();
+            settings.sidebar_library_collapsed = true;
+            settings.sidebar_categories_collapsed = false;
+            engine.save_settings(settings).unwrap();
+            let live = engine.settings();
+            assert!(live.sidebar_library_collapsed);
+            assert!(!live.sidebar_categories_collapsed);
+            assert_eq!(live.theme, before.theme);
+            assert_eq!(live.segments_per_task, before.segments_per_task);
+            assert_eq!(live.language, before.language);
+            assert_eq!(live.close_to_tray, before.close_to_tray);
+            engine.shutdown();
+        }
+
+        {
+            let engine = make_engine(dir.path());
+            let loaded = engine.settings();
+            assert!(loaded.sidebar_library_collapsed);
+            assert!(!loaded.sidebar_categories_collapsed);
+            let mut settings = loaded.clone();
+            settings.sidebar_library_collapsed = false;
+            settings.sidebar_categories_collapsed = true;
+            engine.save_settings(settings).unwrap();
+            engine.shutdown();
+        }
+
+        let engine = make_engine(dir.path());
+        let loaded = engine.settings();
+        assert!(!loaded.sidebar_library_collapsed);
+        assert!(loaded.sidebar_categories_collapsed);
+        engine.shutdown();
+    }
+
+    /// Resume Support is Unknown until a probe or a transfer writes it.
+    /// `accept_ranges == false` on a new task is the default, not "no".
+    #[test]
+    fn snapshot_reports_observed_range_support() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = make_engine(dir.path());
+        let id = engine
+            .add(AddRequest::new("https://example.com/range.bin").start_paused(true))
+            .unwrap();
+        let snap = |engine: &Engine| {
+            engine
+                .snapshot()
+                .into_iter()
+                .find(|task| task.id == id)
+                .expect("task")
+        };
+
+        let fresh = snap(&engine);
+        assert!(!fresh.ranges_observed, "unprobed task is Unknown");
+        assert!(!fresh.accept_ranges);
+
+        let cell = engine.state.cell(id).unwrap();
+        {
+            // Same pair `apply_probe_hints` writes when the server has no ranges.
+            let mut record = cell.record.write();
+            record.accept_ranges = false;
+            record.transport = Some(crate::store::records::TransportKind::Http11);
+        }
+        let no_ranges = snap(&engine);
+        assert!(no_ranges.ranges_observed);
+        assert!(!no_ranges.accept_ranges);
+
+        {
+            // Only a probe sets true. Transport may later be cleared.
+            let mut record = cell.record.write();
+            record.accept_ranges = true;
+            record.transport = None;
+        }
+        *cell.segments.write() = Vec::new();
+        let with_ranges = snap(&engine);
+        assert!(with_ranges.ranges_observed);
+        assert!(with_ranges.accept_ranges);
+
+        {
+            // Mixed-transport transfer: scalar transport is None, segments remain.
+            let mut record = cell.record.write();
+            record.accept_ranges = false;
+            record.transport = None;
+        }
+        *cell.segments.write() = vec![crate::store::records::SegmentState::new(0, 0, 9)];
+        let transferred = snap(&engine);
+        assert!(transferred.ranges_observed);
+        assert!(!transferred.accept_ranges);
+
+        engine.shutdown();
     }
 
     #[test]

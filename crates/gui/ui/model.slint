@@ -58,6 +58,10 @@ export struct TaskDetail {
     checksum-verified: bool,
     can-open-file: bool,
     can-open-folder: bool,
+    // HTTP range support. ranges-observed false means Unknown (the stored
+    // bool still defaults to false). Rendering is a later stage.
+    accept-ranges: bool,
+    ranges-observed: bool,
 }
 
 export struct StatusInfo {

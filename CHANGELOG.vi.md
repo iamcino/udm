@@ -2,6 +2,16 @@
 
 Các thay đổi đáng chú ý của UDM. Tiếng Anh: [CHANGELOG.md](CHANGELOG.md).
 
+## 0.3.1
+
+- **Hộp thoại chuyển tải, hoàn thiện**: hộp thoại xác nhận lượt tải từ trình duyệt nay vừa nội dung, kéo giãn được, và tự nổi lên trước khi có lượt tải đến.
+- **Một cửa sổ cho mỗi lượt tải**: bấm Tải sẽ mở cửa sổ chi tiết gọn cho lượt tải đó — tiến độ, tốc độ, và Tạm dừng / Tiếp tục / Hủy / Thử lại / Mở thư mục mà không cần quay về cửa sổ chính.
+- **Làm mới cửa sổ chính**: thanh công cụ phía trên đưa Thêm lượt tải và các thao tác tác vụ ra trước; hai mục Thư viện và Danh mục ở thanh bên thu gọn được; icon nay là icon màu sống động.
+- **Khay hệ thống**: click chuột trái vào icon khay mở cửa sổ chính (menu vẫn ở chuột phải).
+- **Cài đặt gọn gàng hơn**: các trình duyệt được nhóm kèm icon và trạng thái, các ô nhập vừa nội dung, và nhóm Chrome có giải thích về tùy chọn "Hỏi nơi lưu mỗi file" — tùy chọn có thể khiến Chrome hiện hộp thoại Lưu thành trước khi UDM nhận lượt tải.
+- **Tiện ích**: đổi tên thành "Universal Download Manager"; popup của tiện ích nay chỉ liệt kê các lượt tải cần chú ý.
+- **Đã sửa**: UDM có thể thoát im lặng khi khởi động, và không bao giờ hiện hộp thoại xác nhận, khi còn một lượt chuyển tải từ trình duyệt đang chờ.
+
 ## 0.3.0
 
 - **Danh mục trong cửa sổ chính**: thanh bên nay hiện các danh mục tải kèm số lượng của từng mục. Chọn một danh mục để lọc danh sách tác vụ, kết hợp được với bộ lọc trạng thái và tìm kiếm; có thêm chế độ xem đã hoàn thành và chưa hoàn thành.
