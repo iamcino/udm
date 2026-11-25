@@ -257,19 +257,22 @@ enum UpdateCommand {
     },
     /// Check for an update now. With checks resolved off this reports that
     /// checks are disabled and opens no socket. With checks resolved on it
-    /// asks both release hosts for their latest release and reports
-    /// whether a newer build is published. A check stores nothing and
+    /// reads `version.json` from both release hosts and reports whether a
+    /// newer acceptable build is published. A check stores nothing and
     /// downloads nothing; applying an update is a separate, explicit
-    /// action.
+    /// action. A readable version below the minimum is a successful
+    /// no-update, not a failure.
     Check,
     /// Download and install the latest release now. If the published
-    /// version is not newer than this build, this reports that and
-    /// changes nothing. Otherwise it fetches the portable zip and
-    /// SHA256SUMS.txt, verifies the zip hash and the Authenticode
-    /// signature (pinned signing key) of every executable inside, then
-    /// swaps the install tree file by file; the replaced files stay as
-    /// `.old` backups until the next UDM start removes them. Restart
-    /// UDM afterwards to run the new build.
+    /// version is not newer than this build, or no acceptable version
+    /// is offered, this reports that and changes nothing. Otherwise it
+    /// fetches the portable zip and its `.sha256` sidecar, verifies the
+    /// zip hash and the Authenticode signature (pinned signing key) of
+    /// every executable inside, then swaps the install tree file by
+    /// file; the replaced files stay as `.old` backups until the next
+    /// UDM start removes them. Restart UDM afterwards to run the new
+    /// build. A version below the minimum is refused before any
+    /// download.
     Apply,
 }
 
@@ -301,6 +304,14 @@ async fn main() -> ExitCode {
 }
 
 async fn run(cli: Cli) -> Result<ExitCode> {
+    // One cleanup pass before the command returns, including check and
+    // apply. A file that is still locked is retried on a detached
+    // thread and does not hold the process open.
+    if let Ok(paths) = Paths::discover() {
+        if let Some(exe_dir) = paths.exe_dir {
+            usagi::updater::finish_previous_update_for_cli(&InstallLayout::new(exe_dir));
+        }
+    }
     // Clone so the handlers can still borrow the global flags.
     let command = cli.command.clone();
     match command {
@@ -681,20 +692,27 @@ fn cmd_update_check() -> Result<ExitCode> {
 /// nothing on disk.
 fn cmd_update_apply() -> Result<ExitCode> {
     let layout = install_layout()?;
-    let version = match usagi::updater::latest() {
-        Ok(version) => version,
+    let found = match usagi::updater::latest() {
+        Ok(found) => found,
         Err(e) => {
             eprintln!("udm-cli: update check failed: {e}");
             return Ok(ExitCode::from(1));
         }
     };
-    if !usagi::updater::is_newer(&version) {
-        println!(
-            "Already current: version {} is the latest published version.",
-            usagi::VERSION
-        );
-        return Ok(ExitCode::SUCCESS);
-    }
+    let version = match usagi::updater::apply_choice(&found) {
+        usagi::updater::ApplyChoice::NoAcceptable => {
+            println!("No acceptable update is available.");
+            return Ok(ExitCode::SUCCESS);
+        }
+        usagi::updater::ApplyChoice::AlreadyCurrent => {
+            println!(
+                "Already current: version {} is the latest published version.",
+                usagi::VERSION
+            );
+            return Ok(ExitCode::SUCCESS);
+        }
+        usagi::updater::ApplyChoice::Install(version) => version,
+    };
     match usagi::updater::download_and_install(&layout, &version) {
         Ok(()) => {
             println!("update applied: version {version}");

@@ -1,22 +1,24 @@
-//! Updates the install in place from the project's releases, the way
-//! Yeager does (owner direction 2026-11-18: replace the signed-manifest
-//! updater wholesale; no manifest, no epoch, no version floor).
+//! Updates the install in place from the project's releases.
 //!
-//! Every release is published on GitHub and on GitLab. A check asks both
-//! sites at once for the version their "latest release" link redirects
-//! to; the newest version either of them has wins, and if one site cannot
-//! be reached the other one is enough. A check stores nothing: it is a
-//! pure read, so checking again always gives the same answer, and a
-//! version that is not newer than the running one is simply
-//! "already current".
+//! Every release is published on GitHub and on GitLab. A check fetches
+//! `version.json` from both hosts at once and reads `versionName` from
+//! the `latestWinVersion` object. The numerically newest acceptable
+//! version wins; a version below [`MIN_ACCEPTED_VERSION`] is discarded
+//! for that host, and the other host is still tried. A check stores
+//! nothing: it is a pure read, so checking again always gives the same
+//! answer. A published version that is not newer than the running one
+//! is "already current". Valid versions that are all below the floor
+//! are "no acceptable update", not a failure.
 //!
 //! Nothing is installed without asking. When the user applies, the
-//! portable zip and `SHA256SUMS.txt` are downloaded from the site the
-//! check found the version on (or the other one if that fails), and the
-//! acceptance gate is fixed, identical for both origins: verify the
-//! zip's SHA-256 against `SHA256SUMS.txt`, extract it, then verify the
-//! Authenticode signature of every executable in it with
-//! `WinVerifyTrust` and compare the signer certificate's SPKI hash
+//! portable zip and its `.sha256` sidecar are downloaded from the host
+//! the check selected. The other host is tried only when that pair is
+//! incomplete. Once both files have been fetched, a checksum, archive,
+//! signature, or install failure stops the job. The gate compares
+//! `sha256(zip)` with the first 64 sidecar bytes before anything is
+//! extracted, then verifies the Authenticode signature of every
+//! executable with
+//! `WinVerifyTrust` and compares the signer certificate's SPKI hash
 //! (SHA-256 over the full DER encoding of the SubjectPublicKeyInfo)
 //! against the pinned key below. The signing certificate is
 //! self-issued, so chain-to-public-root trust is not the anchor; the
@@ -26,14 +28,17 @@
 //! certificate expires). Anything else fails closed. A tampered zip
 //! served with recomputed sums still faces the signature check.
 //!
-//! The swap follows Yeager's rename pattern per file: the staged file
-//! takes the target's place after the current file steps aside to a
-//! `.old` sibling; any failure rolls the swapped files back. The `.old`
-//! files and the staging directory are deleted on the next start
-//! ([`finish_previous_update`]).
+//! Each executable is written under a fresh staging name and that
+//! handle stays open through signature verification and a handle-based
+//! rename into place, so the file checked is the file installed. The
+//! current file steps aside to a `.old` sibling first. Any failure
+//! rolls the swapped files back and says so when that rollback itself
+//! fails. `.old` files, inactive staging directories, and stale Firefox
+//! archives are deleted on the next start ([`finish_previous_update`]).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Mutex;
 
 use crate::VERSION;
 
@@ -69,13 +74,11 @@ pub enum Source {
 }
 
 impl Source {
-    const ALL: [Source; 2] = [Source::GitHub, Source::GitLab];
-
-    /// Redirects to the newest release's page.
-    fn latest_url(self) -> &'static str {
+    /// Raw `version.json` on this host's default branch.
+    fn version_json_url(self) -> &'static str {
         match self {
-            Source::GitHub => "https://github.com/iamcino/udm/releases/latest",
-            Source::GitLab => "https://gitlab.com/cino-group/udm/-/releases/permalink/latest",
+            Source::GitHub => "https://raw.githubusercontent.com/iamcino/udm/master/version.json",
+            Source::GitLab => "https://gitlab.com/cino-group/udm/-/raw/master/version.json",
         }
     }
 
@@ -152,37 +155,229 @@ pub fn current() -> &'static str {
     VERSION
 }
 
-/// Whether `latest` is newer than this build.
+/// Compiled floor. A host offering a lower version is skipped; the
+/// other host is still asked. Not ordering, rollback protection, or
+/// persisted client state.
+pub const MIN_ACCEPTED_VERSION: &str = "0.3.2";
+
+/// EasyKey version name: exactly three decimal components, no leading
+/// `v`, no surrounding whitespace, at most 16 characters. Major fits in
+/// 16 bits, minor and patch in 8. The packed value is
+/// `major << 16 | minor << 8 | patch`.
+pub fn easykey_version_number(version: &str) -> Option<u32> {
+    if version.is_empty() || version.len() > 16 {
+        return None;
+    }
+    let mut parts = [0u32; 3];
+    let mut part = 0usize;
+    let mut saw_digit = false;
+    for b in version.bytes() {
+        if b.is_ascii_digit() {
+            saw_digit = true;
+            let next = parts[part]
+                .checked_mul(10)?
+                .checked_add((b - b'0') as u32)?;
+            if next > 65535 {
+                return None;
+            }
+            parts[part] = next;
+        } else if b == b'.' && saw_digit && part < 2 {
+            part += 1;
+            saw_digit = false;
+        } else {
+            return None;
+        }
+    }
+    if part != 2 || !saw_digit || parts[1] > 255 || parts[2] > 255 {
+        return None;
+    }
+    Some((parts[0] << 16) | (parts[1] << 8) | parts[2])
+}
+
+fn min_accepted_number() -> u32 {
+    easykey_version_number(MIN_ACCEPTED_VERSION).expect("MIN_ACCEPTED_VERSION is a valid version")
+}
+
+/// Whether `latest` is a newer EasyKey version than this build.
+/// Anything that is not an EasyKey version name is not newer.
 pub fn is_newer(latest: &str) -> bool {
-    match (parse_version(latest), parse_version(current())) {
+    match (
+        easykey_version_number(latest),
+        easykey_version_number(current()),
+    ) {
         (Some(latest), Some(current)) => latest > current,
         _ => false,
     }
 }
 
-/// The version in a release page URL: `.../releases/tag/v1.2.3` on
-/// GitHub, `.../-/releases/v1.2.3` on GitLab.
-fn version_from_tag_url(url: &str) -> Option<String> {
-    let url = url.trim();
-    let tag = url
-        .rsplit_once("/tag/")
-        .or_else(|| url.rsplit_once("/-/releases/"))?
-        .1;
-    let tag = tag.split(['?', '#']).next()?;
-    parse_version(tag).map(|(a, b, c)| format!("{a}.{b}.{c}"))
+/// `versionName` inside the `latestWinVersion` object only. A
+/// `versionName` in an earlier or later sibling object is not it.
+fn parse_version_json(text: &str) -> std::result::Result<String, String> {
+    let Some(object) = json_object_after_key(text, "latestWinVersion") else {
+        return Err("version.json has no latestWinVersion object".into());
+    };
+    let Some(name) = json_string_field(&object, "versionName") else {
+        return Err("latestWinVersion has no versionName".into());
+    };
+    if easykey_version_number(&name).is_none() {
+        return Err(format!("invalid version name: {name}"));
+    }
+    Ok(name)
 }
 
-/// The checksum of `name` in a `sha256sum`-style list: `<64 hex>  <name>`
-/// per line.
-fn checksum_for(sums: &str, name: &str) -> Option<String> {
-    sums.lines().find_map(|line| {
-        let (hash, file) = line.trim().split_once(char::is_whitespace)?;
-        let file = file.trim().trim_start_matches('*');
-        (file.eq_ignore_ascii_case(name)
-            && hash.len() == 64
-            && hash.bytes().all(|b| b.is_ascii_hexdigit()))
-        .then(|| hash.to_ascii_lowercase())
-    })
+struct JsonScan<'a> {
+    bytes: &'a [u8],
+    i: usize,
+}
+
+fn skip_ws(scan: &mut JsonScan<'_>) {
+    while scan.bytes.get(scan.i).is_some_and(u8::is_ascii_whitespace) {
+        scan.i += 1;
+    }
+}
+
+fn parse_json_string(scan: &mut JsonScan<'_>) -> Option<String> {
+    if scan.bytes.get(scan.i) != Some(&b'"') {
+        return None;
+    }
+    scan.i += 1;
+    let mut out = String::new();
+    while scan.i < scan.bytes.len() {
+        let b = scan.bytes[scan.i];
+        scan.i += 1;
+        match b {
+            b'"' => return Some(out),
+            b'\\' => {
+                let escaped = *scan.bytes.get(scan.i)?;
+                scan.i += 1;
+                match escaped {
+                    b'"' | b'\\' | b'/' => out.push(escaped as char),
+                    b'n' => out.push('\n'),
+                    b't' => out.push('\t'),
+                    b'r' => out.push('\r'),
+                    _ => return None,
+                }
+            }
+            byte => out.push(byte as char),
+        }
+    }
+    None
+}
+
+fn skip_container(scan: &mut JsonScan<'_>, open: u8, close: u8) -> bool {
+    if scan.bytes.get(scan.i) != Some(&open) {
+        return false;
+    }
+    scan.i += 1;
+    let mut depth = 1i32;
+    while scan.i < scan.bytes.len() && depth > 0 {
+        match scan.bytes[scan.i] {
+            b'"' => {
+                if parse_json_string(scan).is_none() {
+                    return false;
+                }
+            }
+            byte if byte == open => {
+                depth += 1;
+                scan.i += 1;
+            }
+            byte if byte == close => {
+                depth -= 1;
+                scan.i += 1;
+            }
+            _ => scan.i += 1,
+        }
+    }
+    depth == 0
+}
+
+fn skip_json_value(scan: &mut JsonScan<'_>) -> bool {
+    skip_ws(scan);
+    match scan.bytes.get(scan.i).copied() {
+        Some(b'{') => skip_container(scan, b'{', b'}'),
+        Some(b'[') => skip_container(scan, b'[', b']'),
+        Some(b'"') => parse_json_string(scan).is_some(),
+        Some(b) if b == b'-' || b.is_ascii_digit() => {
+            scan.i += 1;
+            while scan.bytes.get(scan.i).is_some_and(|c| {
+                c.is_ascii_digit() || matches!(c, b'.' | b'e' | b'E' | b'+' | b'-')
+            }) {
+                scan.i += 1;
+            }
+            true
+        }
+        Some(b'f' | b't' | b'n') => {
+            while scan.bytes.get(scan.i).is_some_and(u8::is_ascii_alphabetic) {
+                scan.i += 1;
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+/// The object value of the first `"key": { ... }` in `text`.
+fn json_object_after_key(text: &str, key: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut scan = JsonScan { bytes, i: 0 };
+    while scan.i < bytes.len() {
+        if bytes[scan.i] != b'"' {
+            scan.i += 1;
+            continue;
+        }
+        let value = parse_json_string(&mut scan)?;
+        skip_ws(&mut scan);
+        if value == key && bytes.get(scan.i) == Some(&b':') {
+            scan.i += 1;
+            skip_ws(&mut scan);
+            if bytes.get(scan.i) != Some(&b'{') {
+                continue;
+            }
+            let start = scan.i;
+            if !skip_json_value(&mut scan) {
+                return None;
+            }
+            return Some(text[start..scan.i].to_owned());
+        }
+    }
+    None
+}
+
+/// The first string value of `"key"` inside `object` (the object text,
+/// including its braces).
+fn json_string_field(object: &str, key: &str) -> Option<String> {
+    let bytes = object.as_bytes();
+    let mut scan = JsonScan { bytes, i: 0 };
+    while scan.i < bytes.len() {
+        if bytes[scan.i] != b'"' {
+            scan.i += 1;
+            continue;
+        }
+        let value = parse_json_string(&mut scan)?;
+        skip_ws(&mut scan);
+        if value == key && bytes.get(scan.i) == Some(&b':') {
+            scan.i += 1;
+            skip_ws(&mut scan);
+            if bytes.get(scan.i) != Some(&b'"') {
+                return None;
+            }
+            return parse_json_string(&mut scan);
+        }
+    }
+    None
+}
+
+/// The digest named by a sidecar: exactly the first 64 bytes, read as
+/// hexadecimal, case-insensitively. No trimming and no skipped prefix.
+/// Bytes after those 64 are ignored, so a `sha256sum` line is accepted.
+fn sidecar_hex(bytes: &[u8]) -> Option<String> {
+    let head = bytes.get(..64)?;
+    if !head.iter().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    std::str::from_utf8(head)
+        .ok()
+        .map(|text| text.to_ascii_lowercase())
 }
 
 fn sha256_hex(data: &[u8]) -> String {
@@ -193,56 +388,177 @@ fn sha256_hex(data: &[u8]) -> String {
         .collect()
 }
 
-fn latest_from(source: Source) -> Result<String> {
-    let location = http::redirect_target(source.latest_url())?;
-    version_from_tag_url(&location)
-        .ok_or_else(|| Error::new("The release page returned an invalid version."))
+/// What one host's `version.json` produced. `Ok` is a valid EasyKey
+/// version name, which may still be below the floor.
+struct HostRead {
+    source: Source,
+    outcome: std::result::Result<String, String>,
 }
 
-/// The newest of the versions each site reports, and the site it came
-/// from (GitHub when both have it). Errors only when neither site
-/// answered.
-fn newest(results: [(Source, Result<String>); 2]) -> Result<(String, Source)> {
-    let mut best: Option<(String, Source)> = None;
-    let mut error = None;
-    for (source, result) in results {
-        match result {
+/// The combined read of both hosts.
+#[derive(Debug)]
+enum Discovery {
+    /// Numerically newest acceptable version, and the host it was taken
+    /// from (the preferred-source snapshot on a tie).
+    Offer { version: String, source: Source },
+    /// At least one valid version, and every valid version is below the floor.
+    NoAcceptable { detail: String },
+    /// Neither host produced a valid version.
+    Failed { detail: String },
+}
+
+/// What [`latest`] returns to a caller that bypasses the checks flag.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Latest {
+    /// An acceptable version (at or above the floor).
+    Version(String),
+    /// Valid versions were read and all of them are below the floor.
+    NoAcceptable,
+}
+
+fn host_label(source: Source) -> &'static str {
+    match source {
+        Source::GitHub => "GitHub",
+        Source::GitLab => "GitLab",
+    }
+}
+
+fn read_host(source: Source, fetch: &dyn Fn(&str, usize) -> Result<Vec<u8>>) -> HostRead {
+    let body = match fetch(source.version_json_url(), 64 * 1024) {
+        Ok(body) => body,
+        Err(err) => {
+            return HostRead {
+                source,
+                outcome: Err(err.to_string()),
+            };
+        }
+    };
+    let text = String::from_utf8_lossy(&body);
+    HostRead {
+        source,
+        outcome: parse_version_json(&text),
+    }
+}
+
+/// Select the newest acceptable version. Equal versions take `snapshot`'s
+/// source. Below-floor versions are valid reads that are not offers.
+fn combine(snapshot: Source, reports: [HostRead; 2]) -> Discovery {
+    let mut acceptable: Vec<(u32, String, Source)> = Vec::new();
+    let mut any_valid = false;
+    let mut reasons = Vec::new();
+    for report in reports {
+        match report.outcome {
             Ok(version) => {
-                if best
-                    .as_ref()
-                    .is_none_or(|(b, _)| parse_version(&version) > parse_version(b))
-                {
-                    best = Some((version, source));
+                any_valid = true;
+                let number = easykey_version_number(&version).expect("parse accepted it");
+                if number >= min_accepted_number() {
+                    acceptable.push((number, version, report.source));
+                } else {
+                    reasons.push(format!(
+                        "{}: {version} is below {MIN_ACCEPTED_VERSION}",
+                        host_label(report.source)
+                    ));
                 }
             }
-            Err(e) => error = error.or(Some(e)),
+            Err(reason) => reasons.push(format!("{}: {reason}", host_label(report.source))),
         }
     }
-    best.ok_or_else(|| error.unwrap_or_else(|| Error::new("no release site")))
+    let Some(best) = acceptable.iter().map(|(n, _, _)| *n).max() else {
+        let detail = reasons.join("; ");
+        return if any_valid {
+            Discovery::NoAcceptable { detail }
+        } else {
+            Discovery::Failed { detail }
+        };
+    };
+    let tied: Vec<_> = acceptable
+        .into_iter()
+        .filter(|(number, _, _)| *number == best)
+        .collect();
+    let (_, version, source) = tied
+        .iter()
+        .find(|(_, _, source)| *source == snapshot)
+        .cloned()
+        .unwrap_or_else(|| tied[0].clone());
+    Discovery::Offer { version, source }
 }
 
-/// Asks GitHub and GitLab for the latest release, at the same time.
-/// Blocking; run it off the UI thread.
-pub fn latest() -> Result<String> {
-    let [github, gitlab] = std::thread::scope(|s| {
-        let jobs = Source::ALL.map(|source| s.spawn(move || latest_from(source)));
-        jobs.map(|job| {
-            job.join()
-                .unwrap_or_else(|_| Err(Error::new("update check failed")))
-        })
+type Fetch<'a> = dyn Fn(&str, usize) -> Result<Vec<u8>> + Sync + 'a;
+
+/// Fetch both hosts' `version.json` at once, then combine. Takes one
+/// preferred-source snapshot before the results are combined, and sets
+/// PREFERRED only when an acceptable offer wins.
+fn discover(fetch: &Fetch<'_>) -> Discovery {
+    let snapshot = preferred();
+    let reports = std::thread::scope(|scope| {
+        let github = scope.spawn(|| read_host(Source::GitHub, fetch));
+        let gitlab = scope.spawn(|| read_host(Source::GitLab, fetch));
+        let github = github.join().unwrap_or_else(|_| HostRead {
+            source: Source::GitHub,
+            outcome: Err("update check failed".into()),
+        });
+        let gitlab = gitlab.join().unwrap_or_else(|_| HostRead {
+            source: Source::GitLab,
+            outcome: Err("update check failed".into()),
+        });
+        [github, gitlab]
     });
-    let (version, source) = newest([(Source::GitHub, github), (Source::GitLab, gitlab)])?;
-    set_preferred(source);
-    Ok(version)
+    let discovery = combine(snapshot, reports);
+    if let Discovery::Offer { source, .. } = &discovery {
+        set_preferred(*source);
+    }
+    discovery
+}
+
+fn production_fetch(url: &str, max: usize) -> Result<Vec<u8>> {
+    http::get(url, max)
+}
+
+/// Asks GitHub and GitLab for `version.json`, at the same time.
+/// Blocking; run it off the UI thread. Does not consult the checks
+/// flag and does not write the check log.
+pub fn latest() -> Result<Latest> {
+    match discover(&production_fetch) {
+        Discovery::Offer { version, .. } => Ok(Latest::Version(version)),
+        Discovery::NoAcceptable { .. } => Ok(Latest::NoAcceptable),
+        Discovery::Failed { detail } => Err(Error::new(detail)),
+    }
+}
+
+/// What an explicit apply should do with a discovery result. A missing
+/// acceptable offer is a no-op; it is not turned into a version string.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ApplyChoice {
+    /// Download and install this acceptable version.
+    Install(String),
+    /// The acceptable version is not newer than this build.
+    AlreadyCurrent,
+    /// Valid versions were read and all of them are below the floor.
+    NoAcceptable,
+}
+
+pub fn apply_choice(found: &Latest) -> ApplyChoice {
+    match found {
+        Latest::NoAcceptable => ApplyChoice::NoAcceptable,
+        Latest::Version(version) if is_newer(version) => ApplyChoice::Install(version.clone()),
+        Latest::Version(_) => ApplyChoice::AlreadyCurrent,
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Install layout, checks flag, check outcome
 // ---------------------------------------------------------------------------
 
-/// Staging directory on the install base: a verified payload waits here
-/// between the acceptance gate and the swap. It is not the live install.
-pub const STAGING_DIR: &str = "update-staging";
+/// Prefix of one apply's staging directory. The rest of the name is an
+/// unpredictable hex suffix created for that attempt, so a later apply
+/// cannot reuse a directory a previous attempt still has open.
+pub const STAGING_DIR_PREFIX: &str = "update-staging-";
+
+/// How many times startup cleanup retries a locked `.old` file, and the
+/// pause between those tries. A file still locked after this is kept
+/// for the next start.
+pub const CLEANUP_ATTEMPTS: u32 = 120;
+pub const CLEANUP_DELAY_MS: u64 = 500;
 
 /// File on the install base whose content resolves the checks state:
 /// absent means ON (the default), trimmed content `off` means OFF (a
@@ -270,11 +586,6 @@ impl InstallLayout {
     /// The install directory.
     pub fn base(&self) -> &Path {
         &self.base
-    }
-
-    /// Where a verified payload is staged before the swap.
-    pub fn staging_dir(&self) -> PathBuf {
-        self.base.join(STAGING_DIR)
     }
 
     fn flag_path(&self) -> PathBuf {
@@ -317,7 +628,11 @@ pub enum CheckKind {
     Available,
     /// The published version does not exceed the installed one.
     AlreadyCurrent,
-    /// Anything else: transport, HTTP, local I/O.
+    /// At least one host returned a valid version, and every valid
+    /// version is below [`MIN_ACCEPTED_VERSION`]. Not a failure.
+    NoAcceptableUpdate,
+    /// Neither host returned a valid version: transport, HTTP, or a
+    /// document that does not carry one.
     Failed,
 }
 
@@ -330,8 +645,12 @@ pub struct CheckOutcome {
     pub kind: CheckKind,
     /// User-facing text.
     pub notice: String,
-    /// The published version, when one was read.
+    /// The published version, when one was read and offered.
     pub version: Option<String>,
+    /// Per-host rejection or failure reasons for the local log. Empty
+    /// when the notice's first line already carries them, or when there
+    /// is nothing extra to record. Not user-facing error text.
+    pub detail: String,
 }
 
 fn failed(reason: String) -> CheckOutcome {
@@ -339,6 +658,7 @@ fn failed(reason: String) -> CheckOutcome {
         kind: CheckKind::Failed,
         notice: format!("Update check failed: {reason}"),
         version: None,
+        detail: String::new(),
     }
 }
 
@@ -350,12 +670,14 @@ fn outcome_for(latest: &str) -> CheckOutcome {
             kind: CheckKind::Available,
             notice: format!("Update available: version {latest}"),
             version: Some(latest.to_owned()),
+            detail: String::new(),
         }
     } else {
         CheckOutcome {
             kind: CheckKind::AlreadyCurrent,
             notice: format!("Already current: version {VERSION} is the latest published version."),
             version: Some(latest.to_owned()),
+            detail: String::new(),
         }
     }
 }
@@ -365,7 +687,14 @@ fn outcome_for(latest: &str) -> CheckOutcome {
 fn log_check(layout: &InstallLayout, now_unix: i64, outcome: &CheckOutcome) {
     use std::io::Write as _;
     let headline = outcome.notice.lines().next().unwrap_or("");
-    let line = format!("{now_unix} check kind={:?} {headline}\n", outcome.kind);
+    let line = if outcome.detail.is_empty() {
+        format!("{now_unix} check kind={:?} {headline}\n", outcome.kind)
+    } else {
+        format!(
+            "{now_unix} check kind={:?} {headline} | {}\n",
+            outcome.kind, outcome.detail
+        )
+    };
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -375,26 +704,40 @@ fn log_check(layout: &InstallLayout, now_unix: i64, outcome: &CheckOutcome) {
     }
 }
 
+/// Run one update check for `layout` through `fetch`. While checks
+/// resolve OFF no check starts: `fetch` is not called and the outcome
+/// is [`CheckKind::Disabled`].
+fn run_check_with(layout: &InstallLayout, now_unix: i64, fetch: &Fetch<'_>) -> CheckOutcome {
+    let outcome = if !checks_enabled(layout) {
+        CheckOutcome {
+            kind: CheckKind::Disabled,
+            notice: "Update checks are disabled.".to_owned(),
+            version: None,
+            detail: String::new(),
+        }
+    } else {
+        match discover(fetch) {
+            Discovery::Offer { version, .. } => outcome_for(&version),
+            Discovery::NoAcceptable { detail } => CheckOutcome {
+                kind: CheckKind::NoAcceptableUpdate,
+                notice: "No acceptable update is available.".to_owned(),
+                version: None,
+                detail,
+            },
+            Discovery::Failed { detail } => failed(detail),
+        }
+    };
+    log_check(layout, now_unix, &outcome);
+    outcome
+}
+
 /// Run one update check for `layout`. While checks resolve OFF no check
 /// starts: no socket opens and the outcome is [`CheckKind::Disabled`].
 /// A check already in flight when the user turns checks off runs to
 /// completion. Nothing here downloads or installs; applying stays a
 /// separate, explicit act. Blocking; run it off the UI thread.
 pub fn run_check(layout: &InstallLayout, now_unix: i64) -> CheckOutcome {
-    let outcome = if !checks_enabled(layout) {
-        CheckOutcome {
-            kind: CheckKind::Disabled,
-            notice: "Update checks are disabled.".to_owned(),
-            version: None,
-        }
-    } else {
-        match latest() {
-            Ok(version) => outcome_for(&version),
-            Err(err) => failed(format!("{err}")),
-        }
-    };
-    log_check(layout, now_unix, &outcome);
-    outcome
+    run_check_with(layout, now_unix, &production_fetch)
 }
 
 // ---------------------------------------------------------------------------
@@ -407,13 +750,12 @@ pub enum Failure {
     /// A release file could not be fetched.
     #[error("download failed: {0}")]
     Download(Error),
-    /// The archive's hash does not match the release listing, the
-    /// archive is not a usable zip, a member path is unsafe, or a
-    /// payload executable is missing: the bytes are not the published
-    /// build. Kept distinct from [`Failure::Signature`]: a checksum
-    /// mismatch means a broken or substituted download, a signature
-    /// failure means the file must not be trusted even though its hash
-    /// matches the release listing.
+    /// The archive's hash does not match its sidecar, the sidecar is
+    /// not 64 hex bytes, the archive is not a usable zip, a member path
+    /// is unsafe, or a payload executable is missing. Kept distinct from
+    /// [`Failure::Signature`]: a checksum mismatch means a broken or
+    /// substituted download, a signature failure means the file must not
+    /// be trusted even though its hash matches the sidecar.
     #[error("the downloaded archive does not match the published checksums")]
     Mismatch,
     /// The Authenticode/SPKI gate refused a payload executable:
@@ -421,10 +763,10 @@ pub enum Failure {
     /// API error.
     #[error("the downloaded build is not signed with the pinned key")]
     Signature,
-    /// The verified build could not be put in place (the previous
-    /// build was restored).
-    #[error("install failed: {0}")]
-    Install(Error),
+    /// The verified build could not be put in place. `restored` is
+    /// false when putting the previous files back also failed.
+    #[error("install failed: {detail}")]
+    Install { detail: String, restored: bool },
 }
 
 impl Failure {
@@ -442,9 +784,17 @@ impl Failure {
                 "The downloaded build is not signed with the pinned key; it was discarded and nothing was installed."
                     .to_owned()
             }
-            Failure::Install(e) => format!(
-                "The update could not be installed ({e}); the previous build is still in place."
-            ),
+            Failure::Install { detail, restored } => {
+                if *restored {
+                    format!(
+                        "The update could not be installed ({detail}); the previous build is still in place."
+                    )
+                } else {
+                    format!(
+                        "The update could not be installed ({detail}); restoring the previous build failed."
+                    )
+                }
+            }
         }
     }
 }
@@ -505,46 +855,429 @@ fn spki_pin_matches(spki_der: &[u8]) -> bool {
     diff == 0
 }
 
-fn download(
-    source: Source,
-    version: &str,
-    layout: &InstallLayout,
-) -> std::result::Result<PathBuf, Failure> {
-    let base = source.download_base(version);
-    let sums = http::get(&format!("{base}SHA256SUMS.txt"), 64 * 1024).map_err(Failure::Download)?;
-    let zip = http::get(&format!("{base}{}", zip_name(version)), MAX_DOWNLOAD)
-        .map_err(Failure::Download)?;
-    accept_and_stage(&zip, &sums, version, layout, &http::verify_file_signature)
+fn asset_url(source: Source, version: &str, name: &str) -> String {
+    format!("{}{name}", source.download_base(version))
 }
 
-/// The acceptance gate, identical for both origins: verify the zip's
-/// SHA-256 against `SHA256SUMS.txt`, extract it into the staging
-/// directory, then hand every payload executable to `verify` (the
-/// Authenticode + SPKI step). `verify` is only called when the hash
-/// already matches, so a tampered zip served with recomputed sums
-/// still faces the signature check.
+fn sidecar_name(version: &str) -> String {
+    format!("{}.sha256", zip_name(version))
+}
+
+/// Both files of one host, or a download error if either is missing.
+/// A later gate failure is not this function's concern.
+fn fetch_pair(
+    source: Source,
+    version: &str,
+    fetch: &Fetch<'_>,
+) -> std::result::Result<(Vec<u8>, Vec<u8>), Failure> {
+    let zip = fetch(
+        &asset_url(source, version, &zip_name(version)),
+        MAX_DOWNLOAD,
+    )
+    .map_err(Failure::Download)?;
+    let sidecar = fetch(
+        &asset_url(source, version, &sidecar_name(version)),
+        64 * 1024,
+    )
+    .map_err(Failure::Download)?;
+    Ok((zip, sidecar))
+}
+
+/// The acceptance gate, identical for both origins: the sidecar's first
+/// 64 bytes must be the zip's SHA-256, then the archive is extracted
+/// and every payload executable is handed to `verify` (the Authenticode
+/// + SPKI step). `verify` is only called when the hash already matches,
+/// so a tampered zip served with a recomputed sidecar still faces the
+/// signature check.
 ///
 /// `verify` is a parameter (rather than a direct call) so tests can
 /// drive the gate with fixture outcomes; production passes
 /// [`http::verify_file_signature`]. On success the staging directory
 /// holds the verified tree.
+fn firefox_archive_name(version: &str) -> String {
+    format!("extension/udm-extension-firefox-{version}.zip")
+}
+
+/// A direct `extension/udm-extension-firefox-*.zip` member, not a nested path.
+fn is_firefox_archive(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("extension/udm-extension-firefox-") else {
+        return false;
+    };
+    let Some(version) = rest.strip_suffix(".zip") else {
+        return false;
+    };
+    !version.is_empty() && !version.contains('/')
+}
+
+/// Three root executables, one regular root `udm.portable`, and exactly
+/// one Firefox archive named for `version`. Checked before anything is
+/// written, and before the swap.
+fn require_payload(members: &[ZipMember], version: &str) -> std::result::Result<(), Failure> {
+    let names: Vec<&str> = members.iter().map(|member| member.name.as_str()).collect();
+    if names.iter().filter(|name| **name == "udm.portable").count() != 1 {
+        return Err(Failure::Mismatch);
+    }
+    let expected = firefox_archive_name(version);
+    let firefox: Vec<&str> = names
+        .iter()
+        .copied()
+        .filter(|name| is_firefox_archive(name))
+        .collect();
+    if firefox.len() != 1 || firefox[0] != expected {
+        return Err(Failure::Mismatch);
+    }
+    for exe in PAYLOAD_EXES {
+        if !names.contains(&exe) {
+            return Err(Failure::Mismatch);
+        }
+    }
+    Ok(())
+}
+
+fn install_err(detail: impl Into<String>, restored: bool) -> Failure {
+    Failure::Install {
+        detail: detail.into(),
+        restored,
+    }
+}
+
+fn active_staging() -> &'static Mutex<Vec<PathBuf>> {
+    static ACTIVE: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+    &ACTIVE
+}
+
+/// Same-process apply and cleanup share this lock. Cleanup cannot
+/// delete a tree an apply still has open, and it is not held across a
+/// verify callback.
+fn update_lock() -> &'static Mutex<()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    &LOCK
+}
+
+fn forget_active(path: &Path) {
+    active_staging()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .retain(|active| active != path);
+}
+
+fn release_staging(path: &Path) {
+    forget_active(path);
+    let _ = std::fs::remove_dir_all(path);
+}
+
+fn is_staging_name(name: &std::ffi::OsStr) -> bool {
+    let Some(text) = name.to_str() else {
+        return false;
+    };
+    let Some(rest) = text.strip_prefix(STAGING_DIR_PREFIX) else {
+        return false;
+    };
+    !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+#[cfg(test)]
+fn staging_present(base: &Path) -> bool {
+    std::fs::read_dir(base)
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|entry| is_staging_name(&entry.file_name()))
+}
+
+/// A directory this apply created and still owns. The name is not
+/// reusable: exclusive `create_dir`, and cleanup skips paths in the
+/// active set.
+fn create_staging(base: &Path) -> std::io::Result<PathBuf> {
+    let _guard = update_lock().lock().unwrap_or_else(|err| err.into_inner());
+    let rng = ring::rand::SystemRandom::new();
+    for _ in 0..8 {
+        let mut bytes = [0u8; 16];
+        ring::rand::SecureRandom::fill(&rng, &mut bytes)
+            .map_err(|_| std::io::Error::other("rng"))?;
+        let name: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+        let path = base.join(format!("{STAGING_DIR_PREFIX}{name}"));
+        match std::fs::create_dir(&path) {
+            Ok(()) => {
+                active_staging()
+                    .lock()
+                    .unwrap_or_else(|err| err.into_inner())
+                    .push(path.clone());
+                return Ok(path);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err),
+        }
+    }
+    Err(std::io::Error::other(
+        "could not create a staging directory",
+    ))
+}
+
+/// One payload executable, kept open from the write through the rename.
+#[derive(Debug)]
+struct HeldExe {
+    path: PathBuf,
+    #[cfg(windows)]
+    handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+#[cfg(windows)]
+impl Drop for HeldExe {
+    fn drop(&mut self) {
+        winfile::close(self.handle);
+    }
+}
+
+#[derive(Debug)]
+struct StagedTree {
+    dir: PathBuf,
+    exes: Vec<HeldExe>,
+}
+
+impl StagedTree {
+    #[cfg(test)]
+    fn dir(&self) -> &Path {
+        &self.dir
+    }
+}
+
+impl Drop for StagedTree {
+    fn drop(&mut self) {
+        self.exes.clear();
+        release_staging(&self.dir);
+    }
+}
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+mod winfile {
+    use super::{HeldExe, Path};
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FileRenameInfo, FlushFileBuffers, SetFileInformationByHandle,
+        SetFilePointerEx, WriteFile, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, FILE_BEGIN,
+        FILE_RENAME_INFO, FILE_SHARE_READ,
+    };
+    #[cfg(test)]
+    use windows_sys::Win32::Storage::FileSystem::{
+        DeleteFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_SHARE_DELETE,
+        FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+
+    const DELETE_ACCESS: u32 = 0x0001_0000;
+
+    fn wide_path(path: &Path) -> Vec<u16> {
+        let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+        wide.push(0);
+        wide
+    }
+
+    pub(super) fn close(handle: HANDLE) {
+        unsafe {
+            CloseHandle(handle);
+        }
+    }
+
+    pub(super) fn write_held(path: &Path, bytes: &[u8]) -> std::io::Result<HeldExe> {
+        let wide = wide_path(path);
+        let handle = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE | DELETE_ACCESS,
+                FILE_SHARE_READ,
+                std::ptr::null(),
+                CREATE_NEW,
+                FILE_ATTRIBUTE_NORMAL,
+                0,
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut offset = 0usize;
+        while offset < bytes.len() {
+            let chunk = (bytes.len() - offset).min(1 << 20);
+            let mut written = 0u32;
+            let ok = unsafe {
+                WriteFile(
+                    handle,
+                    bytes[offset..].as_ptr(),
+                    chunk as u32,
+                    &mut written,
+                    std::ptr::null_mut(),
+                )
+            };
+            if ok == 0 || written == 0 {
+                close(handle);
+                return Err(std::io::Error::last_os_error());
+            }
+            offset += written as usize;
+        }
+        let rewound = unsafe { SetFilePointerEx(handle, 0, std::ptr::null_mut(), FILE_BEGIN) };
+        if rewound == 0 || unsafe { FlushFileBuffers(handle) } == 0 {
+            close(handle);
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(HeldExe {
+            path: path.to_path_buf(),
+            handle,
+        })
+    }
+
+    pub(super) fn rename_by_handle(handle: HANDLE, target: &Path) -> std::io::Result<()> {
+        let absolute = std::path::absolute(target)?;
+        let wide = wide_path(&absolute);
+        let name_bytes = (wide.len() - 1) * std::mem::size_of::<u16>();
+        let size = std::mem::size_of::<FILE_RENAME_INFO>()
+            + wide.len().saturating_sub(1) * std::mem::size_of::<u16>();
+        let mut raw = vec![0u64; size.div_ceil(8)];
+        unsafe {
+            let info = raw.as_mut_ptr() as *mut FILE_RENAME_INFO;
+            (*info).Anonymous.ReplaceIfExists = 0;
+            (*info).RootDirectory = 0;
+            (*info).FileNameLength = name_bytes as u32;
+            std::ptr::copy_nonoverlapping(wide.as_ptr(), (*info).FileName.as_mut_ptr(), wide.len());
+            let ok = SetFileInformationByHandle(
+                handle,
+                FileRenameInfo,
+                raw.as_ptr() as *const _,
+                size as u32,
+            );
+            if ok == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn file_index(handle: HANDLE) -> std::io::Result<(u32, u32)> {
+        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        let ok = unsafe { GetFileInformationByHandle(handle, &mut info) };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok((info.nFileIndexHigh, info.nFileIndexLow))
+    }
+
+    #[cfg(test)]
+    pub(super) fn indexes_match(handle: HANDLE, path: &Path) -> std::io::Result<bool> {
+        let held = file_index(handle)?;
+        let units = wide_path(path);
+        let opened = unsafe {
+            CreateFileW(
+                units.as_ptr(),
+                GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                0,
+            )
+        };
+        if opened == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error());
+        }
+        let opened_index = file_index(opened);
+        close(opened);
+        Ok(opened_index? == held)
+    }
+
+    #[cfg(test)]
+    pub(super) fn write_denied(path: &Path) -> bool {
+        let units = wide_path(path);
+        let handle = unsafe {
+            CreateFileW(
+                units.as_ptr(),
+                GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                0,
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return true;
+        }
+        close(handle);
+        false
+    }
+
+    #[cfg(test)]
+    pub(super) fn delete_denied(path: &Path) -> bool {
+        let units = wide_path(path);
+        unsafe { DeleteFileW(units.as_ptr()) == 0 }
+    }
+
+    /// Read handle with no sharing, so a cleanup delete has to wait.
+    #[cfg(test)]
+    pub(super) struct Lock {
+        handle: HANDLE,
+    }
+
+    #[cfg(test)]
+    impl Drop for Lock {
+        fn drop(&mut self) {
+            close(self.handle);
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn lock_exclusive(path: &Path) -> std::io::Result<Lock> {
+        let units = wide_path(path);
+        let handle = unsafe {
+            CreateFileW(
+                units.as_ptr(),
+                GENERIC_READ,
+                0,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                0,
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Lock { handle })
+    }
+}
+
+#[cfg(test)]
 fn accept_and_stage(
     zip: &[u8],
-    sums: &[u8],
+    sidecar: &[u8],
     version: &str,
     layout: &InstallLayout,
     verify: &dyn Fn(&Path) -> std::result::Result<(), Failure>,
-) -> std::result::Result<PathBuf, Failure> {
-    let expected = checksum_for(&String::from_utf8_lossy(sums), &zip_name(version))
-        .ok_or(Failure::Mismatch)?;
+) -> std::result::Result<StagedTree, Failure> {
+    stage(zip, sidecar, version, layout, verify, false)
+}
+
+fn stage(
+    zip: &[u8],
+    sidecar: &[u8],
+    version: &str,
+    layout: &InstallLayout,
+    verify: &dyn Fn(&Path) -> std::result::Result<(), Failure>,
+    spki: bool,
+) -> std::result::Result<StagedTree, Failure> {
+    let expected = sidecar_hex(sidecar).ok_or(Failure::Mismatch)?;
     if sha256_hex(zip) != expected {
         return Err(Failure::Mismatch);
     }
     let members = read_zip(zip).map_err(|_| Failure::Mismatch)?;
-    let staging = layout.staging_dir();
-    let _ = std::fs::remove_dir_all(&staging);
-    std::fs::create_dir_all(&staging).map_err(|e| Failure::Install(Error::new(e.to_string())))?;
-    let staged = (|| -> std::result::Result<(), Failure> {
+    require_payload(&members, version)?;
+    let staging =
+        create_staging(layout.base()).map_err(|err| install_err(err.to_string(), true))?;
+    let mut exes: Vec<HeldExe> = Vec::new();
+    let written = (|| -> std::result::Result<(), Failure> {
         let mut seen: Vec<&str> = Vec::new();
         for member in &members {
             let rel = safe_relative(&member.name).map_err(|_| Failure::Mismatch)?;
@@ -555,62 +1288,106 @@ fn accept_and_stage(
             let dest = staging.join(&rel);
             if let Some(parent) = dest.parent() {
                 std::fs::create_dir_all(parent)
-                    .map_err(|e| Failure::Install(Error::new(e.to_string())))?;
+                    .map_err(|err| install_err(err.to_string(), true))?;
             }
-            std::fs::write(&dest, &member.bytes)
-                .map_err(|e| Failure::Install(Error::new(e.to_string())))?;
-        }
-        for exe in PAYLOAD_EXES {
-            let path = staging.join(exe);
-            if !path.is_file() {
-                return Err(Failure::Mismatch);
+            if PAYLOAD_EXES.contains(&member.name.as_str()) {
+                #[cfg(windows)]
+                {
+                    let held = winfile::write_held(&dest, &member.bytes)
+                        .map_err(|err| install_err(err.to_string(), true))?;
+                    if spki {
+                        http::verify_open_file(&held.path, held.handle)?;
+                    } else {
+                        verify(&held.path)?;
+                    }
+                    exes.push(held);
+                }
+                #[cfg(not(windows))]
+                {
+                    let _ = spki;
+                    std::fs::write(&dest, &member.bytes)
+                        .map_err(|err| install_err(err.to_string(), true))?;
+                    verify(&dest)?;
+                }
+            } else {
+                std::fs::write(&dest, &member.bytes)
+                    .map_err(|err| install_err(err.to_string(), true))?;
             }
-            verify(&path)?;
         }
         Ok(())
     })();
-    if let Err(failure) = staged {
-        let _ = std::fs::remove_dir_all(&staging);
+    if let Err(failure) = written {
+        exes.clear();
+        release_staging(&staging);
         return Err(failure);
     }
-    Ok(staging)
+    Ok(StagedTree { dir: staging, exes })
 }
 
 /// Downloads `version`, checks it and puts it in place of the current
-/// install, from the site the check found it on, or the other one if
-/// that fails. Blocking; run it off the UI thread. A download or gate
-/// failure changes nothing on disk outside the staging directory,
-/// which is removed; a swap failure restores the previous files.
+/// install. An invalid or below-floor version does no network or disk
+/// work. The preferred host is tried first; the other host is tried
+/// only when the zip and sidecar were not both fetched. After a
+/// complete pair, checksum, extraction, signature, and install failures
+/// are terminal. Blocking; run it off the UI thread.
+#[cfg(test)]
+fn download_and_install_with(
+    layout: &InstallLayout,
+    version: &str,
+    fetch: &Fetch<'_>,
+    verify: &dyn Fn(&Path) -> std::result::Result<(), Failure>,
+) -> std::result::Result<(), Failure> {
+    download_inner(layout, version, fetch, verify, false)
+}
+
+fn download_inner(
+    layout: &InstallLayout,
+    version: &str,
+    fetch: &Fetch<'_>,
+    verify: &dyn Fn(&Path) -> std::result::Result<(), Failure>,
+    spki: bool,
+) -> std::result::Result<(), Failure> {
+    if easykey_version_number(version).is_none_or(|number| number < min_accepted_number()) {
+        return Err(Failure::Download(Error::new(
+            "the version is not an acceptable update target",
+        )));
+    }
+    let mut failure = None;
+    for source in sources() {
+        let (zip, sidecar) = match fetch_pair(source, version, fetch) {
+            Ok(pair) => pair,
+            Err(err) => {
+                failure = Some(err);
+                continue;
+            }
+        };
+        // EasyKey records the host once both files are in hand, before
+        // the checksum. A later gate failure does not try the other host.
+        set_preferred(source);
+        let mut staged = stage(&zip, &sidecar, version, layout, verify, spki)?;
+        let _guard = update_lock().lock().unwrap_or_else(|err| err.into_inner());
+        let staging_dir = staged.dir.clone();
+        swap_tree(layout, &staging_dir, &mut staged.exes)?;
+        // The applying process still reports the old crate version, so
+        // the archive just installed is kept by the version argument.
+        sweep_firefox(layout.base(), version);
+        return Ok(());
+    }
+    Err(failure
+        .unwrap_or_else(|| Failure::Download(Error::new("no release host could be reached"))))
+}
+
 pub fn download_and_install(
     layout: &InstallLayout,
     version: &str,
 ) -> std::result::Result<(), Failure> {
-    let mut failure = None;
-    let mut staged = None;
-    for source in sources() {
-        match download(source, version, layout) {
-            Ok(path) => {
-                set_preferred(source);
-                staged = Some(path);
-                break;
-            }
-            // A build that fails the checksum or the signature gate is
-            // reported over a site that could not be reached; the two
-            // hosts' results are not treated differently in any way.
-            Err(f) => {
-                let sticky = matches!(failure, Some(Failure::Mismatch) | Some(Failure::Signature));
-                if !sticky {
-                    failure = Some(f);
-                }
-            }
-        }
-    }
-    let Some(staging) = staged else {
-        return Err(failure.unwrap_or(Failure::Mismatch));
-    };
-    swap_tree(layout, &staging)?;
-    let _ = std::fs::remove_dir_all(&staging);
-    Ok(())
+    download_inner(
+        layout,
+        version,
+        &production_fetch,
+        &http::verify_file_signature,
+        true,
+    )
 }
 
 /// The `.old` sibling a file steps aside to during the swap.
@@ -625,11 +1402,14 @@ fn old_sibling(path: &Path) -> PathBuf {
 fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            collect_files(&path, out)?;
-        } else {
-            out.push(path);
+        let kind = entry.file_type()?;
+        if kind.is_symlink() {
+            continue;
+        }
+        if kind.is_dir() {
+            collect_files(&entry.path(), out)?;
+        } else if kind.is_file() {
+            out.push(entry.path());
         }
     }
     Ok(())
@@ -638,94 +1418,217 @@ fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
 /// Put the staged tree in place of the install, file by file: each
 /// current file steps aside to its `.old` sibling, the staged file
 /// takes its name, and any failure rolls every swapped file back.
+/// Executables that are still held open are renamed by that handle.
 /// Files the new tree does not carry are left alone.
-fn swap_tree(layout: &InstallLayout, staging: &Path) -> std::result::Result<(), Failure> {
+fn swap_tree(
+    layout: &InstallLayout,
+    staging: &Path,
+    exes: &mut Vec<HeldExe>,
+) -> std::result::Result<(), Failure> {
     let mut staged_files = Vec::new();
-    collect_files(staging, &mut staged_files)
-        .map_err(|e| Failure::Install(Error::new(e.to_string())))?;
+    collect_files(staging, &mut staged_files).map_err(|err| install_err(err.to_string(), true))?;
     staged_files.sort();
     let mut swapped: Vec<(PathBuf, PathBuf, bool)> = Vec::new();
-    let attempt = (|| -> std::io::Result<()> {
-        for staged in &staged_files {
-            let rel = staged
-                .strip_prefix(staging)
-                .expect("staged file is under staging");
-            let target = layout.base().join(rel);
-            if let Some(parent) = target.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            let backup = old_sibling(&target);
-            let had_original = target.exists();
-            if backup.exists() {
-                std::fs::remove_file(&backup)?;
-            }
-            if had_original {
-                std::fs::rename(&target, &backup)?;
-            }
-            match std::fs::rename(staged, &target) {
-                Ok(()) => swapped.push((target, backup, had_original)),
-                Err(e) => {
-                    if had_original {
-                        let _ = std::fs::rename(&backup, &target);
-                    }
-                    return Err(e);
-                }
+    for staged in &staged_files {
+        let rel = staged
+            .strip_prefix(staging)
+            .expect("staged file is under staging");
+        let target = layout.base().join(rel);
+        if let Some(parent) = target.parent() {
+            if let Err(err) = std::fs::create_dir_all(parent) {
+                return Err(abort_swap(exes, &swapped, err.to_string(), true));
             }
         }
-        Ok(())
-    })();
-    if let Err(e) = attempt {
-        for (target, backup, had_original) in swapped.iter().rev() {
-            let _ = std::fs::remove_file(target);
-            if *had_original {
-                let _ = std::fs::rename(backup, target);
+        let backup = old_sibling(&target);
+        let had_original = target.exists();
+        if backup.exists() {
+            if let Err(err) = std::fs::remove_file(&backup) {
+                return Err(abort_swap(exes, &swapped, err.to_string(), true));
             }
         }
-        return Err(Failure::Install(Error::new(e.to_string())));
+        if had_original {
+            if let Err(err) = std::fs::rename(&target, &backup) {
+                return Err(abort_swap(exes, &swapped, err.to_string(), true));
+            }
+        }
+        if let Err(err) = place_staged(staged, &target, exes) {
+            exes.clear();
+            let mut restored = true;
+            if had_original && std::fs::rename(&backup, &target).is_err() {
+                restored = false;
+            }
+            if !undo(&swapped) {
+                restored = false;
+            }
+            return Err(install_err(err.to_string(), restored));
+        }
+        swapped.push((target, backup, had_original));
     }
     Ok(())
 }
 
-/// On start: remove the `.old` files a swap left behind and any
-/// staging remnant. The previous process may still be exiting, so keep
-/// trying for a few seconds. Never blocks the caller.
+/// Close held files, then put back what the swap already moved.
+/// A held executable denies delete, so the handles go first.
+fn abort_swap(
+    exes: &mut Vec<HeldExe>,
+    swapped: &[(PathBuf, PathBuf, bool)],
+    detail: String,
+    this_restored: bool,
+) -> Failure {
+    exes.clear();
+    install_err(detail, undo(swapped) && this_restored)
+}
+
+/// Reverse a partial swap. False when a file could not be put back.
+fn undo(swapped: &[(PathBuf, PathBuf, bool)]) -> bool {
+    let mut restored = true;
+    for (target, backup, had_original) in swapped.iter().rev() {
+        if target.exists() && std::fs::remove_file(target).is_err() {
+            restored = false;
+        }
+        if *had_original && std::fs::rename(backup, target).is_err() {
+            restored = false;
+        }
+    }
+    restored
+}
+
+fn place_staged(staged: &Path, target: &Path, exes: &[HeldExe]) -> std::io::Result<()> {
+    #[cfg(windows)]
+    if let Some(held) = exes.iter().find(|exe| exe.path == *staged) {
+        return winfile::rename_by_handle(held.handle, target);
+    }
+    let _ = exes;
+    std::fs::rename(staged, target)
+}
+
+/// Delete direct regular `udm-extension-firefox-*.zip` files in
+/// `<install>\extension`, except the archive named for `keep_version`.
+/// A deletion that fails is left for the next start.
+fn sweep_firefox(install: &Path, keep_version: &str) {
+    let dir = install.join("extension");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let keep = firefox_archive_name(keep_version);
+    let keep_name = keep.rsplit_once('/').map(|(_, name)| name).unwrap_or(&keep);
+    for entry in entries.flatten() {
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if !kind.is_file() {
+            continue;
+        }
+        let Some(name) = entry.file_name().into_string().ok() else {
+            continue;
+        };
+        if name == keep_name {
+            continue;
+        }
+        if is_firefox_archive(&format!("extension/{name}")) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// One cleanup pass. False only when a `.old` file or an inactive
+/// staging directory could not be removed. Firefox deletion failures
+/// do not fail the pass.
+fn cleanup_once(layout: &InstallLayout) -> bool {
+    let _guard = update_lock().lock().unwrap_or_else(|err| err.into_inner());
+    let old_ok = remove_old_files(layout.base());
+    let staging_ok = remove_inactive_staging(layout.base());
+    sweep_firefox(layout.base(), VERSION);
+    old_ok && staging_ok
+}
+
+fn remove_inactive_staging(base: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(base) else {
+        return true;
+    };
+    let active = active_staging()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .clone();
+    let mut ok = true;
+    for entry in entries.flatten() {
+        if !is_staging_name(&entry.file_name()) {
+            continue;
+        }
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if !kind.is_dir() {
+            continue;
+        }
+        let path = entry.path();
+        if active.iter().any(|active_path| active_path == &path) {
+            continue;
+        }
+        if std::fs::remove_dir_all(&path).is_err() {
+            ok = false;
+        }
+    }
+    ok
+}
+
+fn cleanup_loop(layout: &InstallLayout, attempts: u32) {
+    for index in 0..attempts {
+        if cleanup_once(layout) {
+            break;
+        }
+        if index + 1 < attempts {
+            std::thread::sleep(std::time::Duration::from_millis(CLEANUP_DELAY_MS));
+        }
+    }
+}
+
+/// On GUI start: remove `.old` files, inactive staging, and stale
+/// Firefox archives. Retries stay off the caller. A file still locked
+/// after [`CLEANUP_ATTEMPTS`] is kept for the next start.
 pub fn finish_previous_update(layout: &InstallLayout) {
-    let base = layout.base().to_path_buf();
+    let layout = layout.clone();
+    std::thread::spawn(move || cleanup_loop(&layout, CLEANUP_ATTEMPTS));
+}
+
+/// On CLI start: one pass before the command returns. Further retries
+/// of a locked file do not block process exit.
+pub fn finish_previous_update_for_cli(layout: &InstallLayout) {
+    if cleanup_once(layout) {
+        return;
+    }
+    let layout = layout.clone();
     std::thread::spawn(move || {
-        for _ in 0..50 {
-            let mut done = true;
-            if !remove_old_files(&base) {
-                done = false;
-            }
-            let staging = base.join(STAGING_DIR);
-            if staging.exists() && std::fs::remove_dir_all(&staging).is_err() {
-                done = false;
-            }
-            if done {
+        for _ in 1..CLEANUP_ATTEMPTS {
+            std::thread::sleep(std::time::Duration::from_millis(CLEANUP_DELAY_MS));
+            if cleanup_once(&layout) {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(200));
         }
     });
 }
 
-/// Remove every `*.old` file under `dir`. Returns false when any
-/// removal failed (a file still held by an exiting process).
+/// Remove every regular `*.old` file under `dir`. Directory links are
+/// not followed. Returns false when any removal failed.
 fn remove_old_files(dir: &Path) -> bool {
     let mut done = true;
     let Ok(entries) = std::fs::read_dir(dir) else {
         return true;
     };
     for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            if !remove_old_files(&path) {
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_symlink() {
+            continue;
+        }
+        if kind.is_dir() {
+            if !remove_old_files(&entry.path()) {
                 done = false;
             }
-        } else if path
-            .file_name()
-            .is_some_and(|n| n.to_string_lossy().ends_with(".old"))
-            && std::fs::remove_file(&path).is_err()
+        } else if kind.is_file()
+            && entry.file_name().to_string_lossy().ends_with(".old")
+            && std::fs::remove_file(entry.path()).is_err()
         {
             done = false;
         }
@@ -983,31 +1886,6 @@ mod http {
         }
     }
 
-    /// Where `url` redirects to, without following it.
-    pub fn redirect_target(url: &str) -> Result<String> {
-        let res = send(url, false)?;
-        if !(300..400).contains(&res.status) {
-            return Err(Error::new(format!("HTTP {}", res.status)));
-        }
-        let mut buf = vec![0u16; 2048];
-        let mut size = (buf.len() * 2) as u32;
-        // SAFETY: `buf` holds `size` bytes.
-        let ok = unsafe {
-            WinHttpQueryHeaders(
-                res.request.0,
-                WINHTTP_QUERY_LOCATION,
-                null(),
-                buf.as_mut_ptr() as *mut c_void,
-                &mut size,
-                null_mut(),
-            )
-        };
-        if ok == 0 {
-            return Err(os_error());
-        }
-        Ok(String::from_utf16_lossy(&buf[..size as usize / 2]))
-    }
-
     /// The body of `url`, following redirects (release files live on
     /// another host), as long as it fits in `max` bytes.
     pub fn get(url: &str, max: usize) -> Result<Vec<u8>> {
@@ -1250,6 +2128,24 @@ mod http {
     /// a verdict). The caller owns the returned context and the
     /// message/store handles.
     fn signer_and_handles(path_wide: &[u16]) -> (*mut CERT_CONTEXT, *mut c_void, HCERTSTORE) {
+        signer_from_query(CERT_QUERY_OBJECT_FILE, path_wide.as_ptr() as *const c_void)
+    }
+
+    /// The signer embedded in `bytes`. Used when the file is already
+    /// open with write and delete sharing denied, so a second open by
+    /// path cannot see it.
+    fn signer_from_blob(bytes: &[u8]) -> (*mut CERT_CONTEXT, *mut c_void, HCERTSTORE) {
+        let blob = CRYPT_INTEGER_BLOB {
+            cbData: bytes.len() as u32,
+            pbData: bytes.as_ptr() as *mut u8,
+        };
+        signer_from_query(CERT_QUERY_OBJECT_BLOB, &blob as *const _ as *const c_void)
+    }
+
+    fn signer_from_query(
+        kind: CERT_QUERY_OBJECT_TYPE,
+        object: *const c_void,
+    ) -> (*mut CERT_CONTEXT, *mut c_void, HCERTSTORE) {
         // SAFETY: every pointer passed is NUL-terminated or sized as
         // passed; every handle is checked before use; the caller
         // releases all three.
@@ -1260,8 +2156,8 @@ mod http {
             let mut store: HCERTSTORE = std::mem::zeroed();
             let mut msg: *mut c_void = null_mut();
             let ok = CryptQueryObject(
-                CERT_QUERY_OBJECT_FILE,
-                path_wide.as_ptr() as *const c_void,
+                kind,
+                object,
                 CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED_EMBED,
                 CERT_QUERY_FORMAT_FLAG_BINARY,
                 0,
@@ -1325,17 +2221,74 @@ mod http {
         }
     }
 
+    /// Bytes of an already-open file, then the pointer back at the start
+    /// so WinTrust reads the same handle.
+    fn read_handle(
+        file: windows_sys::Win32::Foundation::HANDLE,
+    ) -> std::result::Result<Vec<u8>, ()> {
+        use windows_sys::Win32::Storage::FileSystem::{ReadFile, SetFilePointerEx, FILE_BEGIN};
+        let mut body = Vec::new();
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            let mut read = 0u32;
+            let ok = unsafe {
+                ReadFile(
+                    file,
+                    buf.as_mut_ptr(),
+                    buf.len() as u32,
+                    &mut read,
+                    null_mut(),
+                )
+            };
+            if ok == 0 {
+                return Err(());
+            }
+            if read == 0 {
+                break;
+            }
+            body.extend_from_slice(&buf[..read as usize]);
+            if body.len() > MAX_DOWNLOAD {
+                return Err(());
+            }
+        }
+        let rewound = unsafe { SetFilePointerEx(file, 0, null_mut(), FILE_BEGIN) };
+        if rewound == 0 {
+            return Err(());
+        }
+        Ok(body)
+    }
+
     /// Runs `WinVerifyTrust` with the isolated engine and the SPKI
     /// policy. Returns true only when the signature is
     /// cryptographically valid, the SPKI pin matches, and a
     /// system-trusted RFC 3161 timestamp is present.
     pub fn verify_file_signature(path: &Path) -> std::result::Result<(), Failure> {
+        verify_open_file(path, 0)
+    }
+
+    /// Same gate as [`verify_file_signature`], reading the file through
+    /// `file` when it is a live handle. `0` means the path alone.
+    pub(super) fn verify_open_file(
+        path: &Path,
+        file: windows_sys::Win32::Foundation::HANDLE,
+    ) -> std::result::Result<(), Failure> {
         let path_wide = wide(&path.to_string_lossy());
+        let held_bytes = if file != 0 {
+            match read_handle(file) {
+                Ok(bytes) => Some(bytes),
+                Err(()) => return Err(Failure::Signature),
+            }
+        } else {
+            None
+        };
         // SAFETY: every pointer passed is NUL-terminated or sized as
         // passed; every handle is checked before use and released
         // before returning.
         unsafe {
-            let (signer, msg, store) = signer_and_handles(&path_wide);
+            let (signer, msg, store) = match held_bytes.as_deref() {
+                Some(bytes) => signer_from_blob(bytes),
+                None => signer_and_handles(&path_wide),
+            };
             if signer.is_null() {
                 return Err(Failure::Signature);
             }
@@ -1393,6 +2346,7 @@ mod http {
                 let mut file_info: WINTRUST_FILE_INFO = std::mem::zeroed();
                 file_info.cbStruct = std::mem::size_of::<WINTRUST_FILE_INFO>() as u32;
                 file_info.pcwszFilePath = path_wide.as_ptr();
+                file_info.hFile = file;
                 let mut trust: WINTRUST_DATA = std::mem::zeroed();
                 trust.cbStruct = std::mem::size_of::<WINTRUST_DATA>() as u32;
                 trust.pPolicyCallbackData = &mut chain as *mut _ as *mut c_void;
@@ -1443,10 +2397,6 @@ mod http {
 mod http {
     use super::*;
 
-    pub fn redirect_target(_url: &str) -> Result<String> {
-        Err(Error::new("Windows only"))
-    }
-
     pub fn get(_url: &str, _max: usize) -> Result<Vec<u8>> {
         Err(Error::new("Windows only"))
     }
@@ -1466,6 +2416,7 @@ mod http {
 mod tests {
     use super::*;
     use std::cell::Cell;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn hex_decode(s: &str) -> Vec<u8> {
         (0..s.len())
@@ -1493,54 +2444,482 @@ mod tests {
         assert!(!is_newer("garbage"));
     }
 
-    #[test]
-    fn reads_tag_from_redirect() {
-        assert_eq!(
-            version_from_tag_url("https://github.com/iamcino/udm/releases/tag/v0.2.3"),
-            Some("0.2.3".to_owned())
-        );
-        assert_eq!(
-            version_from_tag_url("https://gitlab.com/cino-group/udm/-/releases/v1.0.0"),
-            Some("1.0.0".to_owned())
-        );
-        assert_eq!(version_from_tag_url("https://example.com/nope"), None);
+    fn host(source: Source, outcome: std::result::Result<&str, &str>) -> HostRead {
+        HostRead {
+            source,
+            outcome: outcome.map(str::to_owned).map_err(str::to_owned),
+        }
     }
 
     #[test]
-    fn picks_the_newest_site() {
-        let (version, source) = newest([
-            (Source::GitHub, Ok("0.2.3".to_owned())),
-            (Source::GitLab, Ok("0.2.4".to_owned())),
-        ])
-        .unwrap();
-        assert_eq!(version, "0.2.4");
-        assert_eq!(source, Source::GitLab);
-        let (version, source) = newest([
-            (Source::GitHub, Ok("0.2.4".to_owned())),
-            (Source::GitLab, Err(Error::new("down"))),
-        ])
-        .unwrap();
-        assert_eq!(version, "0.2.4");
-        assert_eq!(source, Source::GitHub);
-        assert!(newest([
-            (Source::GitHub, Err(Error::new("down"))),
-            (Source::GitLab, Err(Error::new("down"))),
-        ])
-        .is_err());
+    fn easykey_version_boundaries() {
+        assert_eq!(
+            easykey_version_number("0.3.2"),
+            Some((0 << 16) | (3 << 8) | 2)
+        );
+        assert_eq!(easykey_version_number("65535.255.255"), Some(u32::MAX));
+        assert_eq!(easykey_version_number("1.0.0"), Some(1 << 16));
+        assert!(
+            easykey_version_number("1.0.0").unwrap() > easykey_version_number("0.255.255").unwrap()
+        );
+        assert_eq!(
+            easykey_version_number("01.02.03"),
+            easykey_version_number("1.2.3")
+        );
+        for rejected in [
+            "v0.3.3",
+            " 0.3.3",
+            "0.3.3 ",
+            "0.3",
+            "0.3.3.1",
+            "",
+            "0.256.0",
+            "0.0.256",
+            "65536.0.0",
+            "0.3.3-beta",
+            "1.2.x",
+        ] {
+            assert_eq!(easykey_version_number(rejected), None, "{rejected}");
+        }
+        // The permissive helper still accepts a leading v and surrounding
+        // whitespace. Discovery does not use it.
+        assert_eq!(parse_version("v0.3.3"), Some((0, 3, 3)));
+        assert_eq!(parse_version(" 0.3.3 "), Some((0, 3, 3)));
+        assert!(easykey_version_number("v0.3.3").is_none());
     }
 
     #[test]
-    fn finds_checksum() {
-        let sums = "aaaa  other.zip\n0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  udm-9.9.9-portable.zip\n";
-        assert_eq!(
-            checksum_for(sums, "udm-9.9.9-portable.zip"),
-            Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned())
+    fn version_json_is_bound_to_latest_win_object() {
+        let inside = "{\n\t\"latestWinVersion\": {\n\t\t\"versionName\": \"0.3.3\",\n\t\t\"versionCode\": 1\n\t}\n}";
+        assert_eq!(parse_version_json(inside).unwrap(), "0.3.3");
+        let earlier = "{\"other\": {\"versionName\": \"9.9.9\"}, \"latestWinVersion\": {\"versionName\": \"0.3.3\", \"versionCode\": 1}}";
+        assert_eq!(parse_version_json(earlier).unwrap(), "0.3.3");
+        let later =
+            "{\"latestWinVersion\": {\"versionCode\": 1}, \"other\": {\"versionName\": \"9.9.9\"}}";
+        assert!(
+            parse_version_json(later).is_err(),
+            "a later sibling is not the offer"
         );
-        assert_eq!(checksum_for(sums, "missing.zip"), None);
-        assert_eq!(
-            checksum_for("short  udm-9.9.9-portable.zip", "udm-9.9.9-portable.zip"),
-            None
+        let both = "{\"latestWinVersion\": {\"versionName\": \"0.3.3\"}, \"other\": {\"versionName\": \"9.9.9\"}}";
+        assert_eq!(parse_version_json(both).unwrap(), "0.3.3");
+        assert!(parse_version_json("{\"other\": {\"versionName\": \"9.9.9\"}}").is_err());
+        assert!(parse_version_json("{\"latestWinVersion\": {\"versionCode\": 1}}").is_err());
+        assert!(
+            parse_version_json("{\"latestWinVersion\": {\"versionName\": \"v0.3.3\"}}").is_err()
         );
+        assert!(parse_version_json("{\"latestWinVersion\": {\"versionName\": \"0.3\"}}").is_err());
+    }
+
+    #[test]
+    fn combine_picks_newest_and_breaks_ties_with_the_snapshot() {
+        let reports = [
+            host(Source::GitHub, Ok("0.3.3")),
+            host(Source::GitLab, Ok("0.3.4")),
+        ];
+        match combine(Source::GitHub, reports) {
+            Discovery::Offer { version, source } => {
+                assert_eq!(version, "0.3.4");
+                assert_eq!(source, Source::GitLab);
+            }
+            other => panic!("expected the newer GitLab offer, got {other:?}"),
+        }
+        for snapshot in [Source::GitHub, Source::GitLab] {
+            let reports = [
+                host(Source::GitHub, Ok("0.3.4")),
+                host(Source::GitLab, Ok("0.3.4")),
+            ];
+            match combine(snapshot, reports) {
+                Discovery::Offer { version, source } => {
+                    assert_eq!(version, "0.3.4");
+                    assert_eq!(source, snapshot);
+                }
+                other => panic!("tie should follow {snapshot:?}, got {other:?}"),
+            }
+        }
+        match combine(
+            Source::GitLab,
+            [
+                host(Source::GitHub, Ok("0.3.4")),
+                host(Source::GitLab, Err("down")),
+            ],
+        ) {
+            Discovery::Offer { version, source } => {
+                assert_eq!(version, "0.3.4");
+                assert_eq!(source, Source::GitHub);
+            }
+            other => panic!("a surviving offer wins, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn combine_classifies_floor_and_unreadable_hosts() {
+        match combine(
+            Source::GitHub,
+            [
+                host(Source::GitHub, Ok("0.3.1")),
+                host(Source::GitLab, Ok("0.3.0")),
+            ],
+        ) {
+            Discovery::NoAcceptable { detail } => {
+                assert!(detail.contains("0.3.1"));
+                assert!(detail.contains("GitLab"));
+            }
+            other => panic!("both below the floor, got {other:?}"),
+        }
+        match combine(
+            Source::GitHub,
+            [
+                host(Source::GitHub, Ok("0.3.1")),
+                host(Source::GitLab, Err("HTTP 500")),
+            ],
+        ) {
+            Discovery::NoAcceptable { detail } => {
+                assert!(detail.contains("below"));
+                assert!(detail.contains("HTTP 500"));
+            }
+            other => panic!("one valid below-floor read is not a failure, got {other:?}"),
+        }
+        match combine(
+            Source::GitHub,
+            [
+                host(Source::GitHub, Ok("0.3.1")),
+                host(Source::GitLab, Ok("0.3.4")),
+            ],
+        ) {
+            Discovery::Offer { version, source } => {
+                assert_eq!(version, "0.3.4");
+                assert_eq!(source, Source::GitLab);
+            }
+            other => panic!("the acceptable host wins, got {other:?}"),
+        }
+        match combine(
+            Source::GitHub,
+            [
+                host(Source::GitHub, Err("HTTP 404")),
+                host(Source::GitLab, Err("invalid version name: v1")),
+            ],
+        ) {
+            Discovery::Failed { detail } => {
+                assert!(detail.contains("HTTP 404"));
+                assert!(detail.contains("invalid version name"));
+            }
+            other => panic!("no valid version is a failure, got {other:?}"),
+        }
+    }
+
+    fn hold_preferred() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    fn version_doc(name: &str) -> Vec<u8> {
+        format!("{{\"latestWinVersion\":{{\"versionName\":\"{name}\",\"versionCode\":1}}}}")
+            .into_bytes()
+    }
+
+    fn scripted(
+        github: std::result::Result<Vec<u8>, String>,
+        gitlab: std::result::Result<Vec<u8>, String>,
+    ) -> impl Fn(&str, usize) -> Result<Vec<u8>> + Sync {
+        move |url: &str, _: usize| {
+            let picked = if url == Source::GitHub.version_json_url() {
+                &github
+            } else if url == Source::GitLab.version_json_url() {
+                &gitlab
+            } else {
+                return Err(Error::new(format!("unexpected url {url}")));
+            };
+            picked.clone().map_err(Error::new)
+        }
+    }
+
+    #[test]
+    fn discover_fetches_in_parallel_and_keeps_the_snapshot_on_a_tie() {
+        let _guard = hold_preferred();
+        let arrived = AtomicUsize::new(0);
+        let fetch = |url: &str, _: usize| -> Result<Vec<u8>> {
+            arrived.fetch_add(1, Ordering::SeqCst);
+            let start = std::time::Instant::now();
+            while arrived.load(Ordering::SeqCst) < 2 {
+                if start.elapsed() > std::time::Duration::from_secs(2) {
+                    return Err(Error::new("fetches were not in parallel"));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            if url == Source::GitHub.version_json_url() || url == Source::GitLab.version_json_url()
+            {
+                Ok(version_doc("0.3.4"))
+            } else {
+                Err(Error::new(format!("unexpected url {url}")))
+            }
+        };
+        for snapshot in [Source::GitLab, Source::GitHub] {
+            arrived.store(0, Ordering::SeqCst);
+            set_preferred(snapshot);
+            match discover(&fetch) {
+                Discovery::Offer { version, source } => {
+                    assert_eq!(version, "0.3.4");
+                    assert_eq!(source, snapshot);
+                    assert_eq!(preferred(), snapshot);
+                }
+                other => panic!("tie should stay on {snapshot:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn checks_off_fetches_nothing_and_still_logs() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = InstallLayout::new(dir.path());
+        set_checks_enabled(&layout, false).unwrap();
+        let calls = AtomicUsize::new(0);
+        let fetch = |_url: &str, _: usize| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err(Error::new("should not be called"))
+        };
+        let outcome = run_check_with(&layout, 42, &fetch);
+        assert_eq!(outcome.kind, CheckKind::Disabled);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let log = std::fs::read_to_string(layout.check_log_path()).unwrap();
+        assert!(log.contains("42 check kind=Disabled"));
+        assert_eq!(log.lines().count(), 1);
+    }
+
+    #[test]
+    fn run_check_classifies_and_logs_each_outcome() {
+        let _guard = hold_preferred();
+        let dir = tempfile::tempdir().unwrap();
+        let layout = InstallLayout::new(dir.path());
+        let available = run_check_with(
+            &layout,
+            1,
+            &scripted(Ok(version_doc("9.9.9")), Err("down".into())),
+        );
+        assert_eq!(available.kind, CheckKind::Available);
+        assert_eq!(available.version.as_deref(), Some("9.9.9"));
+        let same = run_check_with(
+            &layout,
+            2,
+            &scripted(Ok(version_doc(current())), Err("down".into())),
+        );
+        assert_eq!(same.kind, CheckKind::AlreadyCurrent);
+        assert_eq!(same.version.as_deref(), Some(current()));
+        let below = run_check_with(
+            &layout,
+            3,
+            &scripted(Ok(version_doc("0.3.1")), Err("HTTP 500".into())),
+        );
+        assert_eq!(below.kind, CheckKind::NoAcceptableUpdate);
+        assert_eq!(below.version, None);
+        assert_eq!(below.notice, "No acceptable update is available.");
+        assert!(below.detail.contains("0.3.1 is below 0.3.2"));
+        assert!(below.detail.contains("HTTP 500"));
+        let failed = run_check_with(
+            &layout,
+            4,
+            &scripted(Err("nope".into()), Err("also".into())),
+        );
+        assert_eq!(failed.kind, CheckKind::Failed);
+        assert!(failed.notice.starts_with("Update check failed:"));
+        assert!(failed.notice.contains("nope"));
+        assert!(failed.notice.contains("also"));
+        assert!(failed.version.is_none());
+        let log = std::fs::read_to_string(layout.check_log_path()).unwrap();
+        assert!(log.contains("kind=Available"));
+        assert!(log.contains("kind=AlreadyCurrent"));
+        assert!(log.contains("kind=NoAcceptableUpdate"));
+        assert!(log.contains("0.3.1 is below 0.3.2"));
+        assert!(log.contains("kind=Failed"));
+        assert!(log.contains("nope"));
+        assert_eq!(log.lines().count(), 4);
+    }
+
+    #[test]
+    fn apply_choice_does_not_invent_a_version() {
+        assert_eq!(
+            apply_choice(&Latest::NoAcceptable),
+            ApplyChoice::NoAcceptable
+        );
+        assert_eq!(
+            apply_choice(&Latest::Version(current().to_owned())),
+            ApplyChoice::AlreadyCurrent
+        );
+        assert_eq!(
+            apply_choice(&Latest::Version("9.9.9".into())),
+            ApplyChoice::Install("9.9.9".into())
+        );
+        assert_eq!(
+            apply_choice(&Latest::Version("0.3.1".into())),
+            ApplyChoice::AlreadyCurrent
+        );
+    }
+
+    #[test]
+    fn sidecar_reads_the_first_64_hex_bytes_only() {
+        let hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789ABCDEF";
+        let lower = hex.to_ascii_lowercase();
+        assert_eq!(sidecar_hex(hex.as_bytes()).as_deref(), Some(lower.as_str()));
+        let with_name = format!("{hex}  udm-9.9.9-portable.zip\n");
+        assert_eq!(
+            sidecar_hex(with_name.as_bytes()).as_deref(),
+            Some(lower.as_str())
+        );
+        assert_eq!(sidecar_hex(hex[..63].as_bytes()), None);
+        assert_eq!(
+            sidecar_hex(format!(" {hex}").as_bytes()),
+            None,
+            "no skipped prefix"
+        );
+        let mut spaced = hex.as_bytes().to_vec();
+        spaced[0] = b' ';
+        assert_eq!(sidecar_hex(&spaced), None, "no trimming");
+    }
+
+    fn pair_for(version: &str) -> (Vec<u8>, Vec<u8>) {
+        let zip = payload_zip(version);
+        let side = format!("{}  {}\n", sha256_hex(&zip), zip_name(version)).into_bytes();
+        (zip, side)
+    }
+
+    #[test]
+    fn uppercase_sidecar_is_accepted_and_a_prefix_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = InstallLayout::new(dir.path());
+        let zip = full_zip();
+        let upper = sha256_hex(&zip).to_ascii_uppercase();
+        let sidecar = format!("{upper}  {}\n", zip_name("9.9.9")).into_bytes();
+        let calls = Cell::new(0);
+        let verify = |_: &Path| {
+            calls.set(calls.get() + 1);
+            Ok(())
+        };
+        accept_and_stage(&zip, &sidecar, "9.9.9", &layout, &verify).unwrap();
+        assert_eq!(calls.get(), 3);
+        let shifted = format!(" {upper}\n").into_bytes();
+        let calls = Cell::new(0);
+        let verify = |_: &Path| {
+            calls.set(calls.get() + 1);
+            Ok(())
+        };
+        assert_eq!(
+            accept_and_stage(&zip, &shifted, "9.9.9", &layout, &verify).unwrap_err(),
+            Failure::Mismatch
+        );
+        assert_eq!(
+            calls.get(),
+            0,
+            "extraction and signature wait on the sidecar"
+        );
+    }
+
+    #[test]
+    fn floor_refusal_does_no_network_or_disk_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = InstallLayout::new(dir.path());
+        let calls = AtomicUsize::new(0);
+        let fetch = |_url: &str, _: usize| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err(Error::new("should not be called"))
+        };
+        for version in ["0.3.1", "v0.3.4", "0.3", " 0.3.4", "0.3.4 "] {
+            let err = download_and_install_with(&layout, version, &fetch, &|_| Ok(())).unwrap_err();
+            assert!(
+                matches!(err, Failure::Download(_)),
+                "{version} should be refused, got {err}"
+            );
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn host_fallback_stops_once_a_pair_is_complete() {
+        let _guard = hold_preferred();
+        let dir = tempfile::tempdir().unwrap();
+        let layout = InstallLayout::new(dir.path());
+        let (zip, side) = pair_for("0.3.4");
+        let hits = std::sync::Mutex::new(Vec::<String>::new());
+
+        set_preferred(Source::GitHub);
+        let fetch = |url: &str, _: usize| {
+            hits.lock().unwrap().push(url.to_owned());
+            if url.contains("github.com") && url.ends_with(".zip") {
+                return Err(Error::new("github zip missing"));
+            }
+            if url.ends_with(".sha256") {
+                return Ok(side.clone());
+            }
+            if url.contains("portable.zip") {
+                return Ok(zip.clone());
+            }
+            Err(Error::new(format!("unexpected {url}")))
+        };
+        download_and_install_with(&layout, "0.3.4", &fetch, &|_| Ok(())).unwrap();
+        let seen = hits.lock().unwrap().clone();
+        assert!(seen.iter().any(|url| {
+            url == "https://github.com/iamcino/udm/releases/download/v0.3.4/udm-0.3.4-portable.zip"
+        }));
+        assert!(seen.iter().any(|url| {
+            url == "https://gitlab.com/cino-group/udm/-/releases/v0.3.4/downloads/udm-0.3.4-portable.zip"
+        }));
+        assert!(seen.iter().any(|url| {
+            url == "https://gitlab.com/cino-group/udm/-/releases/v0.3.4/downloads/udm-0.3.4-portable.zip.sha256"
+        }));
+        assert_eq!(preferred(), Source::GitLab);
+        assert_eq!(
+            std::fs::read(dir.path().join("udm.exe")).unwrap(),
+            b"MZ-new-gui"
+        );
+
+        hits.lock().unwrap().clear();
+        set_preferred(Source::GitHub);
+        let bad = b"0000000000000000000000000000000000000000000000000000000000000000\n".to_vec();
+        let fetch = |url: &str, _: usize| {
+            hits.lock().unwrap().push(url.to_owned());
+            if url.contains("gitlab.com") {
+                return Err(Error::new("second host must not be tried"));
+            }
+            if url.ends_with(".sha256") {
+                return Ok(bad.clone());
+            }
+            Ok(zip.clone())
+        };
+        let err = download_and_install_with(&layout, "0.3.4", &fetch, &|_| {
+            panic!("signature runs only after the sidecar matches");
+        })
+        .unwrap_err();
+        assert_eq!(err, Failure::Mismatch);
+        assert!(hits
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|url| url.contains("github.com")));
+        assert_eq!(preferred(), Source::GitHub);
+
+        hits.lock().unwrap().clear();
+        let fetch = |url: &str, _: usize| {
+            hits.lock().unwrap().push(url.to_owned());
+            if url.contains("gitlab.com") {
+                return Err(Error::new("second host must not be tried"));
+            }
+            if url.ends_with(".sha256") {
+                return Ok(side.clone());
+            }
+            Ok(zip.clone())
+        };
+        let verified = AtomicUsize::new(0);
+        let verify = |_path: &Path| {
+            verified.fetch_add(1, Ordering::SeqCst);
+            Err(Failure::Signature)
+        };
+        let err = download_and_install_with(&layout, "0.3.4", &fetch, &verify).unwrap_err();
+        assert_eq!(err, Failure::Signature);
+        assert!(verified.load(Ordering::SeqCst) > 0);
+        assert!(hits
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|url| url.contains("github.com")));
     }
 
     #[test]
@@ -1643,14 +3022,21 @@ mod tests {
         format!("{}  {}\n", sha256_hex(zip), zip_name(version)).into_bytes()
     }
 
-    fn full_zip() -> Vec<u8> {
+    fn payload_zip(version: &str) -> Vec<u8> {
+        let firefox = firefox_archive_name(version);
         build_zip(&[
             ("udm.exe", b"MZ-new-gui"),
             ("udm-cli.exe", b"MZ-new-cli"),
             ("udm-host.exe", b"MZ-new-host"),
+            ("udm.portable", b"portable"),
+            (firefox.as_str(), b"PK-firefox"),
             ("extension/chrome/handoff.js", b"// handoff"),
             ("README.txt", b"readme"),
         ])
+    }
+
+    fn full_zip() -> Vec<u8> {
+        payload_zip("9.9.9")
     }
 
     #[test]
@@ -1671,7 +3057,7 @@ mod tests {
             0,
             "signature gate must not run on a hash mismatch"
         );
-        assert!(!layout.staging_dir().exists());
+        assert!(!staging_present(layout.base()));
     }
 
     #[test]
@@ -1683,7 +3069,7 @@ mod tests {
         let err = accept_and_stage(&zip, &sums, "9.9.9", &layout, &|_| Err(Failure::Signature))
             .unwrap_err();
         assert_eq!(err, Failure::Signature);
-        assert!(!layout.staging_dir().exists());
+        assert!(!staging_present(layout.base()));
     }
 
     #[test]
@@ -1700,12 +3086,20 @@ mod tests {
         let staging = accept_and_stage(&zip, &sums, "9.9.9", &layout, &verify).unwrap();
         assert_eq!(calls.get(), 3, "every payload exe is verified");
         assert_eq!(
-            std::fs::read(staging.join("udm.exe")).unwrap(),
+            std::fs::read(staging.dir().join("udm.exe")).unwrap(),
             b"MZ-new-gui"
         );
         assert_eq!(
-            std::fs::read(staging.join("extension/chrome/handoff.js")).unwrap(),
+            std::fs::read(staging.dir().join("extension/chrome/handoff.js")).unwrap(),
             b"// handoff"
+        );
+        assert_eq!(
+            std::fs::read(staging.dir().join("udm.portable")).unwrap(),
+            b"portable"
+        );
+        assert_eq!(
+            std::fs::read(staging.dir().join(firefox_archive_name("9.9.9"))).unwrap(),
+            b"PK-firefox"
         );
     }
 
@@ -1757,6 +3151,84 @@ mod tests {
             accept_and_stage(&zip, &sums, "9.9.9", &layout, &ok).unwrap_err(),
             Failure::Mismatch
         );
+        // Three executables, but no portable marker and no Firefox archive.
+        let zip = build_zip(&[
+            ("udm.exe", b"MZ"),
+            ("udm-cli.exe", b"MZ"),
+            ("udm-host.exe", b"MZ"),
+        ]);
+        let sums = sums_for(&zip, "9.9.9");
+        assert_eq!(
+            accept_and_stage(&zip, &sums, "9.9.9", &layout, &ok).unwrap_err(),
+            Failure::Mismatch
+        );
+        // Marker present, Firefox archive named for a different version.
+        let zip = build_zip(&[
+            ("udm.exe", b"MZ"),
+            ("udm-cli.exe", b"MZ"),
+            ("udm-host.exe", b"MZ"),
+            ("udm.portable", b"portable"),
+            ("extension/udm-extension-firefox-0.3.2.zip", b"PK"),
+        ]);
+        let sums = sums_for(&zip, "9.9.9");
+        assert_eq!(
+            accept_and_stage(&zip, &sums, "9.9.9", &layout, &ok).unwrap_err(),
+            Failure::Mismatch
+        );
+        // The target archive plus a second matching Firefox archive.
+        let zip = build_zip(&[
+            ("udm.exe", b"MZ"),
+            ("udm-cli.exe", b"MZ"),
+            ("udm-host.exe", b"MZ"),
+            ("udm.portable", b"portable"),
+            ("extension/udm-extension-firefox-9.9.9.zip", b"PK"),
+            ("extension/udm-extension-firefox-0.3.2.zip", b"PK-old"),
+        ]);
+        let sums = sums_for(&zip, "9.9.9");
+        assert_eq!(
+            accept_and_stage(&zip, &sums, "9.9.9", &layout, &ok).unwrap_err(),
+            Failure::Mismatch
+        );
+        // Marker not at the root.
+        let zip = build_zip(&[
+            ("udm.exe", b"MZ"),
+            ("udm-cli.exe", b"MZ"),
+            ("udm-host.exe", b"MZ"),
+            ("sub/udm.portable", b"portable"),
+            ("extension/udm-extension-firefox-9.9.9.zip", b"PK"),
+        ]);
+        let sums = sums_for(&zip, "9.9.9");
+        assert_eq!(
+            accept_and_stage(&zip, &sums, "9.9.9", &layout, &ok).unwrap_err(),
+            Failure::Mismatch
+        );
+        // A payload that otherwise qualifies, with a duplicate member and an unsafe path.
+        let zip = build_zip(&[
+            ("udm.exe", b"MZ"),
+            ("udm-cli.exe", b"MZ"),
+            ("udm-host.exe", b"MZ"),
+            ("udm.portable", b"portable"),
+            ("extension/udm-extension-firefox-9.9.9.zip", b"PK"),
+            ("extension/udm-extension-firefox-9.9.9.zip", b"PK2"),
+        ]);
+        let sums = sums_for(&zip, "9.9.9");
+        assert_eq!(
+            accept_and_stage(&zip, &sums, "9.9.9", &layout, &ok).unwrap_err(),
+            Failure::Mismatch
+        );
+        let zip = build_zip(&[
+            ("udm.exe", b"MZ"),
+            ("udm-cli.exe", b"MZ"),
+            ("udm-host.exe", b"MZ"),
+            ("udm.portable", b"portable"),
+            ("extension/udm-extension-firefox-9.9.9.zip", b"PK"),
+            ("../evil.txt", b"x"),
+        ]);
+        let sums = sums_for(&zip, "9.9.9");
+        assert_eq!(
+            accept_and_stage(&zip, &sums, "9.9.9", &layout, &ok).unwrap_err(),
+            Failure::Mismatch
+        );
     }
 
     #[test]
@@ -1765,11 +3237,11 @@ mod tests {
         let layout = InstallLayout::new(dir.path());
         std::fs::write(dir.path().join("udm.exe"), b"old-gui").unwrap();
         std::fs::write(dir.path().join("keep.txt"), b"keep").unwrap();
-        let staging = layout.staging_dir();
+        let staging = dir.path().join("scratch-staging");
         std::fs::create_dir_all(staging.join("sub")).unwrap();
         std::fs::write(staging.join("udm.exe"), b"new-gui").unwrap();
         std::fs::write(staging.join("sub/new.txt"), b"new-file").unwrap();
-        swap_tree(&layout, &staging).unwrap();
+        swap_tree(&layout, &staging, &mut Vec::new()).unwrap();
         assert_eq!(
             std::fs::read(dir.path().join("udm.exe")).unwrap(),
             b"new-gui"
@@ -1793,12 +3265,16 @@ mod tests {
         std::fs::write(dir.path().join("a.txt"), b"old-a").unwrap();
         // `sub` exists as a FILE, so staging `sub/c.txt` cannot land.
         std::fs::write(dir.path().join("sub"), b"blocker").unwrap();
-        let staging = layout.staging_dir();
+        let staging = dir.path().join("scratch-staging");
         std::fs::create_dir_all(staging.join("sub")).unwrap();
         std::fs::write(staging.join("a.txt"), b"new-a").unwrap();
         std::fs::write(staging.join("sub/c.txt"), b"new-c").unwrap();
-        let err = swap_tree(&layout, &staging).unwrap_err();
-        assert!(matches!(err, Failure::Install(_)), "got {err:?}");
+        let err = swap_tree(&layout, &staging, &mut Vec::new()).unwrap_err();
+        assert!(
+            matches!(err, Failure::Install { restored: true, .. }),
+            "got {err:?}"
+        );
+        assert!(err.message().contains("still in place"));
         assert_eq!(std::fs::read(dir.path().join("a.txt")).unwrap(), b"old-a");
         assert!(!dir.path().join("a.txt.old").exists());
     }
@@ -1831,12 +3307,16 @@ mod tests {
 
     /// Real-artifact gate evidence, run on demand against a shipped
     /// signed exe: `UDM_TEST_SIGNED_EXE=<path to shipped udm.exe>`.
+    /// `udm-cli.exe` and `udm-host.exe` beside it are used when present.
+    /// A byte-flipped executable with a recomputed sidecar must fail the
+    /// signature gate, not the checksum.
     #[cfg(windows)]
     #[test]
     fn real_artifact_signed_accepts_and_tampered_rejects() {
         let Ok(path) = std::env::var("UDM_TEST_SIGNED_EXE") else {
             return;
         };
+        let path = PathBuf::from(path);
         let dir = tempfile::tempdir().unwrap();
         let good = dir.path().join("good.exe");
         std::fs::copy(&path, &good).unwrap();
@@ -1850,5 +3330,386 @@ mod tests {
             http::verify_file_signature(&bad).unwrap_err(),
             Failure::Signature
         );
+
+        let parent = path.parent().unwrap();
+        let gui = std::fs::read(&path).unwrap();
+        let cli = std::fs::read(parent.join("udm-cli.exe")).unwrap_or_else(|_| gui.clone());
+        let host = std::fs::read(parent.join("udm-host.exe")).unwrap_or_else(|_| gui.clone());
+        let firefox = firefox_archive_name("9.9.9");
+        let zip = build_zip(&[
+            ("udm.exe", &gui),
+            ("udm-cli.exe", &cli),
+            ("udm-host.exe", &host),
+            ("udm.portable", b"portable"),
+            (firefox.as_str(), b"PK-firefox"),
+        ]);
+        let sums = sums_for(&zip, "9.9.9");
+        let install = dir.path().join("install");
+        std::fs::create_dir_all(&install).unwrap();
+        let layout = InstallLayout::new(&install);
+        stage(
+            &zip,
+            &sums,
+            "9.9.9",
+            &layout,
+            &http::verify_file_signature,
+            true,
+        )
+        .unwrap();
+
+        let mut tampered = gui.clone();
+        tampered[mid] ^= 0x01;
+        let bad_zip = build_zip(&[
+            ("udm.exe", tampered.as_slice()),
+            ("udm-cli.exe", &cli),
+            ("udm-host.exe", &host),
+            ("udm.portable", b"portable"),
+            (firefox.as_str(), b"PK-firefox"),
+        ]);
+        let bad_sums = sums_for(&bad_zip, "9.9.9");
+        assert_eq!(
+            stage(
+                &bad_zip,
+                &bad_sums,
+                "9.9.9",
+                &layout,
+                &http::verify_file_signature,
+                true,
+            )
+            .unwrap_err(),
+            Failure::Signature
+        );
+    }
+
+    #[test]
+    fn cleanup_retries_match_easykey() {
+        assert_eq!(CLEANUP_ATTEMPTS, 120);
+        assert_eq!(CLEANUP_DELAY_MS, 500);
+    }
+
+    #[test]
+    fn staging_names_are_exclusive_and_unpredictable() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = create_staging(dir.path()).unwrap();
+        let second = create_staging(dir.path()).unwrap();
+        assert_ne!(first.file_name(), second.file_name());
+        assert!(is_staging_name(first.file_name().unwrap()));
+        assert!(is_staging_name(second.file_name().unwrap()));
+        let stale = dir.path().join("update-staging-ee");
+        std::fs::create_dir(&stale).unwrap();
+        std::fs::write(stale.join("x"), b"1").unwrap();
+        std::fs::write(dir.path().join("update-staging-abcd"), b"no").unwrap();
+        std::fs::create_dir(dir.path().join("notes")).unwrap();
+        release_staging(&first);
+        release_staging(&second);
+        assert!(cleanup_once(&InstallLayout::new(dir.path())));
+        assert!(!stale.exists());
+        assert!(dir.path().join("update-staging-abcd").is_file());
+        assert!(dir.path().join("notes").is_dir());
+        assert!(dir.path().read_dir().unwrap().flatten().all(|entry| {
+            !(entry.file_type().unwrap().is_dir() && is_staging_name(&entry.file_name()))
+        }));
+    }
+
+    #[test]
+    fn cleanup_skips_an_active_staging_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = InstallLayout::new(dir.path());
+        let zip = full_zip();
+        let sums = sums_for(&zip, "9.9.9");
+        let layout_verify = layout.clone();
+        let verify = move |_path: &Path| {
+            assert!(cleanup_once(&layout_verify));
+            Ok(())
+        };
+        let staged = accept_and_stage(&zip, &sums, "9.9.9", &layout, &verify).unwrap();
+        let path = staged.dir().to_path_buf();
+        assert!(path.join("udm.exe").is_file());
+        assert!(cleanup_once(&layout));
+        assert!(path.exists());
+        drop(staged);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn unrestored_swap_does_not_promise_the_previous_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("udm.exe");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("stuck"), b"x").unwrap();
+        let backup = dir.path().join("udm.exe.old");
+        assert!(!undo(&[(target, backup, true)]));
+        let message = install_err("rename failed", false).message();
+        assert!(message.contains("restoring the previous build failed"));
+        assert!(!message.contains("still in place"));
+    }
+
+    /// The next patch after the running build, used as the install
+    /// target in sweep tests so no fixture pins a release number.
+    fn next_patch_version() -> String {
+        let mut parts = VERSION.split('.');
+        let major: u32 = parts.next().unwrap().parse().unwrap();
+        let minor: u32 = parts.next().unwrap().parse().unwrap();
+        let patch: u32 = parts.next().unwrap().parse().unwrap();
+        format!("{major}.{minor}.{}", patch + 1)
+    }
+
+    fn seed_firefox(dir: &Path, name: &str, bytes: &[u8]) {
+        let ext = dir.join("extension");
+        std::fs::create_dir_all(&ext).unwrap();
+        std::fs::write(ext.join(name), bytes).unwrap();
+    }
+
+    #[test]
+    fn startup_cleanup_keeps_the_running_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = InstallLayout::new(dir.path());
+        std::fs::write(dir.path().join(CHECKS_FLAG_FILE), b"off\n").unwrap();
+        seed_firefox(
+            dir.path(),
+            &format!("udm-extension-firefox-{VERSION}.zip"),
+            b"running",
+        );
+        seed_firefox(dir.path(), "udm-extension-firefox-0.0.1.zip", b"old");
+        seed_firefox(dir.path(), "udm-extension-firefox-0.0.2.zip", b"newer");
+        seed_firefox(dir.path(), "udm-extension-chrome.zip", b"chrome");
+        let nested = dir.path().join("extension").join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("udm-extension-firefox-0.3.3.zip"), b"nested").unwrap();
+        std::fs::create_dir(
+            dir.path()
+                .join("extension")
+                .join("udm-extension-firefox-9.9.9.zip"),
+        )
+        .unwrap();
+        assert!(cleanup_once(&layout));
+        let ext = dir.path().join("extension");
+        assert_eq!(
+            std::fs::read(ext.join(format!("udm-extension-firefox-{VERSION}.zip"))).unwrap(),
+            b"running"
+        );
+        assert!(!ext.join("udm-extension-firefox-0.0.1.zip").exists());
+        assert!(!ext.join("udm-extension-firefox-0.0.2.zip").exists());
+        assert_eq!(
+            std::fs::read(ext.join("udm-extension-chrome.zip")).unwrap(),
+            b"chrome"
+        );
+        assert_eq!(
+            std::fs::read(nested.join("udm-extension-firefox-0.3.3.zip")).unwrap(),
+            b"nested"
+        );
+        assert!(ext.join("udm-extension-firefox-9.9.9.zip").is_dir());
+    }
+
+    #[test]
+    fn successful_swap_sweeps_older_firefox_archives_only() {
+        let _guard = hold_preferred();
+        let dir = tempfile::tempdir().unwrap();
+        let layout = InstallLayout::new(dir.path());
+        seed_firefox(dir.path(), "udm-extension-firefox-0.3.2.zip", b"old");
+        seed_firefox(dir.path(), "udm-extension-firefox-0.3.3.zip", b"mid");
+        seed_firefox(dir.path(), "udm-extension-firefox-0.3.4.zip", b"pre");
+        seed_firefox(dir.path(), "udm-extension-chrome.zip", b"chrome");
+        let ext = dir.path().join("extension");
+        let nested = ext.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("udm-extension-firefox-0.3.2.zip"), b"nested").unwrap();
+        std::fs::create_dir(ext.join("udm-extension-firefox-1.0.0.zip")).unwrap();
+        std::fs::write(ext.join("chrome").join("keep.js"), b"keep").unwrap_or_else(|_| {
+            std::fs::create_dir_all(ext.join("chrome")).unwrap();
+            std::fs::write(ext.join("chrome").join("keep.js"), b"keep").unwrap();
+        });
+        let target = next_patch_version();
+        let (zip, side) = pair_for(&target);
+        let fetch = |url: &str, _: usize| {
+            if url.ends_with(".sha256") {
+                Ok(side.clone())
+            } else if url.contains("portable.zip") {
+                Ok(zip.clone())
+            } else {
+                Err(Error::new(format!("unexpected {url}")))
+            }
+        };
+        download_and_install_with(&layout, &target, &fetch, &|_| Ok(())).unwrap();
+        assert_eq!(
+            std::fs::read(ext.join(format!("udm-extension-firefox-{target}.zip"))).unwrap(),
+            b"PK-firefox"
+        );
+        assert!(!ext.join("udm-extension-firefox-0.3.2.zip").exists());
+        assert!(!ext.join("udm-extension-firefox-0.3.3.zip").exists());
+        assert_eq!(
+            std::fs::read(ext.join("udm-extension-chrome.zip")).unwrap(),
+            b"chrome"
+        );
+        assert_eq!(
+            std::fs::read(nested.join("udm-extension-firefox-0.3.2.zip")).unwrap(),
+            b"nested"
+        );
+        assert!(ext.join("udm-extension-firefox-1.0.0.zip").is_dir());
+        assert_eq!(
+            std::fs::read(ext.join("chrome").join("keep.js")).unwrap(),
+            b"keep"
+        );
+        // The target is derived from the running VERSION (next patch),
+        // so this test survives version bumps; the sweep keys on the target.
+    }
+
+    #[test]
+    fn failed_gate_and_rolled_back_swap_do_not_sweep() {
+        let _guard = hold_preferred();
+        let dir = tempfile::tempdir().unwrap();
+        let layout = InstallLayout::new(dir.path());
+        seed_firefox(dir.path(), "udm-extension-firefox-0.3.2.zip", b"old");
+        seed_firefox(dir.path(), "udm-extension-firefox-0.3.3.zip", b"mid");
+        let (zip, side) = pair_for("0.3.4");
+        let bad = b"0000000000000000000000000000000000000000000000000000000000000000\n".to_vec();
+        let fetch = |url: &str, _: usize| {
+            if url.ends_with(".sha256") {
+                Ok(bad.clone())
+            } else if url.contains("portable.zip") {
+                Ok(zip.clone())
+            } else {
+                Err(Error::new(format!("unexpected {url}")))
+            }
+        };
+        assert_eq!(
+            download_and_install_with(&layout, "0.3.4", &fetch, &|_| Ok(())).unwrap_err(),
+            Failure::Mismatch
+        );
+        let ext = dir.path().join("extension");
+        assert_eq!(
+            std::fs::read(ext.join("udm-extension-firefox-0.3.2.zip")).unwrap(),
+            b"old"
+        );
+        assert_eq!(
+            std::fs::read(ext.join("udm-extension-firefox-0.3.3.zip")).unwrap(),
+            b"mid"
+        );
+
+        let backup = dir.path().join("udm.exe.old");
+        std::fs::create_dir(&backup).unwrap();
+        std::fs::write(backup.join("block"), b"x").unwrap();
+        let fetch = |url: &str, _: usize| {
+            if url.ends_with(".sha256") {
+                Ok(side.clone())
+            } else if url.contains("portable.zip") {
+                Ok(zip.clone())
+            } else {
+                Err(Error::new(format!("unexpected {url}")))
+            }
+        };
+        let err = download_and_install_with(&layout, "0.3.4", &fetch, &|_| Ok(())).unwrap_err();
+        assert!(
+            matches!(err, Failure::Install { restored: true, .. }),
+            "got {err}"
+        );
+        assert_eq!(
+            std::fs::read(ext.join("udm-extension-firefox-0.3.2.zip")).unwrap(),
+            b"old"
+        );
+        assert_eq!(
+            std::fs::read(ext.join("udm-extension-firefox-0.3.3.zip")).unwrap(),
+            b"mid"
+        );
+        assert!(!ext.join("udm-extension-firefox-0.3.4.zip").exists());
+    }
+
+    #[test]
+    fn gui_and_cli_cleanup_do_not_block_the_caller() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = InstallLayout::new(dir.path());
+        std::fs::write(dir.path().join("udm.exe.old"), b"x").unwrap();
+        let started = std::time::Instant::now();
+        finish_previous_update(&layout);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        for _ in 0..50 {
+            if !dir.path().join("udm.exe.old").exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(!dir.path().join("udm.exe.old").exists());
+
+        let dir = tempfile::tempdir().unwrap();
+        let layout = InstallLayout::new(dir.path());
+        std::fs::write(dir.path().join("udm-cli.exe.old"), b"x").unwrap();
+        finish_previous_update_for_cli(&layout);
+        assert!(!dir.path().join("udm-cli.exe.old").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn held_handle_denies_write_and_delete_through_rename() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = InstallLayout::new(dir.path());
+        let zip = full_zip();
+        let sums = sums_for(&zip, "9.9.9");
+        let saw = Cell::new(0);
+        let verify = |path: &Path| {
+            assert!(winfile::write_denied(path), "write during verification");
+            assert!(winfile::delete_denied(path), "delete during verification");
+            saw.set(saw.get() + 1);
+            Ok(())
+        };
+        let mut staged = accept_and_stage(&zip, &sums, "9.9.9", &layout, &verify).unwrap();
+        assert_eq!(saw.get(), 3);
+        let staging_dir = staged.dir.clone();
+        swap_tree(&layout, &staging_dir, &mut staged.exes).unwrap();
+        let installed = dir.path().join("udm.exe");
+        assert!(winfile::write_denied(&installed), "write after rename");
+        assert!(winfile::delete_denied(&installed), "delete after rename");
+        let held = staged
+            .exes
+            .iter()
+            .find(|exe| exe.path.ends_with("udm.exe"))
+            .unwrap();
+        assert!(winfile::indexes_match(held.handle, &installed).unwrap());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn locked_old_file_is_retried_without_blocking_startup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("udm.exe.old");
+        std::fs::write(&path, b"locked").unwrap();
+        let lock = winfile::lock_exclusive(&path).unwrap();
+        let layout = InstallLayout::new(dir.path());
+        assert!(!cleanup_once(&layout));
+        assert!(path.exists());
+
+        let started = std::time::Instant::now();
+        finish_previous_update(&layout);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert!(path.exists());
+        drop(lock);
+        let mut gone = false;
+        for _ in 0..40 {
+            if !path.exists() {
+                gone = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(gone, "GUI retry did not remove the unlocked backup");
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("udm-host.exe.old");
+        std::fs::write(&path, b"locked").unwrap();
+        let lock = winfile::lock_exclusive(&path).unwrap();
+        let layout = InstallLayout::new(dir.path());
+        let started = std::time::Instant::now();
+        finish_previous_update_for_cli(&layout);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert!(path.exists(), "the first pass leaves a locked file");
+        drop(lock);
+        let mut gone = false;
+        for _ in 0..40 {
+            if !path.exists() {
+                gone = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(gone, "CLI retry did not remove the unlocked backup");
     }
 }

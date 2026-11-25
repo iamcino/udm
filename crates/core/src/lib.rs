@@ -43,7 +43,7 @@
 //! | [`handoff`] | Durable browser ownership transactions and recovery entries. |
 //! | [`handoff_pipe`] | Framing, pairing and Windows per-user named-pipe transport. |
 //! | [`paths`] | Data and default download location discovery, including legacy fallbacks. |
-//! | [`updater`] | Yeager-style update: latest-release check on both hosts, SHA256SUMS + Authenticode SPKI gate, rename swap. |
+//! | [`updater`] | Update check via version.json on both hosts, per-file SHA-256 sidecar + Authenticode SPKI gate, rename swap. |
 //! | [`error`] | Shared errors. |
 //! | [`util`] | Filename, path, byte-count and duration helpers. |
 //!

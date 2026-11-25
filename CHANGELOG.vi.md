@@ -2,6 +2,13 @@
 
 Các thay đổi đáng chú ý của UDM. Tiếng Anh: [CHANGELOG.md](CHANGELOG.md).
 
+## 0.3.3
+
+- **Cơ chế cập nhật, xây lại**: trình cập nhật giờ phát hiện bản mới từ file `version.json` đi kèm mỗi bản phát hành, và phiên bản tối thiểu được chấp nhận (0.3.2) được biên dịch sẵn trong ứng dụng.
+- **Kiểm chứng cập nhật, theo từng file**: file portable zip giờ được kiểm chứng bằng file `.sha256` riêng của nó thay vì `SHA256SUMS.txt`, và việc cài đặt chạy qua một handle giữ khóa từ lúc kiểm chứng tới lúc đổi tên.
+- **Dọn dẹp lúc khởi động, rộng hơn**: dọn dẹp giờ chạy cả cho công cụ dòng lệnh, và trình cập nhật xoá các file extension Firefox cũ (`udm-extension-firefox-*.zip`) trong thư mục cài đặt, chỉ giữ lại bản hiện tại.
+- **Giữ nguyên từ trước**: pin chữ ký SPKI và kiểm tra song song cả hai host phát hành.
+
 ## 0.3.2
 
 - **Thanh bên đã căn thẳng**: các hàng Library và Categories nay thẳng một cột thay vì lệch dần vào giữa.

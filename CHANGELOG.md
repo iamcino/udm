@@ -2,6 +2,13 @@
 
 All notable changes to UDM are listed here. Vietnamese: [CHANGELOG.vi.md](CHANGELOG.vi.md).
 
+## 0.3.3
+
+- **Update mechanism, rebuilt**: the updater now discovers new versions from a `version.json` file published with each release, and a minimum accepted version (0.3.2) is compiled into the app.
+- **Update checks, per file**: the portable zip is now verified against its own `.sha256` sidecar file instead of `SHA256SUMS.txt`, and the install runs through a file handle held locked from verification to rename.
+- **Startup cleanup, wider**: cleanup now runs for the command-line tool too, and the updater removes old Firefox extension archives (`udm-extension-firefox-*.zip`) from the install folder, keeping only the current one.
+- **Kept from before**: the SPKI signature pin and the parallel check of both release hosts.
+
 ## 0.3.2
 
 - **Sidebar, straightened**: the Library and Categories rows now line up in one column instead of drifting toward the middle.

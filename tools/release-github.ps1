@@ -6,9 +6,10 @@
   Releases are built and signed once, by the GitLab release job (tools\release-gitlab.ps1).
   This script copies that release to GitHub so both sites ship byte-identical files:
     1. reads the GitLab release <tag> and downloads every file attached to it
-    2. checks the files against SHA256SUMS.txt, and checks that the installer and every
-       executable inside the portable zip carry the pinned UDM signature
-       (docs\signing\UDM-codesign.cer)
+    2. checks the files against SHA256SUMS.txt, checks the portable zip against its
+       .sha256 sidecar, checks that the GitLab sidecar link keeps the versioned path,
+       and checks that the installer and every executable inside the portable zip carry
+       the pinned UDM signature (docs\signing\UDM-codesign.cer)
     3. creates the GitHub release <tag> with the same name, notes and files
 
   The GitHub workflow .github/workflows/release.yml runs it when a v* tag reaches GitHub
@@ -41,6 +42,7 @@ function Run($exe) {
 }
 
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+. (Join-Path $PSScriptRoot 'release-sidecar.ps1')
 $api = "$GitLab/api/v4/projects/$([Uri]::EscapeDataString($GitLabProject))"
 $env:CODESIGN_PROJECT_NAME = 'UDM'
 $verify = Join-Path $repo 'tools\signing\verify.ps1'
@@ -102,6 +104,14 @@ foreach ($line in Get-Content $sumsFile) {
 $setup = Get-ChildItem $out -Filter 'udm-*-setup.exe' | Select-Object -First 1
 $zip = Get-ChildItem $out -Filter 'udm-*-portable.zip' | Select-Object -First 1
 if (-not $setup -or -not $zip) { throw 'the installer or the portable zip is missing' }
+$sidecarName = "$($zip.Name).sha256"
+$sidecar = Join-Path $out $sidecarName
+if (-not (Test-Path $sidecar)) { throw 'the portable zip sidecar is missing from the GitLab release' }
+Test-PortableSidecar -ZipPath $zip.FullName -SidecarPath $sidecar
+$sideLink = @($release.assets.links) | Where-Object { $_.name -eq $sidecarName } | Select-Object -First 1
+if (-not $sideLink) { throw 'the GitLab release has no sidecar link' }
+Test-VersionedSidecarLink -Link $sideLink -SidecarName $sidecarName
+Write-Host "  $sidecarName OK"
 & $verify -Path $setup.FullName -ExpectedThumbprint $thumb -ProjectName UDM
 $check = Join-Path $repo "target\release-github\$Tag-zip"
 Remove-Item -Recurse -Force $check -ErrorAction SilentlyContinue

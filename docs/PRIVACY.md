@@ -52,13 +52,16 @@ stack to check QUIC availability.
 ## Updates and the built-in updater
 
 The updater is deliberately simple. Every release is published on two
-hosts, GitHub (`iamcino/udm`) and GitLab (`cino-group/udm`). A check asks
-both hosts at the same time where their "latest release" link points and
-reads the version from the answer; the newest version either host has is
-the latest. If one host cannot be reached, the other is enough. A check
-stores nothing: it is a pure read, so checking again gives the same
-answer, and a published version that is not newer than the installed one
-is simply reported as already current.
+hosts, GitHub (`iamcino/udm`) and GitLab (`cino-group/udm`). A check reads
+`version.json` from both hosts at the same time and takes the version
+named in `latestWinVersion`; the newest acceptable version either host
+has is the offer. A version older than the minimum compiled into this
+build is skipped, and the other host is still asked. If one host cannot
+be reached, the other is enough. A check stores nothing: it is a pure
+read, so checking again gives the same answer. A published version that
+is not newer than the installed one is reported as already current. When
+every readable version is below that minimum, the check reports that no
+acceptable update is available; that is not an error.
 
 Three surfaces run a check, all only when update checks resolve on: the
 desktop app's automatic check (once at startup and every 6 hours while
@@ -76,10 +79,11 @@ are off.
 Applying an update is a separate, explicit action - the graphical
 interface's Apply Update button or `udm-cli update apply` - and nothing
 is installed until you invoke it. Apply downloads two files from the
-host the check found the version on (or the other host if that fails):
-`SHA256SUMS.txt` and the portable zip. Acceptance is a fixed gate,
-identical for both hosts: the zip's SHA-256 must match `SHA256SUMS.txt`;
-the zip is then extracted, and every executable in it (`udm.exe`,
+host the check selected: the portable zip and a `.sha256` sidecar next
+to it. The other host is contacted only when that pair could not both
+be fetched. Acceptance is a fixed gate, identical for both hosts: the
+first 64 characters of the sidecar are the zip's SHA-256, checked
+before the zip is extracted; then every executable in it (`udm.exe`,
 `udm-cli.exe`, `udm-host.exe`) must carry an Authenticode signature that
 verifies, whose signer certificate's public key hashes (SHA-256 over
 the SubjectPublicKeyInfo) to the pin compiled into the updater. The
@@ -87,7 +91,7 @@ signing certificate is self-issued, so the pin - not a public root - is
 the trust anchor; a valid RFC 3161 timestamp is also required, and
 validity is judged at signing time, so a countersigned build stays
 acceptable after the signing certificate expires. A tampered zip served
-with recomputed sums still fails the signature gate. Anything that
+with a recomputed sidecar still fails the signature gate. Anything that
 fails is discarded and nothing is installed.
 
 The swap replaces the install tree file by file: each current file
@@ -104,9 +108,10 @@ schedules a check; only the desktop app runs the automatic startup and
 
 ### What an update request looks like
 
-A check sends one HTTPS GET per host to its latest-release address and
-reads the redirect target without following it. An apply sends HTTPS
-GETs for `SHA256SUMS.txt` and the portable zip; redirects are followed,
+A check sends one HTTPS GET per host for `version.json` on that host's
+default branch (`/master/version.json` on GitHub, `/-/raw/master/version.json`
+on GitLab). An apply sends HTTPS GETs for the portable zip and its
+`.sha256` sidecar; redirects are followed,
 so a release CDN can be contacted. A redirect or address that is not
 HTTPS is refused. Requests go through WinHTTP (the operating system's
 HTTP stack, with its proxy configuration), not the download engine's
@@ -119,7 +124,7 @@ request.
 The updater writes only on the install base (the install directory, or
 the portable executable's directory): the checks flag
 `update-checks-enabled` when you toggle checks; one line per check in
-`update-check.log`; the `update-staging` directory while an apply runs
+`update-check.log`; one `update-staging-<unpredictable>` directory while an apply runs
 (removed when it finishes); and the `.old` backups of replaced files
 until the next start removes them. With checks turned off and no apply
 invoked, ordinary use creates none of these. None of this is sent

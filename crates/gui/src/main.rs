@@ -83,11 +83,10 @@ fn main() {
         "udm starting"
     );
 
-    // Updater startup (Yeager model): a previous apply left `.old`
-    // backups of the files it replaced; remove them, and any staging
-    // remnant, on a background thread - the previous process may still
-    // be exiting. Nothing else is reconciled: a check stores nothing,
-    // and there is no swap journal or first-start receipt.
+    // Updater startup: a previous apply left `.old` backups, and may
+    // have left stale Firefox archives. Remove them on a background
+    // thread (120 tries, 500 ms apart). The previous process may still
+    // be exiting. A check stores nothing, and there is no swap journal.
     let update_layout = paths.exe_dir.clone().map(InstallLayout::new);
     // The Apply action sets this flag and quits the event loop; the new
     // exe starts below, after the engine released its databases, so the

@@ -48,8 +48,8 @@ package. The script reads the version from the workspace manifest and
 stages these outputs under `dist\`:
 
 - `udm.exe`, `udm-cli.exe` and `udm-host.exe` (signed with `-Sign`);
-- `udm-0.3.2-setup.exe` unless the installer is skipped;
-- `udm-0.3.2-portable.zip`, containing the executables, `udm.portable`,
+- `udm-0.3.3-setup.exe` unless the installer is skipped;
+- `udm-0.3.3-portable.zip`, containing the executables, `udm.portable`,
   privacy documentation and bundled licence notices.
 
 `build.ps1`, `installer.nsi` and the cross-build script all include
@@ -184,12 +184,22 @@ commits and tags.
 - [`.gitlab-ci.yml`](../.gitlab-ci.yml) runs the tests and a packaged build on
   every push. Its manual `release` job runs `tools/release-gitlab.ps1`, which
   builds, signs (pinned certificate `docs/signing/UDM-codesign.cer`), packages
-  and publishes the GitLab release and creates the `v<version>` tag.
+  and publishes the GitLab release and creates the `v<version>` tag. The job
+  also publishes `udm-<version>-portable.zip.sha256`, hashed from the final
+  portable zip, with that versioned name as the direct download path.
+  `SHA256SUMS.txt` stays a published asset for manual downloads.
 - [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs Linux tests, a
   Slint source check, Windows MSVC packaging and a GNU cross-build.
   [`release.yml`](../.github/workflows/release.yml) runs when a `v*` tag reaches
   GitHub: `tools/release-github.ps1` downloads the GitLab release, checks the
-  hashes and signatures, and publishes the same files on GitHub.
+  hashes, the sidecar, and the signatures, and publishes the same files on GitHub.
+
+A version bump updates these ten files together, and is a separate commit from
+the release job: `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md`, `CHANGELOG.vi.md`,
+`docs/BUILD.md`, `docs/OPERATIONS.md`, `extension/manifest.json`,
+`extension/manifest.firefox.json`, `packaging/windows/installer.nsi`, and
+`version.json` (`versionName` is the new version and `versionCode` increases
+by 1).
 
 A release is: publish the source snapshot (`tools/publish-gitlab-snapshot.ps1
 -Push`, which also mirrors GitLab to GitHub), run the GitLab `release` job, then

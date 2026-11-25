@@ -1,7 +1,12 @@
 <#
 .SYNOPSIS
   Builds and publishes a UDM release on GitLab (cino-group/udm): the per-user installer, the
-  portable zip, SHA256SUMS.txt and LICENSE, with release notes from the changelog.
+  portable zip, its .sha256 sidecar, SHA256SUMS.txt and LICENSE, with release notes from the changelog.
+
+  A version bump updates ten files and is not done here: Cargo.toml, Cargo.lock, CHANGELOG.md,
+  CHANGELOG.vi.md, docs/BUILD.md, docs/OPERATIONS.md, extension/manifest.json,
+  extension/manifest.firefox.json, packaging/windows/installer.nsi, and version.json
+  (versionName is the new version and versionCode increases by 1).
 
 .DESCRIPTION
   Run it from a clone of the public GitLab repository (or inside GitLab CI), never from the
@@ -233,6 +238,12 @@ try {
     }
     [IO.File]::WriteAllText("$out\SHA256SUMS.txt", ($lines -join "`n") + "`n")
     $lines | ForEach-Object { Write-Host "  $_" }
+    # The sidecar is the final zip, after the signature check above. SHA256SUMS.txt stays
+    # the manual-download listing and does not replace this file.
+    . (Join-Path $PSScriptRoot 'release-sidecar.ps1')
+    $sidecar = New-PortableSidecar -ZipPath (Join-Path $out $zip) -OutDir $out
+    $sidecarName = Split-Path $sidecar -Leaf
+    Write-Host "  $sidecarName"
 
     $notes += "`n`n---`n`nRun ``$setup`` to install for the current user (no administrator rights needed), " +
         "or unzip ``$zip`` and run ``udm.exe`` (portable: data stays next to the program). Windows 11 x64. " +
@@ -271,6 +282,9 @@ try {
         $path = if ($stable.ContainsKey($f)) { $stable[$f] } else { $f }
         $links += @{ name = $f; url = $url; direct_asset_path = "/$path"; link_type = $(if ($stable.ContainsKey($f)) { 'package' } else { 'other' }) }
     }
+    $sideLink = $links | Where-Object { $_.name -eq $sidecarName } | Select-Object -First 1
+    if (-not $sideLink) { throw "the sidecar was not added to the release" }
+    Test-VersionedSidecarLink -Link $sideLink -SidecarName $sidecarName
 
     Step "Creating release $tag"
     $body = @{

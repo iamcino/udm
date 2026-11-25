@@ -2898,6 +2898,37 @@ fn dismiss_browser_hint(g: &Rc<Gui>) {
     refresh_browser_rows(g);
 }
 
+/// What the manual check leaves in the session offer. The button clears
+/// the offer when it starts; completion puts it back only for an
+/// available update. NoAcceptableUpdate stays cleared.
+pub(crate) fn offer_after_manual(kind: CheckKind, version: Option<String>) -> Option<String> {
+    if kind == CheckKind::Available {
+        version
+    } else {
+        None
+    }
+}
+
+/// How an automatic check changes a held offer. NoAcceptableUpdate
+/// clears it, the same as AlreadyCurrent, and does not surface an error.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum AutomaticOffer {
+    /// Replace the held offer. `None` means the outcome carried no version.
+    Set(Option<String>),
+    /// Drop the held offer and the badge.
+    Clear,
+    /// Leave the held offer alone (a failed or disabled check).
+    Leave,
+}
+
+pub(crate) fn automatic_offer(kind: CheckKind, version: Option<String>) -> AutomaticOffer {
+    match kind {
+        CheckKind::Available => AutomaticOffer::Set(version),
+        CheckKind::AlreadyCurrent | CheckKind::NoAcceptableUpdate => AutomaticOffer::Clear,
+        CheckKind::Disabled | CheckKind::Failed => AutomaticOffer::Leave,
+    }
+}
+
 /// The manual check (the Check for Updates button): the same factored
 /// check the CLI runs, on a background thread so the UI never blocks.
 /// Unlike the automatic path it clears the offer and result at start, and
@@ -2934,10 +2965,8 @@ fn start_update_check(g: &Rc<Gui>) {
     std::thread::spawn(move || {
         let outcome = run_check_blocking(&layout);
         let _ = slint::invoke_from_event_loop(move || {
-            if outcome.kind == CheckKind::Available {
-                if let Ok(mut slot) = offered.lock() {
-                    *slot = outcome.version.clone();
-                }
+            if let Ok(mut slot) = offered.lock() {
+                *slot = offer_after_manual(outcome.kind, outcome.version.clone());
             }
             let Some(ui) = weak.upgrade() else {
                 running.store(false, Ordering::SeqCst);
@@ -3011,10 +3040,10 @@ fn poll_update_checks(g: &Rc<Gui>) {
 
 /// The automatic check: the same factored check and single-flight guard
 /// as the manual path, but it does NOT clear an offer or result already
-/// on screen. An Available outcome sets the offer; an AlreadyCurrent
-/// outcome clears a stale one (the build was updated another way); any
-/// other kind leaves the UI as it is. It never applies; apply stays a
-/// manual act.
+/// on screen except for the outcomes that mean the held offer is stale.
+/// Available sets the offer. AlreadyCurrent and NoAcceptableUpdate clear
+/// the offer and the badge and do not show an error. Failed and Disabled
+/// leave the UI as it is. It never applies; apply stays a manual act.
 fn start_automatic_check(g: &Rc<Gui>) {
     let Some(layout) = g.update_layout.clone() else {
         return;
@@ -3039,10 +3068,10 @@ fn start_automatic_check(g: &Rc<Gui>) {
     std::thread::spawn(move || {
         let outcome = run_check_blocking(&layout);
         let _ = slint::invoke_from_event_loop(move || {
-            match outcome.kind {
-                CheckKind::Available => {
+            match automatic_offer(outcome.kind, outcome.version.clone()) {
+                AutomaticOffer::Set(version) => {
                     if let Ok(mut slot) = offered.lock() {
-                        *slot = outcome.version.clone();
+                        *slot = version;
                     }
                     if let Some(ui) = weak.upgrade() {
                         ui.set_update_available(true);
@@ -3051,7 +3080,7 @@ fn start_automatic_check(g: &Rc<Gui>) {
                         );
                     }
                 }
-                CheckKind::AlreadyCurrent => {
+                AutomaticOffer::Clear => {
                     if let Ok(mut slot) = offered.lock() {
                         *slot = None;
                     }
@@ -3059,7 +3088,7 @@ fn start_automatic_check(g: &Rc<Gui>) {
                         ui.set_update_available(false);
                     }
                 }
-                _ => {}
+                AutomaticOffer::Leave => {}
             }
             if let Some(ui) = weak.upgrade() {
                 ui.set_update_check_busy(false);
@@ -3070,7 +3099,7 @@ fn start_automatic_check(g: &Rc<Gui>) {
 }
 
 /// The explicit Apply action: download the offered build, verify it
-/// (SHA256SUMS hash, then the Authenticode + SPKI gate on every
+/// (per-file .sha256 sidecar hash, then the Authenticode + SPKI gate on every
 /// executable), swap it into the install tree, then relaunch into the
 /// new build. Runs on a worker thread; the outcome returns through the
 /// event loop. A failure changes nothing outside the staging directory
@@ -3788,6 +3817,45 @@ mod update_schedule_tests {
         assert_eq!(s.clock_base, tm);
         assert!(!s.due(tm + SIX_H - ONE_S, false, true));
         assert!(s.due(tm + SIX_H, false, true));
+    }
+
+    #[test]
+    fn manual_check_clears_a_below_floor_offer() {
+        assert_eq!(
+            offer_after_manual(CheckKind::NoAcceptableUpdate, None),
+            None
+        );
+        assert_eq!(
+            offer_after_manual(CheckKind::Available, Some("0.3.4".into())),
+            Some("0.3.4".into())
+        );
+        assert_eq!(offer_after_manual(CheckKind::Failed, None), None);
+    }
+
+    #[test]
+    fn automatic_check_clears_a_stale_offer_without_an_error_notice() {
+        assert_eq!(
+            automatic_offer(CheckKind::NoAcceptableUpdate, None),
+            AutomaticOffer::Clear
+        );
+        assert_eq!(
+            automatic_offer(CheckKind::AlreadyCurrent, Some("0.3.2".into())),
+            AutomaticOffer::Clear
+        );
+        assert_eq!(
+            automatic_offer(CheckKind::Available, Some("0.3.4".into())),
+            AutomaticOffer::Set(Some("0.3.4".into()))
+        );
+        assert_eq!(
+            automatic_offer(CheckKind::Failed, None),
+            AutomaticOffer::Leave
+        );
+        // Clear does not carry notice text. The automatic completion
+        // sets the result string only for AutomaticOffer::Set.
+        assert!(matches!(
+            automatic_offer(CheckKind::NoAcceptableUpdate, None),
+            AutomaticOffer::Clear
+        ));
     }
 
     #[test]
