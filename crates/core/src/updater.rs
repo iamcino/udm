@@ -78,7 +78,7 @@ impl Source {
     fn version_json_url(self) -> &'static str {
         match self {
             Source::GitHub => "https://raw.githubusercontent.com/iamcino/udm/master/version.json",
-            Source::GitLab => "https://gitlab.com/cino-group/udm/-/raw/master/version.json",
+            Source::GitLab => "https://gitlab.com/cino-group/udm/-/raw/main/version.json",
         }
     }
 
@@ -2486,6 +2486,21 @@ mod tests {
         assert_eq!(parse_version("v0.3.3"), Some((0, 3, 3)));
         assert_eq!(parse_version(" 0.3.3 "), Some((0, 3, 3)));
         assert!(easykey_version_number("v0.3.3").is_none());
+    }
+
+    #[test]
+    fn discovery_urls_point_at_each_hosts_default_branch() {
+        // The public GitHub repo defaults to master, the public GitLab
+        // repo defaults to main (its only branch). A wrong branch here
+        // makes that host fail every discovery silently.
+        assert_eq!(
+            Source::GitHub.version_json_url(),
+            "https://raw.githubusercontent.com/iamcino/udm/master/version.json"
+        );
+        assert_eq!(
+            Source::GitLab.version_json_url(),
+            "https://gitlab.com/cino-group/udm/-/raw/main/version.json"
+        );
     }
 
     #[test]
